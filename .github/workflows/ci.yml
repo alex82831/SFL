@@ -54,15 +54,12 @@ jobs:
           test "$("$bin" -e 'println(6 * 7)')" = "42"
           "$bin" --version
 
-      # The full suites report but do not gate yet, while their behaviour on the
-      # runners (locale, timing) is settled. Output is captured so a failure can be
-      # read from the uploaded artifact.
+      # The full suites gate CI; output is captured so a failure can be read
+      # from the uploaded artifact without credentials.
       - name: JUnit tests
-        continue-on-error: true
         run: sbt test 2>&1 | tee junit-${{ matrix.os }}.log
 
       - name: Behaviour, compiler and package suites
-        continue-on-error: true
         run: ./tests/run.sh 2>&1 | tee suites-${{ matrix.os }}.log
 
       - name: Upload test logs
