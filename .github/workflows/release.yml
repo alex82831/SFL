@@ -20,10 +20,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14,     asset: sfl-macos-arm64 }
-          - { os: macos-13,     asset: sfl-macos-x86_64 }
+          - { os: macos-15,       asset: sfl-macos-arm64 }
+          - { os: macos-15-intel, asset: sfl-macos-x86_64 }
           - { os: ubuntu-latest, asset: sfl-linux-x86_64 }
     runs-on: ${{ matrix.os }}
+    # A retired runner label queues forever; a bounded wait fails fast instead,
+    # and the release job publishes whatever platforms did build.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
