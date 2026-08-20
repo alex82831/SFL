@@ -159,6 +159,7 @@ sfl -e '<代码>'            直接执行一段代码
 | --- | --- | --- |
 | `sfl build [任务]` | 项目构建工具：脚手架、增量编译、测试、打包；项目文件 build.sfl 用 SFL 编写 | [项目与构建指南](SFL-项目与构建指南.md) |
 | `sfl pkg …` | 包管理：打包（`--bin` 附带本平台编译归档，编译方免重编）/ 安装 / 列出 / 删除 | `sfl pkg --help` |
+| `sfl install <名字\|git-url>` | 从 GitHub git 仓库或 registry 名安装包 | 见 §5.13 |
 | `sfl check [--json] <文件…>` | 只解析不执行，报告诊断；给编辑器与 CI 用 | — |
 | `sfl syntax` | 输出关键字、操作符与内置函数元数据（JSON）；编辑器词表由它生成 | — |
 | `sfl lsp` | 在标准输入输出上提供语言服务器协议（诊断、补全、悬停、签名） | — |
@@ -1061,6 +1062,36 @@ sfl pkg remove mathx@1.2.0
 
 包对语言不引入任何新语义:解析结果就是一个文件,`_` 私有名、`as` 别名、编译器
 (import 在解析期内联)全部照常工作——编译产物与解释器逐字节一致由差分测试盯着。
+
+#### 从 git 仓库或 registry 安装
+
+`sfl install`(即 `sfl pkg install`)的来源除了本地目录和 `.sflpkg`,还可以是一个
+**git 仓库**或一个 **registry 短名**:
+
+```bash
+sfl install github.com/owner/repo                     # 克隆并安装
+sfl install github.com/owner/repo/pkg/mathx@v1.2.0    # 仓库子目录 + 标签
+sfl install git@github.com:owner/repo#pkg/mathx       # 私有仓库,走你的 SSH key
+sfl install mathx                                     # registry 短名
+sfl install mathx@1.2.0                               # 指定版本
+```
+
+- **传输一律走 `git clone`**:public 仓库零凭证,private 仓库用你**自己配好的 git
+  认证**(SSH key 或凭证助手)——SFL 自己从不经手 token,也避开匿名 API 的限速。需要
+  本机装了 `git`。
+- **子目录**:github 形式把 `owner/repo` 之后的路径当子目录;任意形式都可用 `#子目录`
+  片段(如私有仓库 `git@host:owner/repo#packages/mathx`)。子目录里含 `..` 或绝对路径
+  会被拒(防路径穿越)。
+- **版本**:`@<tag|branch|commit>` 指定 ref。ref 形如 `v1.2.0` 时会与仓库里 `sfl.pkg`
+  的 version **交叉校验**,不符即拒——否则包会以它并不声明的版本参与后续的 semver 决策。
+  分支/哈希则以 `sfl.pkg` 为准,安装那行回显真实版本。
+- **短名**:`sfl install <名>` 到 registry 索引里查名字→git 源。默认索引是
+  `SFL_REGISTRY`(缺省指向官方仓库的 `registry.json`),可用该环境变量换成你自己的。
+- 下载物先落到临时目录、清单校验通过后才进包根;**不拉 submodule**(不支持);从
+  git 装即运行别人的源码,只装可信来源。
+
+装完就是 `$SFL_HOME/packages/` 下一个普通目录,扁平模型、版本冲突报错、`import`
+全部照常。
 
 #### 预编译的二进制包
 

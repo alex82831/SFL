@@ -201,6 +201,15 @@ else
   fails=$((fails + 1))
 fi
 
+# Installing from a git source or a registry name, over local git repositories.
+echo
+if out=$(./binstall/run.sh 2>&1); then
+  printf '%s\n' "$out" | tail -1
+else
+  printf '%s\n' "$out"
+  fails=$((fails + 1))
+fi
+
 # --------------------------------------------------------------- the compiler
 
 echo

@@ -44,13 +44,13 @@ object Main:
        |  'sfl build --help' explains the rest.
        |
        |${Ansi.bold}Packages${Ansi.reset}
+       |  sfl install <src> [--local] [--force]     Install a package (shorthand for pkg install)
        |  sfl pkg build [--bin] [dir]               Pack a package (--bin compiles it too)
-       |  sfl pkg install <src> [--local] [--force] Install a .sflpkg or a package directory
-       |  sfl pkg list                              List installed packages
-       |  sfl pkg remove <name>[@version]           Remove one version, or every version
+       |  sfl pkg list / remove <name>[@version]    List or remove installed packages
        |
-       |  import "name" loads an installed package's main module, and "name/mod" a
-       |  module within it; versions come from the deps ranges in sfl.pkg.
+       |  A source is a local directory or .sflpkg, a git URL
+       |  (github.com/owner/repo[/subdir][@ref]), or a registry name. import "name"
+       |  then loads it; versions come from the deps ranges in sfl.pkg.
        |
        |${Ansi.bold}Tooling${Ansi.reset}
        |  sfl check [--json] <files…>  Parse files and report problems without running
@@ -99,6 +99,8 @@ object Main:
     // the option parser can mistake their names for a script. A script that really is
     // called `check` still runs as `sfl ./check` or `sfl check.sfl`.
     if args.nonEmpty && args(0) == "pkg" then sys.exit(PkgTool.cli(args.toList.drop(1)))
+    // `sfl install …` is a shorthand for `sfl pkg install …`, the common case.
+    if args.nonEmpty && args(0) == "install" then sys.exit(PkgTool.cli("install" :: args.toList.drop(1)))
     if args.nonEmpty && args(0) == "check" then sys.exit(IdeTool.checkCli(args.toList.drop(1)))
     if args.nonEmpty && args(0) == "syntax" then sys.exit(IdeTool.syntaxCli(args.toList.drop(1)))
     if args.nonEmpty && args(0) == "lsp" then sys.exit(Lsp.cli(args.toList.drop(1)))

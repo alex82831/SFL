@@ -1,0 +1,13 @@
+{
+  "registry": "sfl-official",
+  "note": "The standard package suite, served from this repository's packages/ directory. 'sfl install <name>' resolves a name here to a git source; override the index with SFL_REGISTRY.",
+  "packages": {
+    "mongodb":  { "git": "github.com/alex82831/SFL", "subdir": "packages/mongodb" },
+    "datetime": { "git": "github.com/alex82831/SFL", "subdir": "packages/datetime" },
+    "csv":      { "git": "github.com/alex82831/SFL", "subdir": "packages/csv" },
+    "uuid":     { "git": "github.com/alex82831/SFL", "subdir": "packages/uuid" },
+    "cli":      { "git": "github.com/alex82831/SFL", "subdir": "packages/cli" },
+    "log":      { "git": "github.com/alex82831/SFL", "subdir": "packages/log" },
+    "redis":    { "git": "github.com/alex82831/SFL", "subdir": "packages/redis" }
+  }
+}

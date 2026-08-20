@@ -288,8 +288,10 @@ sfl build && scp build/hello server:/usr/local/bin/
 
 ```bash
 sfl build pkg                        # 或 sfl pkg build . → mathkit-1.2.0.sflpkg
-sfl pkg install mathkit-1.2.0.sflpkg           # 装到 $SFL_HOME/packages/（全局）
-sfl pkg install mathkit-1.2.0.sflpkg --local   # 装到 ./sfl_packages/（项目级，遮蔽全局）
+sfl install mathkit-1.2.0.sflpkg               # 装到 $SFL_HOME/packages/（全局）
+sfl install mathkit-1.2.0.sflpkg --local       # 装到 ./sfl_packages/（项目级，遮蔽全局）
+sfl install github.com/owner/mathkit           # 直接从 git 仓库克隆并安装
+sfl install mathkit                            # registry 短名（见下）
 sfl pkg list / remove                # 管理
 ```
 
@@ -315,8 +317,16 @@ import "mathkit/matrix"   // 包内指定模块
 多平台分发就在各平台分别跑 `--bin` 构建同版本包（`bin/` 按目标隔离），
 或干脆只发源码包，让使用方的首次编译自己付一次。
 
-分发渠道现状：`.sflpkg` 是 tar.gz 文件，**通过任何文件渠道分发**（发布页、
-制品库、git tag 附件）；中心化 registry、锁文件与校验和在路线图上
+分发渠道现状：
+
+- **git 仓库直装**：`sfl install <git-url>`——公开仓库零凭证，私有仓库走用户自己的
+  SSH 配置；传输就是 `git clone`；
+- **registry 短名**：`sfl install <名字>` 查短名索引（默认仓库根的 `registry.json`，
+  `SFL_REGISTRY` 可覆盖为你自己的索引）；
+- **`.sflpkg` 文件**：tar.gz，仍可通过任何文件渠道手工分发（发布页、制品库、
+  git tag 附件）。
+
+中心化 registry 服务器、锁文件与校验和仍在路线图上
 （见 [评估-IDE-插件与构建工具.md](评估-IDE-插件与构建工具.md) 第 3.4 节）。
 
 ### 9.3 CI 示例

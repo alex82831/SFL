@@ -12,14 +12,26 @@
 ## 安装
 
 ```bash
-# 从源码目录装(项目本地,压过全局)
-sfl pkg install packages/mongodb --local
+# 从 GitHub 直接装(registry 短名,解析到官方仓库对应子目录)
+sfl install mongodb
 
-# 或先预编译再装到全局
-cd packages/mongodb && sfl pkg build --bin . && sfl pkg install mongodb-0.1.0.sflpkg
+# 或指定 git 源与子目录(任意仓库;私有仓库走你的 SSH key)
+sfl install github.com/alex82831/SFL/packages/mongodb
+sfl install git@github.com:alex82831/SFL.git#packages/datetime
+
+# 从本地源码目录装(项目本地,压过全局)
+sfl install packages/mongodb --local
+
+# 或先预编译再装
+cd packages/mongodb && sfl pkg build --bin . && sfl install mongodb-0.1.0.sflpkg
 
 sfl pkg list        # 看装了什么
 ```
+
+`sfl install`(即 `sfl pkg install`)的来源可以是本地目录、`.sflpkg`、git 仓库
+(`github.com/owner/repo[/子目录][@ref]`,或 `#子目录` 片段)或 registry 短名;
+传输走 `git clone`,详见 [SFL-使用手册.md](SFL-使用手册.md) §5.13「从 git 仓库或
+registry 安装」。
 
 装好后按名字引用:
 

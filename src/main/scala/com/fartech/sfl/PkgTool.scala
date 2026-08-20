@@ -207,12 +207,21 @@ object PkgTool:
        |${Ansi.bold}Usage${Ansi.reset}
        |  sfl pkg build [--bin] [dir]               Pack a package into <name>-<version>.sflpkg
        |                                            (--bin also compiles it for this platform)
-       |  sfl pkg install <src> [--local] [--force] Install a .sflpkg file or a package directory
+       |  sfl pkg install <src> [--local] [--force] Install a package
        |  sfl pkg list                              List installed packages, the project root first
        |  sfl pkg remove <name>[@version]           Remove one version, or every version
        |
+       |${Ansi.bold}Install sources${Ansi.reset} (sfl install <src> is a shorthand for sfl pkg install)
+       |  a directory              ./mathkit                 a local package directory
+       |  a .sflpkg file           mathkit-1.2.0.sflpkg       a packed archive
+       |  a git URL                github.com/owner/repo      clones and installs it
+       |                           github.com/owner/repo/pkg/mathkit@v1.2.0   a subdir at a tag
+       |                           git@github.com:owner/repo  private, over your SSH key
+       |  a registry name          mathkit  /  mathkit@1.2.0  looked up in the registry
+       |
        |Packages install into $$SFL_HOME/packages/<name>/<version>/, or into
        |./sfl_packages/... with --local. The local root shadows the global one.
+       |Git sources need `git`; registry names resolve through $$SFL_REGISTRY.
        |""".stripMargin
 
   /** Runs one `sfl pkg` invocation; the return value is the process exit code
@@ -268,7 +277,8 @@ object PkgTool:
   private def build(args: List[String]): Int =
     var bin = false
     var dirs = List.empty[String]
-    for a <- args do a match
+    val it = args.iterator
+    while it.hasNext do it.next() match
       case "--bin"                => bin = true
       case s if s.startsWith("-") => return usageError(s"unknown option '$s' for pkg build")
       case s                      => dirs = s :: dirs
@@ -321,17 +331,27 @@ object PkgTool:
       case one :: Nil => one
       case _          => return usageError("pkg install needs exactly one .sflpkg file or package directory")
 
+    // A source is one of: a local package directory, a local .sflpkg archive, or a
+    // remote — a git URL or a registry short name that is fetched into a temp tree
+    // and then installed exactly like a local directory. `cleanup`, when set, is the
+    // temp tree to remove afterwards.
     val srcFile = new File(src)
-    val (stage, isStaged) =
-      if srcFile.isDirectory then (srcFile, false)
+    val (stage, cleanup) =
+      if srcFile.isDirectory then (srcFile, None)
       else if srcFile.isFile then
         val tmp = makeTempDir()
         val (code, log) = run(Seq("tar", "-xzf", srcFile.getPath, "-C", tmp.getPath))
         if code != 0 then
           rmTree(tmp)
           bad(s"cannot unpack '$src'", log.trim.linesIterator.take(4).toList*)
-        (tmp, true)
-      else bad(s"cannot open '$src'")
+        (tmp, Some(tmp))
+      else
+        Remote.fetch(src) match
+          case Some((dir, root)) => (dir, Some(root))
+          case None =>
+            bad(s"cannot open '$src'",
+              "give a package directory, a .sflpkg file, a git URL " +
+                "(github.com/owner/repo[/subdir][@ref]), or a registry name")
 
     try
       val m = readManifest(stage)
@@ -351,7 +371,7 @@ object PkgTool:
         bad(s"cannot copy the package into ${dest.getPath}", log.trim)
       println(s"installed ${m.name} ${m.version} -> ${dest.getPath}")
       0
-    finally if isStaged then rmTree(stage)
+    finally cleanup.foreach(rmTree)
 
   private def list(args: List[String]): Int =
     if args.nonEmpty then return usageError("pkg list takes no arguments")
@@ -552,3 +572,204 @@ object PkgTool:
       abi.sfl == currentSfl && abi.target == targetTriple &&
         abi.runtimeDigest == currentRuntimeDigest &&
         abi.stdlibDigest == currentStdlibDigest && abi.buildId == currentBuildId
+
+  // -------------------------------------------------------------------------
+  // Remote sources: install from a git repository or a registry name
+  //
+  // `install` hands anything that is not a local directory or .sflpkg here. A git
+  // URL is cloned; a bare name is looked up in a registry (a small JSON index,
+  // fetched over HTTPS) that maps it to a git URL. Either way the result is a
+  // directory `install` treats exactly like a local one — which is what keeps
+  // remote sources orthogonal to the rest of the tool.
+  //
+  // The transport is `git clone`, deliberately: it works for public repositories
+  // with no credentials and for private ones through the user's own git auth, so
+  // this tool never handles a token; and it sidesteps the anonymous API rate limit.
+  // Everything lands in a temp tree first and is validated before a byte reaches
+  // the package roots, and a subdirectory is refused if it tries to escape the
+  // clone — installing a package runs its code, so the path to it is checked.
+  // -------------------------------------------------------------------------
+
+  object Remote:
+
+    /** Where `sfl install <name>` resolves short names; override for another index. */
+    def registryUrl: String =
+      sys.env.getOrElse("SFL_REGISTRY",
+        "https://raw.githubusercontent.com/alex82831/SFL/main/registry.json")
+
+    /** A resolved git source: what to clone, an optional subdirectory within it that
+      * holds the package, and an optional tag/branch/commit to check out. */
+    final case class GitSource(url: String, subdir: Option[String], ref: Option[String])
+
+    /**
+     * Fetches `src` into a temp tree. Returns (the package directory to install,
+     * the temp root to delete afterwards), or None when `src` is not a git URL and
+     * not a valid registry name — so `install` can report a plain "cannot open".
+     */
+    def fetch(src: String): Option[(File, File)] =
+      parseGitSource(src) match
+        case Some(gs) => Some(cloneStage(gs, src))
+        case None =>
+          val (name, ref) = splitRef(src)
+          if isValidName(name) then Some(cloneStage(resolveShortName(name, ref), src))
+          else None
+
+    // ---- git source syntax --------------------------------------------------
+
+    /**
+     * Splits a trailing `@ref` off a source. The `git@host:` of an scp-style URL is
+     * not a ref: that `@` has a ':' after it and nothing path-like before it.
+     */
+    private def splitRef(spec: String): (String, Option[String]) =
+      val at = spec.lastIndexOf('@')
+      if at <= 0 then (spec, None)
+      else
+        val before = spec.substring(0, at)
+        val after = spec.substring(at + 1)
+        if !before.contains('/') && !before.contains(':') && after.contains(':') then (spec, None)
+        else (before, Some(after))
+
+    private def isScpLike(s: String): Boolean =
+      s.matches("^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:.*")
+    private def isOwnerRepo(s: String): Boolean =
+      s.matches("^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._.-]*(/.*)?$")
+
+    /** github.com paths carry the package's subdirectory after `owner/repo`. */
+    private def githubFrom(path: String, ref: Option[String]): Option[GitSource] =
+      val segs = path.split('/').filter(_.nonEmpty)
+      if segs.length < 2 then None
+      else
+        val url = s"https://github.com/${segs(0)}/${segs(1).stripSuffix(".git")}.git"
+        val sub = if segs.length > 2 then Some(sanitizeSubdir(segs.drop(2).mkString("/"))) else None
+        Some(GitSource(url, sub, ref))
+
+    /**
+     * Recognises a git source. `git+<url>` forces git on any URL (file:// included,
+     * which the tests use); github.com is special-cased so a subdirectory can ride
+     * in the path; other schemes and scp-style URLs pass through whole; and a bare
+     * `owner/repo` is github shorthand. Anything else is None — a registry name, or
+     * a mistake `install` will report.
+     */
+    private def parseGitSource(spec0: String): Option[GitSource] =
+      // A `#subdir` fragment (the last suffix) points at a package within the repo
+      // for any URL form — the github path already carries one, but an SSH or a
+      // plain git URL has nowhere else to put it.
+      val hash = spec0.lastIndexOf('#')
+      val (spec, frag) =
+        if hash > 0 then (spec0.substring(0, hash), Some(sanitizeSubdir(spec0.substring(hash + 1))))
+        else (spec0, None)
+      val (base, ref) = splitRef(spec)
+      val parsed =
+        if base.startsWith("git+") then Some(GitSource(base.substring(4), None, ref))
+        else if base.startsWith("https://github.com/") then githubFrom(base.stripPrefix("https://github.com/"), ref)
+        else if base.startsWith("http://github.com/") then githubFrom(base.stripPrefix("http://github.com/"), ref)
+        else if base.startsWith("github.com/") then githubFrom(base.stripPrefix("github.com/"), ref)
+        else if base.startsWith("https://") || base.startsWith("http://") ||
+                base.startsWith("ssh://") || base.startsWith("git://") then Some(GitSource(base, None, ref))
+        else if isScpLike(base) then Some(GitSource(base, None, ref))
+        else if isOwnerRepo(base) then githubFrom(base, ref)
+        else None
+      parsed.map(gs => if frag.isDefined then gs.copy(subdir = frag) else gs)
+
+    /** Refuses a subdirectory that is absolute or climbs out of the clone. */
+    private def sanitizeSubdir(s: String): String =
+      if s.startsWith("/") || s.split('/').exists(_ == "..") then
+        bad(s"unsafe package subdirectory '$s'",
+          "a subdirectory within a repository must not be absolute or contain '..'")
+      s
+
+    // ---- fetching -----------------------------------------------------------
+
+    /** A ref that names a version, so it can be checked against the manifest. */
+    private val VersionTag = "^v?(\\d+\\.\\d+\\.\\d+)$".r
+
+    private def requireGit(): Unit =
+      val (code, _) = run(Seq("git", "--version"))
+      if code != 0 then
+        bad("git is needed to install a package from a repository",
+          "install git (on macOS: xcode-select --install), " +
+            "or install from a local .sflpkg file or a directory instead")
+
+    private def cloneStage(gs: GitSource, label: String): (File, File) =
+      requireGit()
+      val tmp = makeTempDir()
+      try
+        cloneInto(gs, tmp)
+        val stage = gs.subdir match
+          case Some(sub) => new File(tmp, sub)
+          case None      => tmp
+        if !stage.isDirectory then
+          bad(s"'$label': the repository has no directory '${gs.subdir.getOrElse(".")}'",
+            s"cloned ${gs.url}${gs.ref.fold("")(r => s" at $r")}")
+        // A version-tag ref must agree with the manifest. The flat resolver decides
+        // semver ranges from the installed version directory's name, so a package
+        // fetched at @v1.2.0 whose sfl.pkg says otherwise would take part in every
+        // later decision under a version it never claimed.
+        gs.ref match
+          case Some(VersionTag(v)) =>
+            val m = readManifest(stage)
+            if m.version.toString != v then
+              bad(s"'$label': the ref asks for $v but the package's sfl.pkg says ${m.version}",
+                "install the ref whose sfl.pkg matches, or drop the version from the ref")
+          case _ => ()
+        (stage, tmp)
+      catch
+        case e: Throwable => rmTree(tmp); throw e
+
+    private def cloneHint(url: String): String =
+      if url.startsWith("https://github.com/") then
+        "if the repository is private, use its SSH URL (git@github.com:owner/repo) so git uses your key"
+      else "check the URL and that you can reach it"
+
+    private def cloneInto(gs: GitSource, tmp: File): Unit =
+      val shallow = Seq("git", "clone", "--depth", "1", "--quiet")
+      val (code, log) = gs.ref match
+        case Some(r) => run(shallow ++ Seq("--branch", r, gs.url, tmp.getPath))
+        case None    => run(shallow ++ Seq(gs.url, tmp.getPath))
+      if code != 0 then
+        gs.ref match
+          case Some(r) =>
+            // --branch takes only a name; a bare commit sha needs a full clone.
+            Option(tmp.listFiles()).getOrElse(Array.empty[File]).foreach(rmTree)
+            val (c2, l2) = run(Seq("git", "clone", "--quiet", gs.url, tmp.getPath))
+            if c2 != 0 then
+              bad(s"cannot clone ${gs.url}", (cloneHint(gs.url) +: l2.trim.linesIterator.take(3).toList)*)
+            val (c3, l3) = run(Seq("git", "-C", tmp.getPath, "checkout", "--quiet", r))
+            if c3 != 0 then
+              bad(s"cannot check out '$r' from ${gs.url}", l3.trim.linesIterator.take(3).toList*)
+          case None =>
+            bad(s"cannot clone ${gs.url}", (cloneHint(gs.url) +: log.trim.linesIterator.take(3).toList)*)
+
+    // ---- registry -----------------------------------------------------------
+
+    private def resolveShortName(name: String, ref: Option[String]): GitSource =
+      val reg = fetchRegistry()
+      val pkgs = reg.fields.get("packages") match
+        case Some(o: VObj) => o
+        case _ => bad(s"the registry at $registryUrl has no 'packages' object")
+      pkgs.fields.get(name) match
+        case Some(o: VObj) =>
+          val git = o.fields.get("git") match
+            case Some(VStr(g)) => g
+            case _ => bad(s"the registry entry for '$name' has no 'git' source")
+          val regSub = o.fields.get("subdir").collect { case VStr(s) => sanitizeSubdir(s) }
+          val regRef = o.fields.get("ref").collect { case VStr(s) => s }
+          parseGitSource(git) match
+            case Some(gs) => GitSource(gs.url, regSub.orElse(gs.subdir), ref.orElse(regRef).orElse(gs.ref))
+            case None     => bad(s"the registry entry for '$name' has an unusable git source '$git'")
+        case _ =>
+          bad(s"package '$name' is not in the registry",
+            s"the registry is $registryUrl (override with SFL_REGISTRY)",
+            "or give a git URL directly, e.g. 'sfl install github.com/owner/repo'")
+
+    private def fetchRegistry(): VObj =
+      val (code, body) = run(Seq("curl", "-fsSL", "--max-time", "20", registryUrl))
+      if code != 0 then
+        bad(s"cannot fetch the package registry",
+          (s"tried $registryUrl (override with SFL_REGISTRY)" +:
+            body.trim.linesIterator.take(2).toList)*)
+      try
+        Json.parse(body) match
+          case o: VObj => o
+          case _       => bad(s"the registry at $registryUrl is not a JSON object")
+      catch case e: SflError => bad(s"the registry at $registryUrl is not valid JSON: ${e.getMessage}")
