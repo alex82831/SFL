@@ -1,0 +1,24 @@
+project({
+  "name": "gui-task-board",
+  "version": "0.1.0",
+  "main": "src/main.sfl"
+})
+
+task("setup", (args) -> {
+  // gui depends on httpd, so both go in.
+  for (name in ["httpd", "gui"]) {
+    val local = "../../packages/" + name
+    val code = if (isDir(local))
+      then passthrough(exePath(), ["pkg", "install", "--force", "--local", local])
+      else passthrough(exePath(), ["install", name])
+    if (code != 0) { return code }
+  }
+  0
+}, "Install the packages this example imports")
+
+task("serve", (args) -> {
+  // Headless: serve without opening a window, for a remote machine or a
+  // container. Point a browser at the URL it prints.
+  setEnv("SFL_GUI_NO_WINDOW", "1")
+  passthrough(exePath(), ["src/main.sfl"])
+}, "Run the board without opening a window")

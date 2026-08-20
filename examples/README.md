@@ -1,6 +1,6 @@
 # SFL examples
 
-Thirty-two small, self-contained SFL projects, each demonstrating one part
+Thirty-three small, self-contained SFL projects, each demonstrating one part
 of the language, the tooling or the standard package suite. Every directory
 is a complete project — `build.sfl`, sources, tests, its own README — that
 opens directly in VSCode (SFL extension) or IntelliJ IDEA (SFL plugin) and
@@ -70,6 +70,12 @@ this repository's `packages/` when run inside a checkout, from the registry
 | [25-httpd-rest-api](25-httpd-rest-api/) | REST CRUD with middleware: **httpd** + **jwt** + **uuid** + **log** |
 | [26-websocket-chat](26-websocket-chat/) | a WebSocket chat room, browser client included |
 | [27-sse-ticker](27-sse-ticker/) | server-sent events with `respondEvents` |
+
+## Desktop
+
+| example | shows |
+| --- | --- |
+| [33-gui-task-board](33-gui-task-board/) | a **gui** desktop app: signals shared across windows vs private to one, keyed lists, background tasks — tested headlessly |
 
 ## Databases and mail
 

@@ -1,0 +1,21 @@
+// A desktop task board in ~150 lines of SFL: run() serves the app on
+// loopback, opens a native-feeling window, and blocks until the last window
+// closes. Open a second window (or a second browser tab on the same URL) to
+// watch both stay in step — the task list is one module-level signal.
+
+import "gui"
+import "board"
+
+boardLoad(getEnv("BOARD_FILE") ?? "board.json")
+
+val app = guiApp({
+  title: "Task board",
+  root: boardUi,
+  window: {width: 720, height: 620},
+  theme: {accent: "#3c6df0", radius: "8px"},
+  dark: "auto"
+})
+
+println("board file: " + (getEnv("BOARD_FILE") ?? "board.json"))
+app.run()
+println("all windows closed — the board is saved")

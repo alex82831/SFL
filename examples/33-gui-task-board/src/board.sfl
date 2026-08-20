@@ -1,0 +1,171 @@
+// The task board: its state, its persistence, and the UI that renders it.
+//
+// The split that matters is where a signal lives:
+//
+//   * `tasks` is a MODULE-LEVEL signal, so every window shares it — add a
+//     task in one and it appears in the others, with no broadcast, no
+//     subscription, no message plumbing. That is the whole mechanism.
+//   * the signals created inside `boardUi` are SESSION-LEVEL: the builder
+//     runs once per window, so each window gets its own draft text and its
+//     own filter while looking at the same task list.
+
+import "gui"
+
+// ------------------------------------------------------------------ state
+
+val tasks = signal([])                  // [{id, title, priority, done}]
+val _store = {path: null}
+val _nextId = atomic(0)
+
+// Points the board at a JSON file and loads it (seeding a fresh one).
+def boardLoad(path) {
+  _store.path = path
+  if (isFile(path)) {
+    val loaded = jsonParse(readFile(path))
+    tasks.set(loaded)
+    for (t in loaded) {
+      if (t.id > atomicGet(_nextId)) then atomicSet(_nextId, t.id)
+    }
+  } else {
+    tasks.set([])
+    boardAdd("Read the SFL manual", "normal")
+    boardAdd("Try the gui package", "high")
+  }
+  tasks.get()
+}
+
+def _persist() {
+  if (_store.path != null) then writeFile(_store.path, jsonStringify(tasks.get()))
+  null
+}
+
+def boardAdd(title, priority = "normal") {
+  val clean = trim(title)
+  if (clean == "") then return null
+  val task = {id: atomicAdd(_nextId, 1), title: clean, priority: priority, done: false}
+  // mutate edits the array in place and always notifies — that is what
+  // makes every window redraw.
+  tasks.mutate((xs) -> push(xs, task))
+  _persist()
+  task
+}
+
+def boardSet(id, done) {
+  tasks.mutate((xs) -> {
+    for (t in xs) {
+      if (t.id == id) then t.done = done
+    }
+  })
+  _persist()
+  null
+}
+
+def boardRemove(id) {
+  tasks.update((xs) -> filter(xs, (t) -> t.id != id))
+  _persist()
+  null
+}
+
+def boardClearDone() {
+  val before = length(tasks.get())
+  tasks.update((xs) -> filter(xs, (t) -> !t.done))
+  _persist()
+  before - length(tasks.get())
+}
+
+def boardOpen() = count(tasks.get(), (t) -> !t.done)
+
+// ---------------------------------------------------------------- the UI
+
+// One root builder, run once per window. `ctx` is that window's handle.
+def boardUi(ctx) {
+  // Session-level state: private to this window.
+  val draft = signal("")
+  val priority = signal("normal")
+  val shown = signal("all")   // "all" | "open" | "done" — this window only
+  val clock = signal(formatTime(timeMillis(), "%H:%M:%S"))
+
+  // Derived, and re-derived whenever either input changes — the shared
+  // task list or this window's own filter.
+  val visible = computed(() -> {
+    val all = tasks.get()
+    select (shown.get()) {
+      case "open": filter(all, (t) -> !t.done)
+      case "done": filter(all, (t) -> t.done)
+      default: all
+    }
+  })
+
+  ctx.interval(1000, () -> clock.set(formatTime(timeMillis(), "%H:%M:%S")))
+
+  def add() {
+    val made = boardAdd(draft.get(), priority.get())
+    if (made == null) {
+      ctx.notify("A task needs a title", {kind: "warn"})
+    } else {
+      draft.set("")
+      ctx.notify("Added “${made.title}”", {kind: "ok"})
+    }
+  }
+
+  // A slow job on a background thread: ctx.task runs work() off the UI
+  // loop and delivers the result back onto it, so touching signals in
+  // onDone is safe.
+  def importSamples() {
+    ctx.notify("Importing…")
+    ctx.task(() -> {
+      sleep(400)                                   // a stand-in for real work
+      ["Write the release notes", "Answer the issue tracker", "Water the plants"]
+    }, (titles) -> {
+      for (t in titles) { boardAdd(t, "normal") }
+      ctx.notify("Imported ${length(titles)} tasks", {kind: "ok"})
+    })
+  }
+
+  column([
+    row([
+      heading(() -> "Task board — ${boardOpen()} open"),
+      spacer({grow: true}),
+      text(clock, {muted: true, mono: true, id: "clock"})
+    ], {gap: 8, align: "center"}),
+
+    card([
+      row([
+        textInput({bind: draft, id: "draft", placeholder: "What needs doing?",
+                   onEnter: add, grow: true}),
+        dropdown({bind: priority, id: "prio", options: ["normal", "high"]}),
+        button("Add", {kind: "primary", id: "add", onClick: add})
+      ], {gap: 8}),
+
+      radioGroup({bind: shown, id: "filter", inline: true,
+                  options: [{value: "all", label: "All"},
+                            {value: "open", label: "Open"},
+                            {value: "done", label: "Done"}]}),
+
+      // Keyed: adding, removing or reordering patches only what moved.
+      each(visible, (t) -> row([
+        checkbox("", {id: "chk-${t.id}", checked: t.done,
+                      onChange: (on) -> boardSet(t.id, on)}),
+        text(t.title, {id: "task-${t.id}", grow: true,
+                       style: if (t.done) then {"text-decoration": "line-through"} else {}}),
+        when(t.priority == "high", () -> badge("high", {color: "warn"})),
+        button("✕", {kind: "ghost", small: true, id: "del-${t.id}",
+                     onClick: () -> boardRemove(t.id)})
+      ], {gap: 8, align: "center"}), {key: (t) -> t.id}),
+
+      when(() -> length(visible.get()) == 0,
+           () -> text("Nothing here.", {muted: true, id: "empty"}))
+    ], {gap: 10}),
+
+    row([
+      button("Import samples", {id: "import", onClick: importSamples}),
+      button("Clear finished", {id: "clear", onClick: () -> {
+        val gone = boardClearDone()
+        ctx.notify(if (gone == 0) then "Nothing finished yet" else "Cleared ${gone}")
+      }}),
+      spacer({grow: true}),
+      text(() -> "${length(tasks.get())} total, shared by ${ctx.app.sessions()} window(s)",
+           {muted: true, size: 13, id: "summary"})
+    ], {gap: 8, align: "center"})
+  ], {gap: 12, pad: 16})
+}

@@ -34,7 +34,7 @@ Designed and implemented by Alex Xin. Released under the
   MongoDB and Redis drivers, datetime, csv, toml, markdown, mustache templates,
   jwt, smtp, uuid, cli, log, ansi and dotenv, with how to install and use them
   in both source and prebuilt-binary form.
-- **[examples/](examples/)** — 32 self-contained example projects, one per feature
+- **[examples/](examples/)** — 33 self-contained example projects, one per feature
   or package, each openable directly in VSCode or IntelliJ IDEA.
 - **[项目与构建指南](docs/SFL-项目与构建指南.md)** — projects end to end: creating
   one, the `build.sfl` reference, incremental builds, custom tasks, testing,
@@ -188,7 +188,7 @@ rather than relying on cases written to test the compiler specifically.
 | `runtime/` | The C runtime compiled programs link against: values, collector, primitives |
 | `stdlib/` | The part of the builtin library written in SFL and precompiled |
 | `packages/` | The standard package suite (gui, httpd, mysql, postgres, mongodb, redis, datetime, csv, toml, markdown, template, jwt, smtp, uuid, cli, log, ansi, dotenv), installable with `sfl pkg` |
-| `examples/` | 32 standalone example projects, each an IDE-openable `sfl build` project with tests |
+| `examples/` | 33 standalone example projects, each an IDE-openable `sfl build` project with tests |
 | `buildtool/` | The `sfl build` build tool, written in SFL and embedded in the binary |
 | `editors/vscode/` | The VSCode extension: TextMate grammar, LSP client, run commands |
 | `editors/intellij/` | The IntelliJ plugin (Community-compatible, LSP via LSP4IJ) |

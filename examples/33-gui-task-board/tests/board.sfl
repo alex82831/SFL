@@ -1,0 +1,243 @@
+// The board driven headlessly: a real gui app on an ephemeral port, spoken
+// to over a hand-rolled WebSocket client — the same way a browser would.
+// No browser, no sleeps to decide pass/fail, nothing mocked.
+//
+// Two habits worth copying:
+//
+//   * assertions SEARCH the patch stream instead of demanding an exact
+//     sequence, because the app has a one-second clock whose ticks
+//     legitimately interleave with everything else;
+//   * the driving runs inside attempt() so the app is always stopped before
+//     the process ends — exit() blocks while a gui app is still serving.
+
+import "gui"
+import "../src/board"
+
+val failures = []
+var passed = 0
+def check(what, got, want) {
+  if (got == want) {
+    passed += 1
+  } else {
+    push(failures, "${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+  }
+}
+def checkTrue(what, cond) = check(what, cond, true)
+
+// ------------------------------------------------- a minimal ws client
+
+def readExactly(c, n, timeoutMs) {
+  val out = []
+  while (length(out) < n) {
+    val chunk = socketReadBytes(c, n - length(out), timeoutMs)
+    if (chunk == null || length(chunk) == 0) then return null
+    for (b in chunk) { push(out, b) }
+  }
+  out
+}
+
+def wsOpen(port) {
+  val c = connect("127.0.0.1", port, 5000)
+  val key = base64EncodeBytes(randomBytes(16))
+  socketWrite(c, "GET /__gui_ws HTTP/1.1\r\nhost: x\r\nupgrade: websocket\r\n" +
+    "connection: Upgrade\r\nsec-websocket-key: ${key}\r\nsec-websocket-version: 13\r\n\r\n")
+  val status = parseInt(split(socketReadLine(c, 5000), " ")[1])
+  while (true) {
+    val line = socketReadLine(c, 5000)
+    if (line == null || line == "") then break
+  }
+  {conn: c, status: status}
+}
+
+def wsSend(c, obj) {
+  val payload = utf8Encode(jsonStringify(obj))
+  val n = length(payload)
+  val out = [bitOr(128, 1)]
+  val mask = randomBytes(4)
+  if (n < 126) {
+    push(out, bitOr(128, n))
+  } else {
+    push(out, bitOr(128, 126))
+    push(out, bitAnd(shiftRightU(n, 8), 255))
+    push(out, bitAnd(n, 255))
+  }
+  for (b in mask) { push(out, b) }
+  var i = 0
+  while (i < n) {
+    push(out, bitXor(payload[i], mask[i % 4]))
+    i += 1
+  }
+  socketWriteBytes(c, out)
+}
+
+// One server frame decoded as JSON, or null on timeout.
+def wsJson(c, timeoutMs = 4000) {
+  val h = readExactly(c, 2, timeoutMs)
+  if (h == null) then return null
+  var len = bitAnd(h[1], 127)
+  if (len == 126) {
+    val ext = readExactly(c, 2, timeoutMs)
+    len = ext[0] * 256 + ext[1]
+  } elsif (len == 127) {
+    val ext = readExactly(c, 8, timeoutMs)
+    len = 0
+    for (b in ext) { len = len * 256 + b }
+  }
+  val payload = if (len > 0) then readExactly(c, len, timeoutMs) else []
+  if (bitAnd(h[0], 15) != 1) then return null
+  jsonParse(utf8Decode(payload))
+}
+
+// ------------------------------------------------- tree and patch helpers
+
+def findNodes(node, pred, out = []) {
+  if (pred(node)) then push(out, node)
+  for (kid in get(node, "c", [])) { findNodes(kid, pred, out) }
+  out
+}
+
+// The node carrying an `id` prop, by that id.
+def byId(tree, wanted) {
+  val hits = findNodes(tree, (n) -> getIn(n, ["p", "id"], null) == wanted)
+  if (isEmpty(hits)) then null else hits[0]
+}
+
+// A node's rendered text. Text children serialise as {i, x} so they can be
+// patched by id later; a plain string means a static child.
+def textOf(node) {
+  if (node == null) then return null
+  val kids = get(node, "c", [])
+  if (isEmpty(kids)) then return null
+  val first = kids[0]
+  if (isObject(first)) then get(first, "x", null) else first
+}
+
+def dial(port, token) {
+  val ws = wsOpen(port)
+  wsSend(ws.conn, {t: "hello", token: token, path: "/", query: {}, client: {}})
+  {conn: ws.conn, status: ws.status, init: wsJson(ws.conn)}
+}
+
+def event(c, gid, kind, data = {}) = wsSend(c, {t: "ev", id: gid, k: kind, d: data})
+
+// Every patch op seen within `ms`; the clock's own ops ride along harmlessly.
+def opsWithin(c, ms) {
+  val ops = []
+  val deadline = timeMillis() + ms
+  var left = ms
+  while (left > 0) {
+    val m = wsJson(c, left)
+    if (m != null && get(m, "t", "") == "patch") {
+      for (op in m.ops) { push(ops, op) }
+    }
+    left = deadline - timeMillis()
+  }
+  ops
+}
+
+def hasOp(ops, pred) = any(ops, pred)
+
+// ------------------------------------------------------------- the app
+
+val store = tempFile("board-test")
+removeFile(store)
+boardLoad(store)
+check("a fresh board seeds two tasks", length(tasks.get()), 2)
+
+val app = guiApp({quiet: true, title: "Board test", graceMs: 100, root: boardUi})
+app.start()
+val port = app.port()
+
+def drive() {
+  checkTrue("the app binds a port", port > 0)
+
+  val page = httpGet("http://127.0.0.1:${port}/")
+  checkTrue("the shell page serves", contains(page, "<div id=\"app\">"))
+  val token = regexFind(page, r'token: "([0-9a-f]+)"')[1]
+  check("the page carries a 128-bit session token", length(token), 32)
+
+  // ---------------------------------------------------- the first window
+
+  val w1 = dial(port, token)
+  check("the upgrade is 101", w1.status, 101)
+  check("the init message arrives", w1.init.t, "init")
+  check("one live session", app.sessions(), 1)
+
+  val t1 = w1.init.root
+  checkTrue("both seeded tasks are in the tree",
+    byId(t1, "task-1") != null && byId(t1, "task-2") != null)
+  check("a task renders its title", textOf(byId(t1, "task-1")), "Read the SFL manual")
+  checkTrue("the draft input announces two-way binding", contains(byId(t1, "draft").e, "input"))
+  checkTrue("the add button announces its click", contains(byId(t1, "add").e, "click"))
+
+  // ------------------------------------------------------ two-way binding
+
+  event(w1.conn, byId(t1, "draft").i, "input", {v: "ship the example"})
+  checkTrue("typing patches the input's value",
+    hasOp(opsWithin(w1.conn, 400),
+          (o) -> o[0] == "p" && o[2] == "value" && o[3] == "ship the example"))
+
+  // ------------------------------------------------------------- adding
+
+  event(w1.conn, byId(t1, "add").i, "click")
+  val added = opsWithin(w1.conn, 600)
+  checkTrue("adding inserts one row", hasOp(added, (o) -> o[0] == "ins"))
+  checkTrue("and toasts the new title", contains(jsonStringify(added), "ship the example"))
+  check("the model grew", length(tasks.get()), 3)
+  checkTrue("the new task reached the disk", contains(readFile(store), "ship the example"))
+
+  // -------------------------------------------------------- checking off
+
+  event(w1.conn, byId(t1, "chk-1").i, "change", {v: true})
+  checkTrue("checking a box patches the tree", !isEmpty(opsWithin(w1.conn, 500)))
+  check("the open count drops", boardOpen(), 2)
+  checkTrue("done state persists", contains(readFile(store), "\"done\": true"))
+
+  // ------------------------------ a second window shares the same state
+
+  val w2 = dial(port, token)
+  check("two live sessions", app.sessions(), 2)
+  val t2 = w2.init.root
+  checkTrue("the second window already sees what the first one added",
+    byId(t2, "task-3") != null)
+  check("and its title", textOf(byId(t2, "task-3")), "ship the example")
+
+  // ------------------------------ but the filter belongs to one window
+
+  event(w2.conn, byId(t2, "filter").i, "change", {v: "open"})
+  checkTrue("filtering removes the finished row from that window",
+    hasOp(opsWithin(w2.conn, 600), (o) -> o[0] == "rm"))
+
+  val w3 = dial(port, token)
+  val t3 = w3.init.root
+  checkTrue("a fresh window still shows the finished task — the filter was session state",
+    byId(t3, "task-1") != null)
+  check("three live sessions", app.sessions(), 3)
+
+  // ------------------------------------------ removing, from any window
+
+  event(w3.conn, byId(t3, "del-2").i, "click")
+  checkTrue("deleting removes a row", hasOp(opsWithin(w3.conn, 500), (o) -> o[0] == "rm"))
+  check("the shared model shrank", length(tasks.get()), 2)
+  checkTrue("the other windows were patched too",
+    hasOp(opsWithin(w1.conn, 600), (o) -> o[0] == "rm"))
+
+  closeSocket(w1.conn)
+  closeSocket(w2.conn)
+  closeSocket(w3.conn)
+  null
+}
+
+val outcome = attempt(drive)
+app.stop()                      // always: exit() blocks while the app serves
+removeFile(store)
+
+if (outcome?.error != null) {
+  eprintln("ERROR " + outcome.error.message)
+  exit(1)
+}
+if (!isEmpty(failures)) {
+  for (f in failures) { eprintln("FAIL " + f) }
+  exit(1)
+}
+println("board: ${passed} passed, 0 failed")

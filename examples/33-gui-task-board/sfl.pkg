@@ -1,0 +1,5 @@
+{
+  "name": "gui-task-board",
+  "version": "0.1.0",
+  "deps": { "gui": "^0.1.0", "httpd": "^0.1.0" }
+}
