@@ -1,0 +1,578 @@
+// gui/app — the application shell: an httpd server carrying the client
+// runtime, one UI loop thread per app, sessions (one per connected window),
+// timers, and the platform launcher that opens a native-feeling window on
+// macOS, Linux and Windows.
+//
+//   val app = guiApp({title: "Demo", root: (ctx) -> column([...])})
+//   app.run()          // serve + open a window + block until it closes
+//
+// Threading model: every handler, builder, timer and binding runs on the
+// app's single loop thread — user code never needs a lock. Signals may be
+// written from any thread (ctx.task, spawn); the change is queued and the
+// loop wakes to re-render. This is "async" the way the rest of SFL means
+// it: real threads underneath, channels in between.
+
+import "_core"
+import "_widgets"
+import "_render"
+import "_client"
+import "httpd"
+
+val _defaults = {
+  title: "SFL",
+  port: 0,
+  host: "127.0.0.1",
+  root: null,
+  pages: null,
+  theme: {},
+  css: "",
+  dark: "auto",           // true | false | "auto"
+  window: {},             // {width, height}
+  show: true,             // open a window from run()
+  keepAlive: false,       // run() keeps serving after the last window closes
+  quiet: false,
+  assets: null,           // {"/url-prefix": "./directory"}
+  maxUploadBytes: 10485760,
+  graceMs: 2500,          // reconnect/navigation grace before run() exits
+  onConnect: null,
+  onDisconnect: null
+}
+
+def guiApp(opts = {}) {
+  if (!isObject(opts)) { error("gui: guiApp takes an options object") }
+  val cfg = {}
+  for (k in keys(_defaults)) { cfg[k] = get(opts, k, _defaults[k]) }
+  for (k in keys(opts)) {
+    if (!contains(_defaults, k)) { error("gui: unknown guiApp option '${k}'") }
+  }
+
+  val pages = {}
+  if (cfg.pages != null) {
+    for (p in keys(cfg.pages)) { pages[p] = cfg.pages[p] }
+  }
+  if (cfg.root != null) { pages["/"] = cfg.root }
+  if (length(pages) == 0) { error("gui: guiApp needs a root builder or a pages map") }
+
+  val token = hexEncodeBytes(randomBytes(16))
+  val ch = channel()
+  val dirty = {lock: mutex(), q: []}
+  val flushArmed = atomic(0)
+  val stopFlag = atomic(0)
+  val live = atomic(0)
+  val everConnected = atomic(0)
+  val lastGone = atomic(0)
+  val sessions = {}          // sid -> session, loop-thread only
+  val state = {srv: null, port: 0, loopT: null, schedT: null, running: false}
+  val timers = {lock: mutex(), byId: {}, nextId: 0, ctrl: channel()}
+
+  // The app record render/core plug into.
+  val app = {token: token, cfg: cfg}
+
+  // The public handle, filled in at the end (nested defs cannot reference
+  // later siblings, but everyone can capture this object now).
+  val api = {}
+
+  def running() = state.running && atomicGet(stopFlag) == 0
+
+  // Any thread: queue a dirty observer and wake the loop once per wave.
+  app.markDirty = (obs) -> {
+    withLock(dirty.lock, () -> { push(dirty.q, obs); null })
+    if (atomicCompareSet(flushArmed, 0, 1)) { send(ch, {k: "flush"}) }
+    null
+  }
+  app.takeDirty = () -> withLock(dirty.lock, () -> {
+    val q = copy(dirty.q)
+    clear(dirty.q)
+    q
+  })
+
+  // Any thread: run fn on the loop thread.
+  app.post = (fn) -> { send(ch, {k: "post", fn: fn}); null }
+
+  def logErr(where, msg) {
+    if (!cfg.quiet) { eprintln("gui: ${where}: ${msg}") }
+    null
+  }
+
+  // ------------------------------------------------------------- commands
+
+  def command(session, name, payload) {
+    giPatch(session, ["cmd", name, payload])
+    null
+  }
+
+  // ---------------------------------------------------------------- timers
+
+  // The scheduler thread sleeps until the next deadline (or a control
+  // message) and posts due timers to the loop; the loop runs their
+  // functions so timer code is single-threaded like everything else.
+  def schedLoop() {
+    while (atomicGet(stopFlag) == 0) {
+      val waitMs = withLock(timers.lock, () -> {
+        var next = -1
+        for (id in keys(timers.byId)) {
+          val t = timers.byId[id]
+          if (next < 0 || t.at < next) { next = t.at }
+        }
+        if (next < 0) then 1000
+        else clamp(next - timeMillis(), 0, 1000)
+      })
+      if (waitMs > 0) { receive(timers.ctrl, waitMs) }
+      val due = withLock(timers.lock, () -> {
+        val now = timeMillis()
+        val fire = []
+        for (id in keys(timers.byId)) {
+          val t = timers.byId[id]
+          if (t.at <= now) {
+            push(fire, t)
+            if (t.repeat) then t.at = now + t.ms
+            else remove(timers.byId, id)
+          }
+        }
+        fire
+      })
+      for (t in due) { send(ch, {k: "timer", t: t}) }
+    }
+    null
+  }
+
+  def addTimer(session, ms, fn, repeat) {
+    if (!isNumber(ms) || ms < 1) { error("gui: timer interval must be >= 1 ms") }
+    withLock(timers.lock, () -> {
+      timers.nextId += 1
+      val id = timers.nextId
+      timers.byId["${id}"] = {
+        id: id, at: timeMillis() + ms, ms: ms, repeat: repeat,
+        fn: fn, sid: if (session == null) then null else session.sid
+      }
+      send(timers.ctrl, {k: "wake"})
+      id
+    })
+  }
+
+  def cancelTimer(id) {
+    withLock(timers.lock, () -> { remove(timers.byId, "${id}"); null })
+  }
+
+  def cancelSessionTimers(sid) {
+    withLock(timers.lock, () -> {
+      for (id in keys(timers.byId)) {
+        if (timers.byId[id].sid == sid) { remove(timers.byId, id) }
+      }
+      null
+    })
+  }
+
+  // --------------------------------------------------------------- sessions
+
+  def newContext(session) {
+    val ctx = {
+      app: api,
+      session: session.sid,
+      path: session.path,
+      query: session.query,
+      client: session.clientInfo
+    }
+    ctx.notify = (message, nopts = {}) -> command(session, "notify", {
+      text: "${message}",
+      kind: get(nopts, "kind", "info"),
+      ms: get(nopts, "ms", 3500)
+    })
+    ctx.setTitle = (t) -> command(session, "title", "${t}")
+    ctx.setDark = (v) -> command(session, "dark", v)
+    ctx.navigate = (path) -> command(session, "nav", path)
+    ctx.clipboard = (textv) -> command(session, "clip", "${textv}")
+    ctx.focus = (id) -> command(session, "focus", "${id}")
+    ctx.scrollTo = (id) -> command(session, "scroll", "${id}")
+    ctx.runJs = (code) -> command(session, "js", code)
+    ctx.download = (name, content, mime = "application/octet-stream") -> {
+      val b64 = if (isArray(content)) then base64EncodeBytes(content)
+                else base64Encode("${content}")
+      command(session, "download", {name: name, mime: mime, base64: b64})
+    }
+    ctx.openWindow = (path = "/") -> {
+      giLaunch("http://${cfg.host}:${state.port}${path}", cfg, logErr)
+      null
+    }
+    ctx.close = () -> {
+      command(session, "bye", null)
+      null
+    }
+    ctx.interval = (ms, fn) -> addTimer(session, ms, fn, true)
+    ctx.timeout = (ms, fn) -> addTimer(session, ms, fn, false)
+    ctx.cancel = (id) -> cancelTimer(id)
+    ctx.effect = (fn) -> {
+      val h = effect(fn, {via: app.post})
+      push(session.cleanups, h.dispose)
+      h
+    }
+    ctx.task = (work, onDone = null) -> {
+      spawnDaemon(() -> {
+        val r = attempt(work)
+        app.post(() -> {
+          if (!r.ok) then logErr("task", r.error.message)
+          elsif (onDone != null) then giCall1(onDone, r.value)
+          else null
+        })
+        null
+      })
+    }
+    ctx.hotkey = (combo, fn) -> {
+      session.hotkeys[toLower(combo)] = fn
+      command(session, "hotkey", toLower(combo))
+      null
+    }
+    ctx
+  }
+
+  var nextSid = 0
+
+  def connectSession(sock, hello) {
+    nextSid += 1
+    val session = {
+      sid: "s${nextSid}",
+      app: app,
+      sock: sock,
+      path: get(hello, "path", "/"),
+      query: get(hello, "query", {}),
+      clientInfo: get(hello, "client", {}),
+      alive: true,
+      nextId: 0,
+      byId: {},
+      pending: [],
+      root: null,
+      hotkeys: {},
+      cleanups: []
+    }
+    session.ctx = newContext(session)
+    sessions[session.sid] = session
+    sock.giSession = session
+    atomicAdd(live, 1)
+    atomicSet(everConnected, 1)
+
+    val builder = get(pages, session.path, null) ?? get(pages, "*", null) ?? pages["/"]
+    val r = attempt(() -> {
+      val kids = giKids(giCall1(builder, session.ctx))
+      val spec = if (length(kids) == 1) then kids[0]
+                 else {gk: "el", tag: "box", props: {dir: "col"}, children: kids}
+      session.root = giMount(session, spec)
+      null
+    })
+    if (!r.ok) {
+      logErr("build ${session.path}", r.error.message)
+      val msg = r.error.message
+      session.root = giMount(session, {gk: "el", tag: "box", props: {dir: "col", pad: 24},
+        children: [{gk: "el", tag: "heading", props: {}, children: [{gk: "txt", value: "The page failed to build"}]},
+                   {gk: "el", tag: "code", props: {code: msg}, children: []}]})
+    }
+    // Building may have queued patches (initial evals do not patch, but a
+    // builder could set signals); the init snapshot supersedes them.
+    clear(session.pending)
+    sock.send(jsonStringify({t: "init", root: giSerialize(session.root), title: cfg.title}))
+    if (cfg.onConnect != null) {
+      val cb = attempt(() -> giCall1(cfg.onConnect, session.ctx))
+      if (!cb.ok) { logErr("onConnect", cb.error.message) }
+    }
+    null
+  }
+
+  def disposeSession(session) {
+    if (session.alive) {
+      session.alive = false
+      if (cfg.onDisconnect != null) {
+        val cb = attempt(() -> giCall1(cfg.onDisconnect, session.ctx))
+        if (!cb.ok) { logErr("onDisconnect", cb.error.message) }
+      }
+      for (f in session.cleanups) { try(f, (e) -> null) }
+      if (session.root != null) { giUnmount(session, session.root) }
+      cancelSessionTimers(session.sid)
+      remove(sessions, session.sid)
+      atomicAdd(live, -1)
+      atomicSet(lastGone, timeMillis())
+    }
+    null
+  }
+
+  // ------------------------------------------------------------ event loop
+
+  def dispatchEvent(session, data) {
+    val id = "${get(data, "id", "")}"
+    val eventName = get(data, "k", "")
+    val inst = get(session.byId, id, null)
+    if (inst == null) { return null }   // raced with an unmount: stale, fine
+    val handler = get(inst.listeners, eventName, null)
+    if (handler == null) { return null }
+    val d = get(data, "d", {})
+    val payload = if (isObject(d) && contains(d, "v")) then d.v else d
+    val r = attempt(() -> giCall1(handler, payload))
+    if (!r.ok) {
+      logErr("on${eventName} of <${inst.tag}>", r.error.message)
+      command(session, "notify", {text: "Error: ${r.error.message}", kind: "error", ms: 6000})
+    }
+    null
+  }
+
+  def handleMsg(m) {
+    val kind = m.k
+    if (kind == "connect") {
+      val r = attempt(() -> connectSession(m.sock, m.hello))
+      if (!r.ok) { logErr("connect", r.error.message) }
+    } elsif (kind == "msg") {
+      val session = m.session
+      if (session.alive) {
+        val t = get(m.data, "t", "")
+        if (t == "ev") then dispatchEvent(session, m.data)
+        elsif (t == "hk") {
+          val f = get(session.hotkeys, toLower(get(m.data, "combo", "")), null)
+          if (f != null) {
+            val r = attempt(() -> giCall1(f, get(m.data, "combo", "")))
+            if (!r.ok) { logErr("hotkey", r.error.message) }
+          }
+        } else { null }   // ping and friends
+      }
+    } elsif (kind == "disconnect") {
+      disposeSession(m.session)
+    } elsif (kind == "timer") {
+      val t = m.t
+      // A repeating timer may have been cancelled since the scheduler queued
+      // it; a one-shot was already removed there, which is its normal state.
+      val cancelled = t.repeat &&
+        withLock(timers.lock, () -> get(timers.byId, "${t.id}", null)) == null
+      val sessionGone = t.sid != null && get(sessions, t.sid, null) == null
+      if (!cancelled && !sessionGone) {
+        val r = attempt(() -> t.fn())
+        if (!r.ok) { logErr("timer", r.error.message) }
+      }
+    } elsif (kind == "post") {
+      val r = attempt(() -> m.fn())
+      if (!r.ok) { logErr("post", r.error.message) }
+    } else { null }       // "flush" and unknowns: the wake was the point
+  }
+
+  def sendPatches() {
+    for (sid in keys(sessions)) {
+      val session = sessions[sid]
+      if (session.alive && length(session.pending) > 0) {
+        val ops = session.pending
+        session.pending = []
+        val r = attempt(() -> session.sock.send(jsonStringify({t: "patch", ops: ops})))
+        if (!r.ok) { logErr("send", r.error.message) }
+      }
+    }
+    null
+  }
+
+  def uiLoop() {
+    while (atomicGet(stopFlag) == 0) {
+      val first = receive(ch, 250)
+      if (first != null) {
+        handleMsg(first)
+        var extra = tryReceive(ch)
+        var drained = 0
+        while (extra != null && drained < 256) {
+          handleMsg(extra)
+          drained += 1
+          extra = tryReceive(ch)
+        }
+        // Re-arm before flushing: a mark that lands after this reset sends
+        // its own wake; one that landed before is already in the queue.
+        atomicSet(flushArmed, 0)
+        val fr = attempt(() -> giFlush(app))
+        if (!fr.ok) { logErr("render", fr.error.message) }
+        sendPatches()
+      }
+    }
+    // Shutting down: sessions go with the loop.
+    for (sid in keys(sessions)) { disposeSession(sessions[sid]) }
+    null
+  }
+
+  // ------------------------------------------------------------ the server
+
+  def wsHooks() {
+    {
+      message: (sock, data, isText) -> {
+        val parsed = attempt(() -> jsonParse(data))
+        if (parsed.ok && isObject(parsed.value)) {
+          val msg = parsed.value
+          val session = get(sock, "giSession", null)
+          if (session == null) {
+            if (get(msg, "t", "") == "hello") {
+              if (get(msg, "token", "") == token) {
+                send(ch, {k: "connect", sock: sock, hello: msg})
+              } else {
+                sock.close(4003, "bad hello")
+              }
+            } else { null } // not connected yet: drop quietly
+          } elsif (get(msg, "t", "") != "ping") {
+            send(ch, {k: "msg", session: session, data: msg})
+          } else { null }
+        }
+        null
+      },
+      close: (sock, code, reason) -> {
+        val session = get(sock, "giSession", null)
+        if (session != null) { send(ch, {k: "disconnect", session: session}) }
+        null
+      }
+    }
+  }
+
+  def buildRoutes() {
+    val table = []
+    val page = giClientPage(cfg, token)
+    for (p in keys(pages)) {
+      if (p != "*") { push(table, GET(p, (req) -> respondHtml(200, page))) }
+    }
+    if (contains(pages, "*")) {
+      push(table, GET("/*rest", (req) -> respondHtml(200, page)))
+    }
+    if (cfg.assets != null) {
+      for (prefix in keys(cfg.assets)) {
+        push(table, STATIC(prefix, cfg.assets[prefix]))
+      }
+    }
+    push(table, WS("/__gui_ws", wsHooks(),
+      {maxMessageBytes: cfg.maxUploadBytes + 1048576, idleMs: 90000}))
+    routes(table)
+  }
+
+  def start() {
+    if (state.running) { error("gui: the app is already running") }
+    if (atomicGet(stopFlag) != 0) { error("gui: the app was stopped") }
+    state.srv = httpServer({
+      port: cfg.port,
+      handler: buildRoutes(),
+      quiet: cfg.quiet,
+      http2: false
+    })
+    state.srv.start()
+    state.port = state.srv.port()
+    state.loopT = spawnDaemon(uiLoop)
+    state.schedT = spawnDaemon(schedLoop)
+    state.running = true
+    null
+  }
+
+  def stop() {
+    if (!state.running || atomicGet(stopFlag) != 0) { return null }
+    atomicSet(stopFlag, 1)
+    send(ch, {k: "stop"})
+    send(timers.ctrl, {k: "stop"})
+    await(state.loopT)
+    await(state.schedT)
+    state.srv.stop()
+    state.running = false
+    null
+  }
+
+  def url() = "http://${cfg.host}:${state.port}"
+
+  def run(runOpts = {}) {
+    val show = get(runOpts, "show", cfg.show)
+    val keepAlive = get(runOpts, "keepAlive", cfg.keepAlive)
+    start()
+    if (!cfg.quiet) { println("gui: ${cfg.title} at ${url()}") }
+    if (show) { giLaunch(url(), cfg, logErr) }
+    // Block until the last window has gone (or forever with keepAlive).
+    var going = true
+    while (going && atomicGet(stopFlag) == 0) {
+      sleep(150)
+      if (!keepAlive && atomicGet(everConnected) == 1 && atomicGet(live) == 0) {
+        if (timeMillis() - atomicGet(lastGone) > cfg.graceMs) { going = false }
+      }
+    }
+    stop()
+  }
+
+  api.run = run
+  api.start = start
+  api.stop = stop
+  api.url = url
+  api.port = () -> state.port
+  api.running = running
+  api.post = app.post
+  api.sessions = () -> atomicGet(live)
+  api.broadcast = (fn) -> app.post(() -> {
+    for (sid in keys(sessions)) {
+      val s = sessions[sid]
+      if (s.alive) {
+        val r = attempt(() -> giCall1(fn, s.ctx))
+        if (!r.ok) { logErr("broadcast", r.error.message) }
+      }
+    }
+    null
+  })
+  api.timer = (ms, fn) -> addTimer(null, ms, fn, true)
+  api.after = (ms, fn) -> addTimer(null, ms, fn, false)
+  api.cancel = (id) -> cancelTimer(id)
+  api
+}
+
+// ------------------------------------------------------------- the launcher
+
+// Opens `theUrl` in an app-mode Chromium-family window when one is
+// installed (a clean, chromeless window on all three platforms), and in
+// the default browser otherwise. SFL_GUI_BROWSER overrides discovery;
+// SFL_GUI_NO_WINDOW=1 suppresses launching entirely.
+def giLaunch(theUrl, cfg, logErr) {
+  if (getEnv("SFL_GUI_NO_WINDOW", "") == "1") { return null }
+  val os = toLower(osName())
+  val browser = _findBrowser(os)
+  if (browser != null) {
+    val win = get(cfg, "window", {})
+    val w = get(win, "width", 1100)
+    val h = get(win, "height", 780)
+    val profile = joinPath(dirName(tempFile(".d")), "sfl-gui-${pid()}")
+    mkdirs(profile)
+    val r = attempt(() -> processStart([browser,
+      "--app=${theUrl}", "--window-size=${w},${h}",
+      "--user-data-dir=${profile}", "--no-first-run",
+      "--no-default-browser-check", "--disable-sync"]))
+    if (r.ok) {
+      spawnDaemon(() -> processWait(r.value))
+      return null
+    }
+    logErr("launch", r.error.message)
+  }
+  _openDefault(os, theUrl, logErr)
+  null
+}
+
+def _findBrowser(os) {
+  val forced = getEnv("SFL_GUI_BROWSER", "")
+  if (forced != "") { return forced }
+  val candidates =
+    if (contains(os, "mac")) then [
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser"
+    ] elsif (contains(os, "win")) then [
+      "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+      "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+      "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe"
+    ] else [] // Linux and the BSDs look up PATH below
+  for (c in candidates) {
+    if (isFile(c)) { return c }
+  }
+  if (!contains(os, "mac") && !contains(os, "win")) {
+    for (name in ["google-chrome-stable", "google-chrome", "chromium",
+                  "chromium-browser", "microsoft-edge-stable", "brave-browser"]) {
+      val hit = execute("command -v ${name}")
+      if (hit.code == 0 && trim(hit.out) != "") { return trim(hit.out) }
+    }
+  }
+  null
+}
+
+def _openDefault(os, theUrl, logErr) {
+  val r = attempt(() -> {
+    if (contains(os, "mac")) then execute("open '${theUrl}'")
+    elsif (contains(os, "win")) then processStart(["cmd", "/c", "start", "", theUrl])
+    else execute("xdg-open '${theUrl}' >/dev/null 2>&1 &")
+  })
+  if (!r.ok) { logErr("open", "could not open a browser: ${r.error.message} — visit ${theUrl}") }
+  null
+}

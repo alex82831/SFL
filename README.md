@@ -29,8 +29,9 @@ Designed and implemented by Alex Xin. Released under the
 - **[使用手册](docs/SFL-使用手册.md)** — the full user manual: syntax, semantics,
   functional programming, concurrency and IPC, ahead-of-time compilation, and every one
   of the 363 builtins.
-- **[软件包参考](docs/SFL-软件包参考.md)** — the standard package suite: a MongoDB
-  driver, datetime, csv, uuid, cli, log and a redis client, with how to install and
+- **[软件包参考](docs/SFL-软件包参考.md)** — the standard package suite: a
+  cross-platform GUI framework, an HTTP server framework, a MongoDB driver,
+  datetime, csv, uuid, cli, log and a redis client, with how to install and
   use them in both source and prebuilt-binary form.
 - **[项目与构建指南](docs/SFL-项目与构建指南.md)** — projects end to end: creating
   one, the `build.sfl` reference, incremental builds, custom tasks, testing,
@@ -151,8 +152,9 @@ platform into an archive that travels beside the source, so a program that links
 it with `sfl -c` skips recompiling the package — while the interpreter still runs
 the source, and a stale or absent archive falls back to it, byte-for-byte the
 same either way. The [standard package suite](docs/SFL-软件包参考.md) under
-`packages/` — a MongoDB driver, datetime, csv, uuid, cli, log, and a redis
-client — installs the same way.
+`packages/` — a cross-platform GUI framework, an HTTP server framework, a
+MongoDB driver, datetime, csv, uuid, cli, log, and a redis client — installs
+the same way.
 
 Editor support lives in `editors/`: a VSCode extension and an IntelliJ plugin
 (IDEA Community works — the LSP client is LSP4IJ). Both get their keyword and
@@ -181,7 +183,7 @@ rather than relying on cases written to test the compiler specifically.
 | `src/main/scala/com/fartech/sfl/` | Lexer, parser, evaluator, builtins, REPL, compiler, LSP server |
 | `runtime/` | The C runtime compiled programs link against: values, collector, primitives |
 | `stdlib/` | The part of the builtin library written in SFL and precompiled |
-| `packages/` | The standard package suite (MongoDB, datetime, csv, uuid, cli, log, redis), installable with `sfl pkg` |
+| `packages/` | The standard package suite (gui, httpd, MongoDB, datetime, csv, uuid, cli, log, redis), installable with `sfl pkg` |
 | `buildtool/` | The `sfl build` build tool, written in SFL and embedded in the binary |
 | `editors/vscode/` | The VSCode extension: TextMate grammar, LSP client, run commands |
 | `editors/intellij/` | The IntelliJ plugin (Community-compatible, LSP via LSP4IJ) |

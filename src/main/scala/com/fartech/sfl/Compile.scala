@@ -385,12 +385,12 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       // would give one module's function the other's arity and position.
       pkgBuild match
         case Some((pkg, _, versionDir, moduleSource)) =>
-          if !p.name.startsWith("_") && p.src.name == moduleSource &&
+          if !p.name.startsWith("_") && p.name != "lambda" && p.src.name == moduleSource &&
              userFns.valuesIterator.exists(_ eq p) then
             s"@${PkgTool.Binary.protoSymbol(pkg, moduleRelOf(moduleSource, versionDir), p.name)}"
           else s"@proto${protoConst.size}"
         case None =>
-          if libraryModule.nonEmpty && !p.name.startsWith("_") &&
+          if libraryModule.nonEmpty && !p.name.startsWith("_") && p.name != "lambda" &&
              userFns.valuesIterator.exists(_ eq p) then
             s"@sflstd_proto_${p.name}"
           else s"@proto${protoConst.size}"
@@ -2045,6 +2045,11 @@ final class Compiler(val globals: Globals, val src: SourceRef):
   private def exportedSymbol(f: Fn): Option[String] =
     if !f.generic || f.proto == null then None
     else if f.proto.name.startsWith("_") then None
+    // A top-level anonymous function is held in whatever binding carries it,
+    // never referenced by name across objects — and every one of them is
+    // called "lambda", so exporting would collide the moment two modules of
+    // an archive each have one (stdlib/http.sfl and stdlib/coll.sfl do).
+    else if f.proto.name == "lambda" then None
     else if !userFns.valuesIterator.exists(_ eq f.proto) then None
     else pkgBuild match
       case Some((pkg, _, versionDir, moduleSource)) =>
@@ -2339,7 +2344,7 @@ private object Compiler:
       |declare void @sfl_set_suggest_names(ptr, i64)
       |declare void @sfl_stack_overflow()
       |declare ptr @llvm.frameaddress.p0(i32)
-      |@sfl_stack_limit = external global ptr
+      |@sfl_stack_limit = external thread_local global ptr
       |declare void @sfl_arity_fail(ptr, i64)
       |declare void @sfl_div_zero()
       |declare void @sfl_print_i64(i64, i32)

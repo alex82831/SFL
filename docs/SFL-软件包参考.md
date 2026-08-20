@@ -42,6 +42,7 @@ import "datetime"
 
 | 包 | 用途 | 模块 |
 | --- | --- | --- |
+| [`gui`](#gui) | 跨平台异步 GUI 框架(响应式信号、完整部件库、增量渲染、原生感窗口) | main, _core, _widgets, _render, _app, _client, _demo |
 | [`httpd`](#httpd) | HTTP 服务器框架(HTTP/1.1、HTTP/2、WebSocket、SSE、静态文件、TLS) | main, router, h1, h2, hpack, ws, mime |
 | [`mongodb`](#mongodb) | MongoDB 数据库驱动(OP_MSG / BSON / SCRAM 认证) | main, bson, wire, scram, bytes |
 | [`datetime`](#datetime) | 历法运算、ISO 8601 解析与格式化、固定时区 | main |
@@ -56,6 +57,123 @@ import "datetime"
 (`utf8Encode`/`socketReadBytes`/`digestBytes`/`hmacBytes`/`pbkdf2` 等)之上。
 
 ---
+
+## gui
+
+跨平台的**异步 GUI 框架**,纯 SFL 写成,依赖 `httpd`。界面由本进程的一个嵌入式
+Web 运行时渲染——`run()` 起一个本机回环服务,在 **macOS / Linux / Windows** 上
+打开一个原生感觉的窗口(装有 Chrome/Edge/Chromium 时用其 app 模式,无边栏无地址
+栏;否则退回默认浏览器),此后服务端保存真实的部件树与全部状态,浏览器只是一块
+远端画布:事件上行、增量补丁下行,全部走一条 WebSocket。
+
+```sfl
+import "gui"
+
+def counter(ctx) {
+  val n = signal(0)
+  column([
+    heading(() -> "点了 ${n.get()} 次"),
+    row([
+      button("+1", {kind: "primary", onClick: () -> n.update(v -> v + 1)}),
+      button("清零", {onClick: () -> n.set(0), disabled: () -> n.get() == 0})
+    ], {gap: 8})
+  ], {gap: 12})
+}
+
+guiApp({title: "计数器", root: counter}).run()
+```
+
+先睹为快:`sfl -e 'import "gui"; guiDemo()'` 打开一个六页的全功能演示。
+
+### 响应式内核
+
+状态是**信号**;凡是接受值的地方——属性或文本——都同样接受信号、`computed`
+或零参函数,变化沿依赖图精确传播,只有真正变了的属性/文本会生成补丁:
+
+```sfl
+val name = signal("Ada")                    // .get() .set(v) .update(f)
+val greet = computed(() -> "你好,${name.get()}")   // 惰性派生值
+effect(() -> println(greet.get()))          // 立即运行,依赖变化时重跑
+batch(() -> { a.set(1); b.set(2) })         // 合并成一次交付
+text(greet)                                 // 信号当值用,自动订阅
+textInput({bind: name})                     // 双向绑定:值下行、输入上行
+```
+
+`signal` 对原始值做去重(重复 set 免费);数组与对象**总是通知**,因此
+`items.mutate(xs -> push(xs, x))` 原地改完即刷新。信号线程安全:后台线程
+`set` 会经通道唤醒应用的 UI 循环,补丁照常发出——这就是 `spawn`/`ctx.task`
+里直接改状态即可刷新界面的原因。
+
+### 部件一览
+
+布局 `row` `column` `grid` `card` `scrollArea` `spacer` `divider` `expansion` `tabs`;
+文本与展示 `text` `heading` `link` `image` `icon` `badge` `markdownView` `htmlView`
+`codeView` `progressBar` `spinner` `table`(可排序) `treeView` `canvasView`;
+输入 `button` `textInput` `textArea` `numberInput` `checkbox` `toggle` `radioGroup`
+`dropdown` `slider` `colorInput` `dateInput` `timeInput` `fileUpload`;
+浮层 `dialog` `drawer` `menuButton`,右键菜单挂在任意部件的 `contextMenu` 属性上;
+动态结构 `each`(带键调和) `when` `dyn`;逃生舱 `element(tag, props, children)`。
+
+每个部件都吃一批通用属性:`id` `style` `class` `hidden` `tooltip` `gap` `pad`
+`w` `h` `grow` `wrap` `align` `justify` `size` `color` `bg` `bold` `mono` `muted`
+`round` `shadow` `border` `transition`(fade/slide-up/slide-down/zoom 出场动画)
+以及 `onClick` 等事件。事件处理器写 `() -> …` 或 `e -> …` 都行。
+
+列表用 `each`,靠键复用子树,增删移动都是最小补丁;行内状态直接把信号放进行
+数据里即可跨刷新存活:
+
+```sfl
+each(todos, (it) -> row([checkbox("", {bind: it.done}), text(it.title)]),
+     {key: (it) -> it.id})
+```
+
+### 应用、会话与页面
+
+`guiApp(opts)` 的选项:`title` `root`(或 `pages: {"/": …, "/settings": …}`)
+`port` `host` `theme`(CSS 变量覆盖,如 `{accent: "#e2596a", radius: "4px"}`)
+`css`(附加样式) `dark`(true/false/"auto") `window: {width, height}` `assets`
+(静态目录映射) `show` `keepAlive` `quiet` `onConnect` `onDisconnect`
+`maxUploadBytes` `graceMs`。
+
+`app.run()` 启动、开窗、阻塞到最后一个窗口关闭;`app.start()`/`app.stop()` 是
+异步形态;还有 `app.url()` `app.port()` `app.post(fn)`(投递到 UI 循环)
+`app.broadcast(fn)`(对每个活跃会话执行 `fn(ctx)`)与应用级 `app.timer` /
+`app.after` / `app.cancel`。
+
+**每个浏览器窗口是一个独立会话**:根构造函数按会话执行一次,里面创建的信号
+互不相干;模块级信号则被所有会话共享,一处 `set`,处处刷新——多窗口协作
+(聊天、看板)不需要任何额外机制。构造函数收到的 `ctx`:
+
+| ctx 成员 | 作用 |
+| --- | --- |
+| `notify(msg, {kind, ms}?)` | 右上角 toast(info/ok/warn/error) |
+| `interval(ms, fn)` `timeout(ms, fn)` `cancel(id)` | 会话级定时器,断开自动清理 |
+| `task(work, onDone?)` | 后台线程跑 `work()`,完成后把结果送回 UI 循环 |
+| `effect(fn)` | 在 UI 循环上重跑的响应式副作用,会话结束自动释放 |
+| `download(name, content, mime?)` | 触发浏览器下载(字符串或字节数组) |
+| `clipboard(text)` `setTitle(t)` `setDark(v)` | 剪贴板/标题/主题 |
+| `navigate(path)` `openWindow(path?)` `close()` | 页内跳转/再开一窗/关窗 |
+| `hotkey("mod+s", fn)` | 全局快捷键(mod = Ctrl/Cmd) |
+| `focus(id)` `scrollTo(id)` `runJs(code)` | 按 `id` 属性定位/JS 逃生舱 |
+| `session` `path` `query` `client` `app` | 会话元信息与 app 句柄 |
+
+文件上行走 `fileUpload({onUpload: files -> …})`,`fileBytes(f)`/`fileText(f)`
+解码内容;`canvasView({draw: () -> [["fillRect", …], …], onPointer: p -> …})`
+是立即模式画布,绘制指令响应式重发,指针事件带坐标回传,足以做图表、绘图板
+和小游戏(演示的 Canvas 页就是一只表盘和一块画板)。
+
+### 安全与形态
+
+服务默认只绑 `127.0.0.1`,页面带一次性令牌,WebSocket 握手校验令牌,防的是
+恶意网页对本机端口的盲连。`SFL_GUI_BROWSER` 指定浏览器,`SFL_GUI_NO_WINDOW=1`
+只服务不开窗;`show: false` + `keepAlive: true` 即是一个多用户 Web 应用——
+同一份代码,本地窗口与远程浏览器通吃。模块:`main` 加下划线内部模块
+`_core` `_widgets` `_render` `_app` `_client`(内嵌浏览器运行时) `_demo`
+(下划线文件名保证运行目录里的同名文件永远不会遮蔽包的内部导入)。
+
+与语言的其它部分一样,gui 程序解释执行与 `sfl -c` 编译执行行为一致;测试
+`tests/gui/` 以真实端口 + 手写 WebSocket 客户端逐补丁断言(95 项),并对整个
+会话做解释/编译逐字节差分。
 
 ## httpd
 

@@ -373,7 +373,8 @@ void sfl_add_source(const char *name, const char *text);
 
 /* Shadow call stack, for tracebacks. */
 void sfl_frame_push(const char *fn);
-extern char *sfl_stack_limit;
+extern _Thread_local char *sfl_stack_limit;
+void sfl_thread_stack_init(void *bottom, size_t size);
 void sfl_stack_overflow(void) __attribute__((noreturn));
 void sfl_frame_pop(void);
 int64_t sfl_frame_depth(void);

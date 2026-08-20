@@ -210,6 +210,17 @@ else
   fails=$((fails + 1))
 fi
 
+# The GUI framework: the gui package installed like a user would, its
+# reactive core, wire protocol and demo driven headlessly over WebSocket,
+# plus interpreter/compiler parity for a whole session.
+echo
+if out=$(./gui/run.sh 2>&1); then
+  printf '%s\n' "$out" | tail -1
+else
+  printf '%s\n' "$out"
+  fails=$((fails + 1))
+fi
+
 # --------------------------------------------------------------- the compiler
 
 echo
