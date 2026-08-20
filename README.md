@@ -19,7 +19,8 @@ def fizzbuzz(n) {
 fizzbuzz(20)
 ```
 
-Designed and implemented by Alex Xin.
+Designed and implemented by Alex Xin. Released under the
+[BSD 3-Clause license](LICENSE).
 
 ---
 
