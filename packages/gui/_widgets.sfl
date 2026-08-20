@@ -1,0 +1,369 @@
+// gui/widgets — the widget catalogue. Constructors are pure: they build spec
+// trees (plain objects) that gui/render mounts into live, session-bound
+// instances. Nothing here talks to a browser or a signal directly.
+//
+// Reactivity is positional, not special-cased: anywhere a prop or a text
+// child accepts a value, it also accepts a signal, a computed, or a
+// zero-argument function — the renderer turns those into live bindings.
+// Props named on* are event handlers; a handler may take zero arguments or
+// one (the event payload).
+//
+// Common props understood by every widget (applied client-side):
+//   id        a user-chosen element id, for ctx.focus/ctx.scrollTo
+//   style     an object of extra CSS ({"font-size": "18px"})
+//   class     extra CSS class names
+//   hidden    reactive visibility (display: none when truthy)
+//   tooltip   hover text
+//   pad gap w h grow wrap align justify   layout sugar
+//   size color bg bold italic mono muted  text sugar
+//   round shadow border                   surface sugar
+//   transition  "fade" | "slide-up" | "slide-down" | "zoom" (mount/unmount)
+//   onClick onContext                     any widget is clickable
+//   contextMenu + onMenu                  right-click menu items
+
+import "_core"
+
+// ------------------------------------------------------------ spec helpers
+
+def _props(p) {
+  if (p == null) then {}
+  else {
+    if (!isObject(p)) { error("gui: widget props must be an object, got ${typeOf(p)}") }
+    copy(p)
+  }
+}
+
+// Normalises a children argument into a flat array of spec nodes: nested
+// arrays flatten, null vanishes, strings and numbers become text, functions
+// and signals become reactive text.
+def giKids(children) {
+  val out = []
+  _flattenInto(out, children)
+  out
+}
+
+def _flattenInto(out, v) {
+  if (v == null) { null }
+  elsif (isArray(v)) {
+    for (c in v) { _flattenInto(out, c) }
+  } elsif (isObject(v) && contains(v, "gk")) {
+    push(out, v)
+  } elsif (isFunction(v) || giIsReactive(v)) {
+    push(out, {gk: "txtf", fn: v})
+  } elsif (isString(v) || isNumber(v) || isBool(v)) {
+    push(out, {gk: "txt", value: "${v}"})
+  } else {
+    error("gui: cannot use ${typeOf(v)} as a child widget")
+  }
+  null
+}
+
+// The generic element: any wire tag, any props, any children. Also the
+// escape hatch for things the catalogue does not cover.
+def element(tag, props = {}, children = null) {
+  {gk: "el", tag: tag, props: _props(props), children: giKids(children)}
+}
+
+// Marks an input-flavoured widget: bind (a signal) becomes a live value
+// prop plus a client event that writes back. bk/be name the value prop and
+// the event the renderer wires.
+def _bindable(spec, valueKey, eventName) {
+  spec.props["__bk"] = valueKey
+  spec.props["__be"] = eventName
+  spec
+}
+
+// -------------------------------------------------------------- containers
+
+def _box(dir, children, props) {
+  val p = _props(props)
+  p.dir = dir
+  element("box", p, children)
+}
+
+// A horizontal flex container.
+def row(children = null, props = {}) = _box("row", children, props)
+
+// A vertical flex container.
+def column(children = null, props = {}) = _box("col", children, props)
+
+// A CSS-grid container: cols is a count or a template string ("1fr 2fr").
+def grid(children = null, props = {}) {
+  val p = _props(props)
+  p.dir = "grid"
+  element("box", p, children)
+}
+
+// A vertical container that scrolls; give it h (or maxh) to cap its height.
+def scrollArea(children = null, props = {}) {
+  val p = _props(props)
+  p.dir = "col"
+  p.scroll = true
+  element("box", p, children)
+}
+
+// A raised surface with padding and a border.
+def card(children = null, props = {}) {
+  val p = _props(props)
+  p.dir = "col"
+  p.card = true
+  element("box", p, children)
+}
+
+def divider(props = {}) = element("divider", props)
+
+// Flexible space in a row/column; give it w or h for a fixed gap.
+def spacer(props = {}) = element("spacer", props)
+
+// A collapsible section (native <details>). Props: open (bindable), onToggle.
+def expansion(label, children = null, props = {}) {
+  val spec = element("details", _props(props), children)
+  spec.props.label = label
+  _bindable(spec, "open", "toggle")
+}
+
+// ----------------------------------------------------------------- display
+
+// A run of text. Value may be a string, signal or function.
+def text(value, props = {}) {
+  element("text", props, [value])
+}
+
+// A heading; props.level 1..6 (default 2).
+def heading(value, props = {}) {
+  element("heading", props, [value])
+}
+
+// A hyperlink: to is an app path (same window) or a full URL; newTab opens
+// a separate browser tab/window.
+def link(label, props = {}) {
+  element("link", props, [label])
+}
+
+def image(src, props = {}) {
+  val p = _props(props)
+  p.src = src
+  element("image", p)
+}
+
+// A small glyph: an emoji or any single string; or {svg: "<svg…>"} markup.
+def icon(name, props = {}) {
+  val p = _props(props)
+  p.glyph = name
+  element("icon", p)
+}
+
+def badge(label, props = {}) = element("badge", props, [label])
+
+// Raw HTML, rendered as-is. Only feed it markup you trust.
+def htmlView(html, props = {}) {
+  val p = _props(props)
+  p.html = html
+  element("html", p)
+}
+
+// Markdown (headings, emphasis, code, lists, links, quotes, tables).
+def markdownView(md, props = {}) {
+  val p = _props(props)
+  p.md = md
+  element("md", p)
+}
+
+// Preformatted code with horizontal scrolling.
+def codeView(code, props = {}) {
+  val p = _props(props)
+  p.code = code
+  element("code", p)
+}
+
+// A progress bar: value in [0, 1], or null for indeterminate.
+def progressBar(value = null, props = {}) {
+  val p = _props(props)
+  p.value = value
+  element("progress", p)
+}
+
+def spinner(props = {}) = element("spinner", props)
+
+// An immediate-mode canvas. draw is reactive and returns a command list:
+//   [["clear", "#fff"], ["fillStyle", "#09f"], ["fillRect", x, y, w, h],
+//    ["strokeStyle", c], ["lineWidth", n], ["beginPath"], ["moveTo", x, y],
+//    ["lineTo", x, y], ["arc", x, y, r, a0, a1], ["rect", x, y, w, h],
+//    ["fill"], ["stroke"], ["font", f], ["fillText", s, x, y],
+//    ["save"], ["restore"], ["translate", x, y], ["rotate", a], ["scale", x, y]]
+// onPointer receives {type: "down"|"move"|"up", x, y, buttons}.
+def canvasView(props = {}) {
+  val p = _props(props)
+  element("canvas", p)
+}
+
+// A data table. columns: [{key, label, w?, align?}], rows: an array of
+// objects (reactive). onRowClick receives {index, row}. sortable sorts
+// client-side; empty is the text shown when there are no rows.
+def table(props = {}) = element("table", _props(props))
+
+// A tree. data: [{label, key?, icon?, children?}] (reactive); onSelect
+// receives {key, label, path}.
+def treeView(props = {}) = element("tree", _props(props))
+
+// ------------------------------------------------------------------ inputs
+
+// kind: "default" | "primary" | "danger" | "ghost". hotkey: "mod+s" style.
+def button(label, props = {}) {
+  element("button", props, [label])
+}
+
+def textInput(props = {}) {
+  _bindable(element("input", _props(props)), "value", "input")
+}
+
+def textArea(props = {}) {
+  _bindable(element("textarea", _props(props)), "value", "input")
+}
+
+def numberInput(props = {}) {
+  val p = _props(props)
+  p.type = "number"
+  _bindable(element("input", p), "value", "input")
+}
+
+def checkbox(label, props = {}) {
+  val spec = element("check", _props(props))
+  spec.props.label = label
+  _bindable(spec, "checked", "change")
+}
+
+// A switch — checkbox semantics, slider looks.
+def toggle(label, props = {}) {
+  val spec = element("check", _props(props))
+  spec.props.label = label
+  spec.props.switch = true
+  _bindable(spec, "checked", "change")
+}
+
+// options: ["a", "b"] or [{value, label}]. inline lays them horizontally.
+def radioGroup(props = {}) {
+  _bindable(element("radio", _props(props)), "value", "change")
+}
+
+// A select. options as for radioGroup; placeholder shows until a pick.
+def dropdown(props = {}) {
+  _bindable(element("dropdown", _props(props)), "value", "change")
+}
+
+def slider(props = {}) {
+  _bindable(element("slider", _props(props)), "value", "input")
+}
+
+def colorInput(props = {}) {
+  val p = _props(props)
+  p.type = "color"
+  _bindable(element("input", p), "value", "input")
+}
+
+def dateInput(props = {}) {
+  val p = _props(props)
+  p.type = "date"
+  _bindable(element("input", p), "value", "input")
+}
+
+def timeInput(props = {}) {
+  val p = _props(props)
+  p.type = "time"
+  _bindable(element("input", p), "value", "input")
+}
+
+// A file picker and drop zone. onUpload receives an array of
+// {name, size, type, base64}; fileBytes/fileText decode one.
+def fileUpload(props = {}) = element("upload", _props(props))
+
+// Decode an uploaded file's content.
+def fileBytes(f) = base64DecodeBytes(f.base64)
+def fileText(f) = base64Decode(f.base64)
+
+// ---------------------------------------------------------------- overlays
+
+// A modal. open is bindable (a signal makes ESC/backdrop/× work by
+// themselves); onClose fires as well. Children are the body; put a row of
+// buttons last for actions. wide widens the panel.
+def dialog(props = {}, children = null) {
+  _bindable(element("dialog", _props(props), children), "open", "close")
+}
+
+// A side panel sliding in from props.side ("left" | "right", default right).
+def drawer(props = {}, children = null) {
+  _bindable(element("drawer", _props(props), children), "open", "close")
+}
+
+// A button that opens a popup menu. items (reactive-capable):
+// [{key, label, icon?, danger?, disabled?}] or "---" for a separator;
+// onSelect receives the key.
+def menuButton(props = {}) = element("menu", _props(props))
+
+// ----------------------------------------------------------------- dynamic
+
+// A reactive list with keyed reconciliation. items: array | signal |
+// function; itemFn(item) builds one child; props.key(item) names the
+// identity used to reuse children across updates (default: the item's
+// "id"/"key" field when present, else its JSON form).
+def each(items, itemFn, props = {}) {
+  {gk: "each", items: items, itemFn: itemFn, props: _props(props)}
+}
+
+// A reactive conditional subtree. cond: value | signal | function;
+// thenFn/elseFn are zero-argument builders (elseFn optional).
+def when(cond, thenFn, elseFn = null) {
+  {gk: "when", cond: cond, thenFn: thenFn, elseFn: elseFn, props: {}}
+}
+
+// An arbitrary reactive subtree: fn re-runs when its dependencies change
+// and its result (a widget or null) replaces the previous one.
+def dyn(fn) {
+  {gk: "dyn", fn: fn, props: {}}
+}
+
+// -------------------------------------------------------------- composites
+
+// Tabs. items: [{key, label, content}] where content is a widget or a
+// zero-argument builder (built lazily, rebuilt on each switch). active is
+// bindable; onChange receives the new key.
+def tabs(props = {}) {
+  val p = _props(props)
+  val items = get(p, "items", [])
+  if (!isArray(items) || length(items) == 0) { error("gui: tabs needs items") }
+  val bound = get(p, "bind", null)
+  val active = if (bound != null) then bound else signal(items[0].key)
+  val userChange = get(p, "onChange", null)
+
+  def tabButton(it) {
+    button(it.label, {
+      class: () -> if (active.get() == it.key) then "g-tab g-tab-on" else "g-tab",
+      onClick: () -> {
+        active.set(it.key)
+        if (userChange != null) { giCall1(userChange, it.key) }
+      }
+    })
+  }
+
+  val header = row(map(items, tabButton), {class: "g-tabbar", gap: 0})
+  val body = dyn(() -> {
+    val k = active.get()
+    val it = find(items, (i) -> i.key == k)
+    if (it == null) then null
+    elsif (isFunction(it.content)) then it.content()
+    else it.content
+  })
+  val shell = _props(dissoc(p, "items", "bind", "onChange", "active"))
+  shell.gap = get(shell, "gap", 12)
+  column([header, body], shell)
+}
+
+// Calls an event handler with the payload if it declares a parameter, and
+// without one if not — so `onClick: () -> …` and `onClick: e -> …` both
+// work. Handlers with defaults or ...rest count as accepting the payload.
+def giCall1(f, payload) {
+  val sig = signature(f)
+  val open = strFind(sig, "(")
+  val inner = trim(substring(sig, open + 1, length(sig) - 1))
+  if (inner == "") then f() else f(payload)
+}

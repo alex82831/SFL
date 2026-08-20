@@ -1,0 +1,121 @@
+// The reactive core alone: signals, computed values, effects, batching —
+// no server, no browser, no threads except where a test spawns one.
+
+import "lib/assert"
+import "gui"
+
+// ------------------------------------------------------------- signals
+
+val a = signal(1)
+check("a signal returns its value", a.get(), 1)
+a.set(5)
+check("set changes it", a.get(), 5)
+a.update((v) -> v * 2)
+check("update maps it", a.get(), 10)
+check("peek reads without tracking", a.peek(), 10)
+
+// ------------------------------------------------------------- computed
+
+val b = signal(2)
+val sum = computed(() -> a.get() + b.get())
+check("computed derives", sum.get(), 12)
+a.set(1)
+check("computed follows a dependency", sum.get(), 3)
+
+val chained = computed(() -> sum.get() * 10)
+check("computed chains", chained.get(), 30)
+b.set(3)
+check("a chain follows the leaf", chained.get(), 40)
+
+// -------------------------------------------------------------- effects
+
+val log = []
+val e1 = effect(() -> push(log, sum.get()))
+check("an effect runs immediately", log, [4])
+a.set(7)
+check("and re-runs on change", log, [4, 10])
+a.set(7)
+check("a primitive re-set is a no-op", log, [4, 10])
+e1.dispose()
+a.set(8)
+check("a disposed effect stays quiet", log, [4, 10])
+
+// Conditional dependencies follow the code path taken.
+val flag = signal(true)
+val x = signal("x1")
+val y = signal("y1")
+var runs = 0
+effect(() -> { runs += 1; if (flag.get()) then x.get() else y.get() })
+y.set("y2")
+check("the untaken branch is not a dependency", runs, 1)
+flag.set(false)
+check("switching re-runs", runs, 2)
+x.set("x2")
+check("the old branch is dropped", runs, 2)
+y.set("y3")
+check("the new branch is live", runs, 3)
+
+// -------------------------------------------------------------- batching
+
+val p = signal(0)
+val q = signal(0)
+var wavey = 0
+effect(() -> { p.get(); q.get(); wavey += 1 })
+batch(() -> {
+  p.set(1)
+  q.set(1)
+  batch(() -> p.set(2))
+})
+check("a batch delivers once", wavey, 2)
+check("and the values land", [p.get(), q.get()], [2, 1])
+
+// ----------------------------------------------------- arrays and mutate
+
+val items = signal([1])
+var seen = null
+effect(() -> seen = jsonStringify(items.get()))
+items.mutate((v) -> push(v, 2))
+check("mutate notifies with the mutated array", seen, "[1, 2]")
+items.set(items.peek())
+check("re-setting the same array still notifies", seen, "[1, 2]")
+items.touch()
+check("touch notifies unconditionally", seen, "[1, 2]")
+
+// ------------------------------------------------------------ untracked
+
+val u = signal(0)
+var uruns = 0
+effect(() -> { uruns += 1; untracked(() -> u.get()) })
+u.set(9)
+check("untracked reads subscribe nothing", uruns, 1)
+
+// -------------------------------------------------------------- threads
+
+// A write from another thread delivers the effect on that thread.
+val t = signal(0)
+val names = []
+effect(() -> { t.get(); push(names, currentThreadName()) })
+await(spawn(() -> t.set(1)))
+check("cross-thread set delivers", length(names), 2)
+checkTrue("on the writer's thread", names[1] != names[0])
+
+// The via option reroutes delivery.
+val routed = []
+val v = signal(0)
+effect(() -> { v.get(); null }, {via: (run) -> { push(routed, "via"); run() }})
+v.set(1)
+check("via schedules the re-run", routed, ["via"])
+
+// ------------------------------------------------------- error behaviour
+
+val bad = signal(0)
+effect(() -> { if (bad.get() > 0) then error("effect boom") else null })
+val msg = try(() -> bad.set(1), (err) -> err)
+checkTrue("an effect error reaches the setter", contains(msg, "effect boom"))
+val healthy = signal(0)
+var healthyRuns = 0
+effect(() -> { healthy.get(); healthyRuns += 1 })
+healthy.set(5)
+check("other observers keep working after it", healthyRuns, 2)
+
+report("gui core")

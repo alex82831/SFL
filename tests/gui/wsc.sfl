@@ -1,0 +1,123 @@
+// A minimal WebSocket client for driving a gui app in tests: handshake,
+// masked text frames out, text frames in, JSON on both ends. Deliberately
+// independent of packages/httpd — the tests should not trust the code under
+// test to talk to itself.
+
+def wsConnect(port, path) {
+  val c = connect("127.0.0.1", port, 5000)
+  val key = base64EncodeBytes(randomBytes(16))
+  socketWrite(c, "GET ${path} HTTP/1.1\r\nhost: 127.0.0.1\r\nupgrade: websocket\r\n" +
+    "connection: Upgrade\r\nsec-websocket-key: ${key}\r\nsec-websocket-version: 13\r\n\r\n")
+  val status = parseInt(split(socketReadLine(c, 5000), " ")[1])
+  while (true) {
+    val line = socketReadLine(c, 5000)
+    if (line == null || line == "") { break }
+  }
+  {conn: c, status: status}
+}
+
+def wsSendText(c, textv) {
+  val payload = utf8Encode(textv)
+  val out = [bitOr(128, 1)]
+  val n = length(payload)
+  val mask = randomBytes(4)
+  if (n < 126) { push(out, bitOr(128, n)) }
+  elsif (n < 65536) {
+    push(out, bitOr(128, 126))
+    push(out, bitAnd(shiftRightU(n, 8), 255))
+    push(out, bitAnd(n, 255))
+  } else {
+    push(out, bitOr(128, 127))
+    for (i in [56, 48, 40, 32, 24, 16, 8, 0]) { push(out, bitAnd(shiftRightU(n, i), 255)) }
+  }
+  pushBytes(out, mask)
+  var i = 0
+  while (i < n) { push(out, bitXor(payload[i], mask[i % 4])); i += 1 }
+  socketWriteBytes(c, out)
+}
+
+// One frame: {op, text}; null when the peer is quiet past the timeout.
+def wsRecv(c, timeoutMs = 5000) {
+  val h = readExactBytes(c, 2, timeoutMs)
+  if (h == null) { return null }
+  val op = bitAnd(h[0], 15)
+  var len = bitAnd(h[1], 127)
+  if (len == 126) {
+    val ext = readExactBytes(c, 2, timeoutMs)
+    len = ext[0] * 256 + ext[1]
+  } elsif (len == 127) {
+    val ext = readExactBytes(c, 8, timeoutMs)
+    len = 0
+    for (b in ext) { len = len * 256 + b }
+  }
+  val payload = if (len > 0) then readExactBytes(c, len, timeoutMs) else []
+  {op: op, text: if (op == 1) then utf8Decode(payload) else ""}
+}
+
+def wsJson(c, timeoutMs = 5000) {
+  val f = wsRecv(c, timeoutMs)
+  if (f == null || f.op != 1) then null else jsonParse(f.text)
+}
+
+// ------------------------------------------------------- tree inspection
+
+// Every node in a serialised tree for which pred holds.
+def findNodes(node, pred, out = []) {
+  if (pred(node)) { push(out, node) }
+  for (c in get(node, "c", [])) { findNodes(c, pred, out) }
+  out
+}
+
+// The node carrying the user-assigned id prop.
+def byUid(tree, uid) {
+  val hits = findNodes(tree, (n) -> getIn(n, ["p", "id"], null) == uid)
+  if (length(hits) == 0) then null else hits[0]
+}
+
+// The gui app boilerplate: fetch the page, pull the session token out.
+def guiToken(port) {
+  val page = httpGet("http://127.0.0.1:${port}/")
+  regexFind(page, r'token: "([0-9a-f]+)"')[1]
+}
+
+// Handshake + hello + init: {conn, init}.
+def guiDial(port, tok, path = "/") {
+  val ws = wsConnect(port, "/__gui_ws")
+  wsSendText(ws.conn, jsonStringify({t: "hello", token: tok, path: path, query: {}, client: {}}))
+  {conn: ws.conn, status: ws.status, init: wsJson(ws.conn)}
+}
+
+def guiEvent(c, gid, k, d = {}) {
+  wsSendText(c, jsonStringify({t: "ev", id: gid, k: k, d: d}))
+}
+
+// Collects patch ops until the connection is quiet for quietMs. Only for
+// streams that settle; a continuously animating session never goes quiet —
+// use guiCollect there.
+def guiDrain(c, quietMs = 300) {
+  val ops = []
+  var m = wsJson(c, quietMs)
+  while (m != null) {
+    if (get(m, "t", "") == "patch") {
+      for (op in m.ops) { push(ops, op) }
+    }
+    m = wsJson(c, quietMs)
+  }
+  ops
+}
+
+// Collects patch ops for a fixed window of wall time, then stops — bounded
+// whether or not the stream ever quiets down.
+def guiCollect(c, windowMs) {
+  val ops = []
+  val deadline = timeMillis() + windowMs
+  var left = windowMs
+  while (left > 0) {
+    val m = wsJson(c, left)
+    if (m != null && get(m, "t", "") == "patch") {
+      for (op in m.ops) { push(ops, op) }
+    }
+    left = deadline - timeMillis()
+  }
+  ops
+}

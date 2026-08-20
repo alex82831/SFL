@@ -1,0 +1,67 @@
+// The showcase app, driven headlessly: every tab is opened, its content is
+// checked, and no interaction may produce an error toast. This keeps the
+// demo honest — it exercises the whole catalogue, so if a widget breaks,
+// this fails.
+
+import "lib/assert"
+import "lib/wsc"
+import "gui"
+
+val app = guiDemoApp({quiet: true, graceMs: 100})
+app.start()
+val port = app.port()
+val tok = guiToken(port)
+
+val c = guiDial(port, tok)
+check("the demo connects", c.init.t, "init")
+check("with its title", c.init.title, "SFL GUI Demo")
+
+val root = c.init.root
+def labelled(tree, textv) {
+  val hits = findNodes(tree, (n) -> get(n, "t", "") == "button" &&
+    length(get(n, "c", [])) > 0 && get(get(n, "c", [{}])[0], "x", "") == textv)
+  if (length(hits) == 0) then null else hits[0]
+}
+
+val tabNames = ["Basics", "Inputs", "Data", "Async", "Canvas", "Overlays"]
+for (name in tabNames) {
+  checkTrue("the ${name} tab button exists", labelled(root, name) != null)
+}
+checkTrue("the Basics tab starts mounted",
+          contains(jsonStringify(root), "Reactive state"))
+
+var errors = []
+def open(tabName, marker) {
+  guiEvent(c.conn, labelled(root, tabName).i, "click")
+  // A fixed window, because the canvas tab streams animation frames and
+  // would never let a quiet-based drain finish.
+  val ops = guiCollect(c.conn, 700)
+  val blob = jsonStringify(ops)
+  if (contains(blob, "\"kind\": \"error\"")) { push(errors, tabName) }
+  checkTrue("the ${tabName} tab mounts its content", contains(blob, marker))
+}
+
+open("Inputs", "Two-way binding")
+open("Data", "todo list")
+open("Async", "Timers")
+open("Overlays", "Open dialog")
+open("Canvas", "animated dial")
+
+check("no tab produced an error toast", errors, [])
+
+// The canvas tab starts an animation interval; its draw commands stream.
+val moving = guiCollect(c.conn, 900)
+checkTrue("the dial animates",
+          count(moving, (op) -> op[0] == "p" && op[2] == "draw") >= 2)
+
+// The about page is a second, independent page.
+val c2 = guiDial(port, tok, "/about")
+checkTrue("the about page renders", contains(jsonStringify(c2.init.root), "About"))
+closeSocket(c2.conn)
+
+closeSocket(c.conn)
+sleep(200)
+app.stop()
+check("the demo shuts down", app.sessions(), 0)
+
+report("gui demo")

@@ -1,0 +1,1242 @@
+// gui/client — the browser side: one self-contained HTML page carrying the
+// stylesheet and the generic renderer. The server hands it to every page
+// route; the page opens a WebSocket back, says hello, receives the widget
+// tree, and from then on applies patches and reports events. No external
+// resources, no build step, no framework — it renders whatever the wire
+// protocol (gui/render) describes.
+
+// The stylesheet: a small design system on CSS variables, light and dark.
+def _baseCss() = r"""
+*, *::before, *::after { box-sizing: border-box; }
+:root {
+  --bg: #f6f7f9; --fg: #1c2024; --muted: #6b7280; --card: #ffffff;
+  --border: #e2e5ea; --input-bg: #ffffff; --hover: #eef0f4;
+  --accent: #3b6ef5; --accent-fg: #ffffff; --danger: #dc4a4a;
+  --ok: #2f9e63; --warn: #d98724;
+  --shadow: 0 1px 3px rgba(16,20,28,.09), 0 4px 14px rgba(16,20,28,.07);
+  --radius: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+[data-theme="dark"] { color-scheme: dark; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark; } }
+[data-theme="dark"], :root[data-theme="dark"] body { }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #16181d; --fg: #e7e9ee; --muted: #9aa1ac; --card: #1e2128;
+    --border: #2c313a; --input-bg: #23262e; --hover: #262a33;
+    --accent: #5b82f7; --accent-fg: #ffffff;
+    --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #16181d; --fg: #e7e9ee; --muted: #9aa1ac; --card: #1e2128;
+  --border: #2c313a; --input-bg: #23262e; --hover: #262a33;
+  --accent: #5b82f7; --accent-fg: #ffffff;
+  --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.35);
+}
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font);
+  font-size: 15px; line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+#app { min-height: 100vh; display: flex; flex-direction: column; padding: 20px; }
+.g-box { display: flex; min-width: 0; }
+.g-row { flex-direction: row; align-items: center; }
+.g-col { flex-direction: column; align-items: stretch; }
+.g-grid { display: grid; }
+.g-card { background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 16px; }
+.g-scroll { overflow: auto; }
+.g-ctr { display: contents; }
+h1,h2,h3,h4,h5,h6 { margin: 0; line-height: 1.25; font-weight: 650; }
+h1 { font-size: 28px; } h2 { font-size: 22px; } h3 { font-size: 18px; }
+h4 { font-size: 16px; } h5 { font-size: 14px; } h6 { font-size: 13px; }
+a.g-link { color: var(--accent); text-decoration: none; }
+a.g-link:hover { text-decoration: underline; }
+hr.g-divider { border: none; border-top: 1px solid var(--border);
+  margin: 4px 0; align-self: stretch; width: 100%; }
+.g-spacer { flex: 1 1 auto; }
+.g-icon { display: inline-flex; align-items: center; line-height: 1; }
+.g-icon svg { width: 1.2em; height: 1.2em; fill: currentColor; }
+.g-badge { display: inline-flex; align-items: center; padding: 1px 9px;
+  border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  background: var(--hover); color: var(--fg); }
+.g-badge.accent { background: var(--accent); color: var(--accent-fg); }
+.g-badge.ok { background: var(--ok); color: #fff; }
+.g-badge.warn { background: var(--warn); color: #fff; }
+.g-badge.danger { background: var(--danger); color: #fff; }
+
+button.g-btn { font: inherit; font-weight: 550; color: var(--fg);
+  background: var(--card); border: 1px solid var(--border); cursor: pointer;
+  border-radius: calc(var(--radius) - 2px); padding: 7px 15px;
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: background .12s, border-color .12s, transform .05s; }
+button.g-btn:hover:not(:disabled) { background: var(--hover); }
+button.g-btn:active:not(:disabled) { transform: translateY(1px); }
+button.g-btn:disabled { opacity: .5; cursor: default; }
+button.g-btn.primary { background: var(--accent); border-color: var(--accent);
+  color: var(--accent-fg); }
+button.g-btn.primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); }
+button.g-btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.g-btn.danger:hover:not(:disabled) { filter: brightness(1.08); background: var(--danger); }
+button.g-btn.ghost { background: transparent; border-color: transparent; }
+button.g-btn.ghost:hover:not(:disabled) { background: var(--hover); }
+button.g-btn.sm { padding: 3px 10px; font-size: 13px; }
+
+.g-tabbar { border-bottom: 1px solid var(--border); }
+button.g-btn.g-tab { background: transparent; border: none; border-bottom: 2px solid transparent;
+  border-radius: 0; color: var(--muted); padding: 8px 14px; }
+button.g-btn.g-tab:hover { background: var(--hover); color: var(--fg); }
+button.g-btn.g-tab-on { color: var(--accent); border-bottom-color: var(--accent); }
+
+input.g-input, textarea.g-input, select.g-input {
+  font: inherit; color: var(--fg); background: var(--input-bg);
+  border: 1px solid var(--border); border-radius: calc(var(--radius) - 2px);
+  padding: 7px 11px; outline: none; min-width: 0;
+  transition: border-color .12s, box-shadow .12s; }
+input.g-input:focus, textarea.g-input:focus, select.g-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
+input.g-input[type="color"] { padding: 2px 4px; height: 36px; width: 52px; }
+input.g-input[type="range"] { padding: 0; border: none; box-shadow: none;
+  accent-color: var(--accent); background: transparent; }
+textarea.g-input { resize: vertical; }
+label.g-check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer;
+  user-select: none; }
+label.g-check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
+label.g-check.g-switch input { appearance: none; width: 38px; height: 22px;
+  border-radius: 999px; background: var(--border); position: relative;
+  transition: background .15s; cursor: pointer; }
+label.g-check.g-switch input::after { content: ""; position: absolute; top: 3px; left: 3px;
+  width: 16px; height: 16px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 2px rgba(0,0,0,.3); transition: left .15s; }
+label.g-check.g-switch input:checked { background: var(--accent); }
+label.g-check.g-switch input:checked::after { left: 19px; }
+.g-radio { display: flex; flex-direction: column; gap: 6px; }
+.g-radio.inline { flex-direction: row; gap: 16px; align-items: center; }
+.g-slider-wrap { display: flex; align-items: center; gap: 10px; }
+.g-slider-val { font-variant-numeric: tabular-nums; color: var(--muted); min-width: 2.5em;
+  text-align: right; }
+
+.g-progress { height: 8px; border-radius: 999px; background: var(--hover);
+  overflow: hidden; min-width: 120px; }
+.g-progress-bar { height: 100%; background: var(--accent); border-radius: 999px;
+  transition: width .2s; }
+.g-progress.ind .g-progress-bar { width: 30% !important; animation: g-ind 1.1s infinite linear; }
+@keyframes g-ind { from { margin-left: -30%; } to { margin-left: 100%; } }
+.g-spin { width: 22px; height: 22px; border-radius: 50%;
+  border: 2.5px solid var(--border); border-top-color: var(--accent);
+  animation: g-rot .8s infinite linear; }
+@keyframes g-rot { to { transform: rotate(360deg); } }
+
+pre.g-code { background: var(--hover); border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px); padding: 12px 14px; overflow-x: auto;
+  font-family: var(--mono); font-size: 13px; line-height: 1.5; margin: 0; }
+.g-md { line-height: 1.65; }
+.g-md h1, .g-md h2, .g-md h3 { margin: .7em 0 .35em; }
+.g-md p { margin: .4em 0; }
+.g-md code { font-family: var(--mono); font-size: .9em; background: var(--hover);
+  padding: 1px 5px; border-radius: 5px; }
+.g-md pre { background: var(--hover); padding: 10px 13px; border-radius: 8px;
+  overflow-x: auto; }
+.g-md pre code { background: none; padding: 0; }
+.g-md blockquote { margin: .5em 0; padding: 2px 14px; border-left: 3px solid var(--accent);
+  color: var(--muted); }
+.g-md table { border-collapse: collapse; }
+.g-md th, .g-md td { border: 1px solid var(--border); padding: 4px 10px; }
+.g-md img { max-width: 100%; }
+
+table.g-table { border-collapse: collapse; width: 100%; background: var(--card);
+  border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.g-table-wrap { overflow: auto; border-radius: var(--radius); }
+table.g-table th, table.g-table td { text-align: left; padding: 9px 14px;
+  border-bottom: 1px solid var(--border); }
+table.g-table.dense th, table.g-table.dense td { padding: 5px 10px; font-size: 13.5px; }
+table.g-table th { font-weight: 600; font-size: 13px; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .03em; background: var(--hover);
+  user-select: none; white-space: nowrap; }
+table.g-table th.sortable { cursor: pointer; }
+table.g-table tbody tr:last-child td { border-bottom: none; }
+table.g-table tbody tr.clickable { cursor: pointer; }
+table.g-table tbody tr.clickable:hover { background: var(--hover); }
+.g-empty { color: var(--muted); font-style: italic; }
+
+.g-tree, .g-tree ul { list-style: none; margin: 0; padding: 0; }
+.g-tree ul { padding-left: 20px; }
+.g-tree li > .row { display: flex; align-items: center; gap: 5px; padding: 3px 6px;
+  border-radius: 6px; cursor: pointer; user-select: none; }
+.g-tree li > .row:hover { background: var(--hover); }
+.g-tree li > .row.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.g-tree .tw { width: 16px; display: inline-block; text-align: center;
+  transition: transform .12s; color: var(--muted); font-size: 11px; }
+.g-tree .tw.open { transform: rotate(90deg); }
+
+details.g-details { border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--card); }
+details.g-details > summary { cursor: pointer; padding: 10px 14px; font-weight: 550;
+  user-select: none; list-style: none; display: flex; align-items: center; gap: 8px; }
+details.g-details > summary::before { content: "\25B8"; color: var(--muted);
+  transition: transform .12s; font-size: 11px; }
+details.g-details[open] > summary::before { transform: rotate(90deg); }
+details.g-details > .g-details-body { padding: 2px 14px 12px; }
+
+.g-overlay { position: fixed; inset: 0; background: rgba(10,12,16,.45);
+  display: none; align-items: center; justify-content: center; z-index: 90;
+  backdrop-filter: blur(2px); }
+.g-overlay.g-open { display: flex; }
+.g-dlg { background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); width: min(440px, 92vw);
+  max-height: 88vh; display: flex; flex-direction: column;
+  animation: g-pop .16s ease-out; }
+.g-dlg.wide { width: min(760px, 94vw); }
+@keyframes g-pop { from { transform: scale(.96); opacity: 0; } }
+.g-dlg-head { display: flex; align-items: center; padding: 14px 18px 0; gap: 8px; }
+.g-dlg-title { font-weight: 650; font-size: 17px; flex: 1; }
+.g-dlg-x { border: none; background: none; color: var(--muted); cursor: pointer;
+  font-size: 18px; padding: 2px 6px; border-radius: 6px; }
+.g-dlg-x:hover { background: var(--hover); color: var(--fg); }
+.g-dlg-body { padding: 14px 18px 18px; overflow: auto;
+  display: flex; flex-direction: column; gap: 10px; }
+.g-overlay.g-drawer { justify-content: flex-end; align-items: stretch; }
+.g-overlay.g-drawer.left { justify-content: flex-start; }
+.g-drw { background: var(--card); border-left: 1px solid var(--border);
+  width: min(360px, 88vw); height: 100%; display: flex; flex-direction: column;
+  animation: g-slide-l .18s ease-out; }
+.g-overlay.left .g-drw { border-left: none; border-right: 1px solid var(--border);
+  animation: g-slide-r .18s ease-out; }
+@keyframes g-slide-l { from { transform: translateX(30px); opacity: .5; } }
+@keyframes g-slide-r { from { transform: translateX(-30px); opacity: .5; } }
+
+.g-menu-wrap { position: relative; display: inline-flex; }
+.g-pop { position: fixed; background: var(--card); border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 2px); box-shadow: var(--shadow);
+  padding: 5px; min-width: 160px; z-index: 120; animation: g-pop .12s ease-out; }
+.g-pop .mi { display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  border-radius: 7px; cursor: pointer; white-space: nowrap; }
+.g-pop .mi:hover:not(.dis) { background: var(--hover); }
+.g-pop .mi.danger { color: var(--danger); }
+.g-pop .mi.dis { opacity: .45; cursor: default; }
+.g-pop .sep { height: 1px; background: var(--border); margin: 5px 8px; }
+
+.g-upload { border: 1.5px dashed var(--border); border-radius: var(--radius);
+  padding: 22px; text-align: center; color: var(--muted); cursor: pointer;
+  transition: border-color .15s, background .15s; }
+.g-upload:hover, .g-upload.over { border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent); color: var(--fg); }
+
+#g-toasts { position: fixed; top: 16px; right: 16px; display: flex;
+  flex-direction: column; gap: 8px; z-index: 200; }
+.g-toast { background: var(--card); color: var(--fg); border: 1px solid var(--border);
+  border-left: 4px solid var(--accent); border-radius: 9px; box-shadow: var(--shadow);
+  padding: 10px 16px; max-width: 360px; animation: g-toast-in .18s ease-out; }
+.g-toast.ok { border-left-color: var(--ok); }
+.g-toast.warn { border-left-color: var(--warn); }
+.g-toast.error { border-left-color: var(--danger); }
+.g-toast.gone { opacity: 0; transform: translateX(12px); transition: all .25s; }
+@keyframes g-toast-in { from { opacity: 0; transform: translateX(18px); } }
+
+#g-conn { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%);
+  background: var(--fg); color: var(--bg); border-radius: 999px; padding: 7px 18px;
+  font-size: 13.5px; z-index: 300; display: none; box-shadow: var(--shadow); }
+
+.g-tr-fade { transition: opacity .22s ease; opacity: 0; }
+.g-tr-fade.g-in { opacity: 1; }
+.g-tr-slide-up { transition: opacity .22s ease, transform .22s ease;
+  opacity: 0; transform: translateY(10px); }
+.g-tr-slide-up.g-in { opacity: 1; transform: none; }
+.g-tr-slide-down { transition: opacity .22s ease, transform .22s ease;
+  opacity: 0; transform: translateY(-10px); }
+.g-tr-slide-down.g-in { opacity: 1; transform: none; }
+.g-tr-zoom { transition: opacity .18s ease, transform .18s ease;
+  opacity: 0; transform: scale(.92); }
+.g-tr-zoom.g-in { opacity: 1; transform: none; }
+.g-out { opacity: 0 !important; transition: opacity .18s ease; }
+"""
+
+// The runtime. Kept dependency-free and readable; the wire protocol it
+// speaks is documented in gui/render.
+def _clientJs() = r"""
+"use strict";
+(() => {
+const CFG = window.__SFL;
+const reg = new Map();          // gid -> DOM node
+let ws = null, closedByServer = false, everInit = false;
+
+// ------------------------------------------------------------- utilities
+const esc = (s) => String(s).replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const debounce = (f, ms) => { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => f(...a), ms); }; };
+
+function sendMsg(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function sendEv(gid, k, d) { sendMsg({t: "ev", id: gid, k, d: d || {}}); }
+
+// ------------------------------------------------------------- markdown
+function md(src) {
+  const lines = String(src).split("\n");
+  let out = [], i = 0, listStack = [];
+  const closeLists = () => { while (listStack.length) out.push(listStack.pop()); };
+  const inline = (s) => esc(s)
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, '<img alt="$1" src="$2">')
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+    .replace(/(^|\W)\*([^*\s][^*]*)\*/g, "$1<i>$2</i>")
+    .replace(/~~([^~]+)~~/g, "<s>$1</s>");
+  while (i < lines.length) {
+    const l = lines[i];
+    if (/^```/.test(l)) {
+      closeLists();
+      let body = []; i++;
+      while (i < lines.length && !/^```/.test(lines[i])) body.push(lines[i++]);
+      i++;
+      out.push("<pre><code>" + esc(body.join("\n")) + "</code></pre>");
+      continue;
+    }
+    const h = l.match(/^(#{1,6})\s+(.*)/);
+    if (h) { closeLists(); out.push(`<h${h[1].length}>` + inline(h[2]) + `</h${h[1].length}>`); i++; continue; }
+    if (/^\s*([-*_])\s*\1\s*\1[\s\-*_]*$/.test(l)) { closeLists(); out.push("<hr>"); i++; continue; }
+    const q = l.match(/^>\s?(.*)/);
+    if (q) { closeLists(); out.push("<blockquote>" + inline(q[1]) + "</blockquote>"); i++; continue; }
+    if (/^\|.*\|\s*$/.test(l)) {
+      closeLists();
+      let rows = [];
+      while (i < lines.length && /^\|.*\|\s*$/.test(lines[i])) {
+        rows.push(lines[i].replace(/^\||\|\s*$/g, "").split("|").map(c => c.trim()));
+        i++;
+      }
+      let html = "<table>";
+      rows.forEach((r, ri) => {
+        if (ri === 1 && r.every(c => /^:?-+:?$/.test(c))) return;
+        const tag = ri === 0 ? "th" : "td";
+        html += "<tr>" + r.map(c => `<${tag}>` + inline(c) + `</${tag}>`).join("") + "</tr>";
+      });
+      out.push(html + "</table>");
+      continue;
+    }
+    const li = l.match(/^(\s*)([-*+]|\d+\.)\s+(.*)/);
+    if (li) {
+      const ordered = /\d/.test(li[2]);
+      const tag = ordered ? "ol" : "ul";
+      if (!listStack.length) { out.push(`<${tag}>`); listStack.push(`</${tag}>`); }
+      out.push("<li>" + inline(li[3]) + "</li>"); i++; continue;
+    }
+    closeLists();
+    if (l.trim() === "") { i++; continue; }
+    let para = [l]; i++;
+    while (i < lines.length && lines[i].trim() !== "" && !/^(#|```|\||>|\s*([-*+]|\d+\.)\s)/.test(lines[i]))
+      para.push(lines[i++]);
+    out.push("<p>" + inline(para.join(" ")) + "</p>");
+  }
+  closeLists();
+  return out.join("\n");
+}
+
+// --------------------------------------------------------------- canvas
+function drawCanvas(cv, cmds) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv._gw || 300, h = cv._gh || 150;
+  if (cv.width !== w * dpr) { cv.width = w * dpr; cv.height = h * dpr; }
+  cv.style.width = w + "px"; cv.style.height = h + "px";
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+  if (!Array.isArray(cmds)) return;
+  for (const c of cmds) {
+    const [op, ...a] = c;
+    try {
+      switch (op) {
+        case "clear": g.fillStyle = a[0] || "#fff"; g.fillRect(0, 0, w, h); break;
+        case "fillStyle": g.fillStyle = a[0]; break;
+        case "strokeStyle": g.strokeStyle = a[0]; break;
+        case "lineWidth": g.lineWidth = a[0]; break;
+        case "lineCap": g.lineCap = a[0]; break;
+        case "font": g.font = a[0]; break;
+        case "textAlign": g.textAlign = a[0]; break;
+        case "globalAlpha": g.globalAlpha = a[0]; break;
+        case "fillRect": g.fillRect(...a); break;
+        case "strokeRect": g.strokeRect(...a); break;
+        case "clearRect": g.clearRect(...a); break;
+        case "fillText": g.fillText(...a); break;
+        case "strokeText": g.strokeText(...a); break;
+        case "beginPath": g.beginPath(); break;
+        case "closePath": g.closePath(); break;
+        case "moveTo": g.moveTo(...a); break;
+        case "lineTo": g.lineTo(...a); break;
+        case "arc": g.arc(...a); break;
+        case "ellipse": g.ellipse(...a); break;
+        case "rect": g.rect(...a); break;
+        case "roundRect": g.roundRect(...a); break;
+        case "quadraticCurveTo": g.quadraticCurveTo(...a); break;
+        case "bezierCurveTo": g.bezierCurveTo(...a); break;
+        case "fill": g.fill(); break;
+        case "stroke": g.stroke(); break;
+        case "save": g.save(); break;
+        case "restore": g.restore(); break;
+        case "translate": g.translate(...a); break;
+        case "rotate": g.rotate(...a); break;
+        case "scale": g.scale(...a); break;
+      }
+    } catch (e) { console.warn("gui canvas:", op, e); }
+  }
+}
+
+// ---------------------------------------------------------------- popup
+let openPop = null;
+function closePop() { if (openPop) { openPop.remove(); openPop = null; } }
+document.addEventListener("pointerdown", (e) => {
+  if (openPop && !openPop.contains(e.target)) closePop();
+}, true);
+function showPop(items, x, y, onPick) {
+  closePop();
+  const pop = document.createElement("div");
+  pop.className = "g-pop";
+  (items || []).forEach(it => {
+    if (it === "---") { const s = document.createElement("div"); s.className = "sep"; pop.appendChild(s); return; }
+    const mi = document.createElement("div");
+    mi.className = "mi" + (it.danger ? " danger" : "") + (it.disabled ? " dis" : "");
+    if (it.icon) { const ic = document.createElement("span"); ic.textContent = it.icon; mi.appendChild(ic); }
+    mi.appendChild(document.createTextNode(it.label != null ? it.label : it.key));
+    if (!it.disabled) mi.addEventListener("click", () => { closePop(); onPick(it.key); });
+    pop.appendChild(mi);
+  });
+  document.body.appendChild(pop);
+  const r = pop.getBoundingClientRect();
+  pop.style.left = Math.min(x, window.innerWidth - r.width - 8) + "px";
+  pop.style.top = Math.min(y, window.innerHeight - r.height - 8) + "px";
+  openPop = pop;
+}
+
+// --------------------------------------------------------------- styling
+const SIZE = (v) => typeof v === "number" ? v + "px" : v;
+function restyle(el) {
+  const p = el._gprops || {};
+  const s = el.style;
+  s.cssText = "";
+  if (p.style && typeof p.style === "object")
+    for (const k in p.style) s.setProperty(k, p.style[k]);
+  if (p.dir === "grid") {
+    const c = p.cols == null ? 2 : p.cols;
+    s.gridTemplateColumns = typeof c === "number" ? `repeat(${c}, minmax(0, 1fr))` : c;
+  }
+  if (p.gap != null) s.gap = SIZE(p.gap);
+  if (p.pad != null) s.padding = SIZE(p.pad);
+  if (p.w != null) s.width = SIZE(p.w);
+  if (p.h != null) s.height = SIZE(p.h);
+  if (p.minw != null) s.minWidth = SIZE(p.minw);
+  if (p.maxw != null) s.maxWidth = SIZE(p.maxw);
+  if (p.minh != null) s.minHeight = SIZE(p.minh);
+  if (p.maxh != null) s.maxHeight = SIZE(p.maxh);
+  if (p.grow) { s.flexGrow = "1"; s.minWidth = s.minWidth || "0"; }
+  if (p.wrap) s.flexWrap = "wrap";
+  if (p.align) s.alignItems = p.align;
+  if (p.justify) s.justifyContent = p.justify;
+  if (p.size != null) s.fontSize = SIZE(p.size);
+  if (p.color) s.color = p.color;
+  if (p.bg) s.background = p.bg;
+  if (p.bold) s.fontWeight = "650";
+  if (p.italic) s.fontStyle = "italic";
+  if (p.mono) s.fontFamily = "var(--mono)";
+  if (p.muted) s.color = "var(--muted)";
+  if (p.round != null) s.borderRadius = p.round === true ? "var(--radius)" : SIZE(p.round);
+  if (p.shadow) s.boxShadow = "var(--shadow)";
+  if (p.border) s.border = p.border === true ? "1px solid var(--border)" : p.border;
+  if (p.hidden) s.display = "none";
+}
+
+// The full class list is a pure function of the props, so no patch order
+// can lose a state class. Transition markers survive via el._gin.
+function reclass(el) {
+  const p = el._gprops || {};
+  const t = el._gtag;
+  const parts = [el._gbase];
+  if (t === "box") {
+    parts.push(p.dir === "grid" ? "g-grid" : p.dir === "row" ? "g-row" : "g-col");
+    if (p.card) parts.push("g-card");
+    if (p.scroll) parts.push("g-scroll");
+  } else if (t === "button") {
+    if (p.kind && p.kind !== "default") parts.push(p.kind);
+    if (p.small) parts.push("sm");
+  } else if (t === "radio") {
+    if (p.inline) parts.push("inline");
+  } else if (t === "check") {
+    if (p.switch) parts.push("g-switch");
+  } else if (t === "progress") {
+    if (p.value == null || p.value === false) parts.push("ind");
+  } else if (t === "dialog" || t === "drawer") {
+    if (p.open) parts.push("g-open");
+    if (t === "drawer" && p.side === "left") parts.push("left");
+  } else if (t === "table") {
+    // classes live on the inner table, rebuilt by renderTable
+  }
+  if (p.transition) { parts.push("g-tr-" + p.transition); if (el._gin) parts.push("g-in"); }
+  if (p.class) parts.push(p.class);
+  el.className = parts.join(" ");
+}
+
+// ------------------------------------------------------------ prop apply
+function applyProp(el, k, v) {
+  el._gprops = el._gprops || {};
+  el._gprops[k] = v;
+  const tag = el._gtag;
+  switch (k) {
+    case "id": el.id = v; return;
+    case "class": case "card": case "scroll": case "kind": case "small":
+    case "inline": case "switch": case "side": case "transition":
+      reclass(el); return;
+    case "dir": reclass(el); restyle(el); return;
+    case "cols": restyle(el); return;
+    case "tooltip": el.title = v == null ? "" : v; return;
+    case "disabled": {
+      const t = el._gctl || el;
+      if (v) t.setAttribute("disabled", ""); else t.removeAttribute("disabled");
+      return;
+    }
+    case "value": {
+      if (tag === "slider") {
+        const inp = el._gctl;
+        if (String(inp.value) !== String(v)) inp.value = v;
+        const lab = el.querySelector(".g-slider-val");
+        if (lab) lab.textContent = inp.value;
+      } else if (tag === "dropdown" || tag === "radio") {
+        setPickValue(el, v);
+      } else if (tag === "progress") {
+        setProgress(el, v);
+      } else {
+        const inp = el._gctl || el;
+        if (document.activeElement !== inp || String(inp.value) !== String(v ?? "")) {
+          if (String(inp.value) !== String(v ?? "")) inp.value = v ?? "";
+        }
+      }
+      return;
+    }
+    case "checked": { const c = el._gctl; if (c && c.checked !== !!v) c.checked = !!v; return; }
+    case "open":
+      if (tag === "details") { if (el.open !== !!v) el.open = !!v; }
+      else reclass(el);
+      return;
+    case "label": {
+      const lab = el.querySelector(":scope > .g-label, :scope > * > .g-label");
+      if (lab) lab.textContent = v ?? "";
+      return;
+    }
+    case "src": el._gctl ? (el._gctl.src = v) : (el.src = v); return;
+    case "alt": if (el.tagName === "IMG") el.alt = v ?? ""; return;
+    case "fit": if (el.tagName === "IMG") el.style.objectFit = v; restyle(el); return;
+    case "to": case "href": el.href = v; return;
+    case "newTab": if (v) { el.target = "_blank"; el.rel = "noopener"; } return;
+    case "glyph": if (v && String(v).trim().startsWith("<svg")) el.innerHTML = v;
+                  else el.textContent = v ?? ""; return;
+    case "svg": el.innerHTML = v ?? ""; return;
+    case "html": el.innerHTML = v ?? ""; return;
+    case "md": el.innerHTML = md(v ?? ""); return;
+    case "code": { const c = el.querySelector("code"); if (c) c.textContent = v ?? ""; return; }
+    case "placeholder": if (el._gctl) el._gctl.placeholder = v ?? ""; return;
+    case "rows": if (tag === "textarea") { el._gctl.rows = v || 3; return; }
+                 if (tag === "table") { renderTable(el); return; }
+                 return;
+    case "columns": if (tag === "table") renderTable(el); return;
+    case "sortable": case "dense": case "empty": if (tag === "table") renderTable(el); return;
+    case "min": case "max": case "step":
+      if (el._gctl) el._gctl[k] = v;
+      return;
+    case "options": if (tag === "dropdown") renderOptions(el);
+                    else if (tag === "radio") renderRadio(el);
+                    return;
+    case "data": if (tag === "tree") renderTree(el); return;
+    case "draw": if (tag === "canvas") drawCanvas(el, v); return;
+    case "icon": {
+      const ic = el.querySelector(":scope > .g-btn-icon");
+      if (ic) { ic.textContent = v ?? ""; ic.style.display = v ? "" : "none"; }
+      return;
+    }
+    case "title": if (tag === "dialog" || tag === "drawer") {
+      const t = el.querySelector(".g-dlg-title"); if (t) t.textContent = v ?? "";
+      return;
+    } return;
+    case "wide": { const d = el.querySelector(".g-dlg"); if (d) d.classList.toggle("wide", !!v); return; }
+    case "autofocus": if (v) setTimeout(() => (el._gctl || el).focus(), 30); return;
+    case "password": if (el._gctl) el._gctl.type = v ? "password" : (el._gprops.type || "text"); return;
+    case "type": if (el._gctl && !el._gprops.password) el._gctl.type = v; return;
+    case "hotkey": if (v) hotkeyButtons.set(normCombo(v), el); return;
+    case "showValue": { const lab = el.querySelector(".g-slider-val");
+      if (lab) lab.style.display = v ? "" : "none"; return; }
+    case "contextMenu": return;   // read at event time
+    case "level": return;         // heading level is fixed at build time
+    case "w": if (tag === "canvas") { el._gw = v; drawCanvas(el, el._gprops.draw); } restyle(el); return;
+    case "h": if (tag === "canvas") { el._gh = v; drawCanvas(el, el._gprops.draw); } restyle(el); return;
+    case "accept": if (el._gfile) el._gfile.accept = v ?? ""; return;
+    case "multiple": if (el._gfile) el._gfile.multiple = !!v; return;
+    case "text": { const lab = el.querySelector(":scope > .g-label"); if (lab) lab.textContent = v ?? ""; return; }
+    default: restyle(el);
+  }
+}
+
+function setProgress(el, v) {
+  const bar = el.querySelector(".g-progress-bar");
+  reclass(el);
+  bar.style.width = (v == null || v === false) ? "30%"
+    : Math.max(0, Math.min(1, v)) * 100 + "%";
+}
+
+const optList = (opts) => (Array.isArray(opts) ? opts : []).map(o =>
+  typeof o === "object" && o !== null ? o : {value: o, label: String(o)});
+
+function renderOptions(el) {
+  const p = el._gprops, sel = el._gctl;
+  sel.innerHTML = "";
+  if (p.placeholder) {
+    const o = document.createElement("option");
+    o.value = ""; o.textContent = p.placeholder; o.disabled = true; o.hidden = true;
+    sel.appendChild(o);
+  }
+  optList(p.options).forEach(o => {
+    const e = document.createElement("option");
+    e.value = o.value; e.textContent = o.label != null ? o.label : o.value;
+    sel.appendChild(e);
+  });
+  setPickValue(el, p.value);
+}
+
+function renderRadio(el) {
+  const p = el._gprops;
+  el.innerHTML = "";
+  const name = "g-r-" + el._gid;
+  optList(p.options).forEach(o => {
+    const lab = document.createElement("label");
+    lab.className = "g-check";
+    const inp = document.createElement("input");
+    inp.type = "radio"; inp.name = name; inp.value = o.value;
+    inp.addEventListener("change", () => sendEv(el._gid, "change", {v: coerce(o.value)}));
+    lab.appendChild(inp);
+    lab.appendChild(document.createTextNode(o.label != null ? o.label : o.value));
+    el.appendChild(lab);
+  });
+  setPickValue(el, p.value);
+}
+
+function setPickValue(el, v) {
+  if (el._gtag === "dropdown") { el._gctl.value = v ?? ""; return; }
+  el.querySelectorAll("input[type=radio]").forEach(r => r.checked = String(r.value) === String(v));
+}
+
+// number-ish strings back to numbers, so bound signals keep their type
+function coerce(v) {
+  if (typeof v !== "string") return v;
+  if (v !== "" && !isNaN(Number(v)) && /^-?\d+(\.\d+)?$/.test(v)) return Number(v);
+  return v;
+}
+
+// ---------------------------------------------------------------- table
+function renderTable(el) {
+  const p = el._gprops;
+  const cols = Array.isArray(p.columns) ? p.columns : [];
+  const rows = Array.isArray(p.rows) ? p.rows : [];
+  const tbl = el._gctl;
+  tbl.className = "g-table" + (p.dense ? " dense" : "");
+  const st = el._gsort || {};
+  let order = rows.map((_, i) => i);
+  if (st.key != null) {
+    order.sort((a, b) => {
+      const x = rows[a] ? rows[a][st.key] : null, y = rows[b] ? rows[b][st.key] : null;
+      const r = typeof x === "number" && typeof y === "number" ? x - y :
+        String(x ?? "").localeCompare(String(y ?? ""), undefined, {numeric: true});
+      return st.dirn ? -r : r;
+    });
+  }
+  let html = "<thead><tr>";
+  for (const c of cols) {
+    const key = typeof c === "object" ? c.key : c;
+    const label = typeof c === "object" && c.label != null ? c.label : key;
+    const arrow = st.key === key ? (st.dirn ? " ↓" : " ↑") : "";
+    html += `<th data-k="${esc(key)}" ${p.sortable ? 'class="sortable"' : ""}` +
+      (typeof c === "object" && c.w ? ` style="width:${esc(String(c.w))}"` : "") +
+      (typeof c === "object" && c.align ? ` align="${esc(c.align)}"` : "") +
+      `>${esc(label)}${arrow}</th>`;
+  }
+  html += "</tr></thead><tbody>";
+  if (!rows.length) {
+    html += `<tr><td colspan="${cols.length || 1}" class="g-empty">${esc(p.empty || "No data")}</td></tr>`;
+  } else {
+    for (const i of order) {
+      const r = rows[i] || {};
+      html += `<tr data-i="${i}" class="${el._growclick ? "clickable" : ""}">`;
+      for (const c of cols) {
+        const key = typeof c === "object" ? c.key : c;
+        const cell = r[key];
+        html += `<td${typeof c === "object" && c.align ? ` align="${esc(c.align)}"` : ""}>` +
+          `${cell == null ? "" : esc(String(cell))}</td>`;
+      }
+      html += "</tr>";
+    }
+  }
+  tbl.innerHTML = html + "</tbody>";
+  if (p.sortable) tbl.querySelectorAll("th").forEach(th => th.addEventListener("click", () => {
+    const key = th.dataset.k;
+    el._gsort = {key, dirn: st.key === key ? !st.dirn : false};
+    renderTable(el);
+  }));
+  if (el._growclick) tbl.querySelectorAll("tbody tr[data-i]").forEach(tr =>
+    tr.addEventListener("click", () => {
+      const i = Number(tr.dataset.i);
+      sendEv(el._gid, "rowclick", {v: {index: i, row: rows[i]}});
+    }));
+}
+
+// ----------------------------------------------------------------- tree
+function renderTree(el) {
+  const p = el._gprops;
+  el._gtreeOpen = el._gtreeOpen || new Set();
+  el.innerHTML = "";
+  const build = (items, parent, path) => {
+    for (const it of (Array.isArray(items) ? items : [])) {
+      const key = it.key != null ? String(it.key) : path.concat(it.label).join("/");
+      const li = document.createElement("li");
+      const rowEl = document.createElement("div");
+      rowEl.className = "row" + (el._gtreeSel === key ? " sel" : "");
+      const kids = Array.isArray(it.children) && it.children.length;
+      const tw = document.createElement("span");
+      tw.className = "tw" + (el._gtreeOpen.has(key) ? " open" : "");
+      tw.textContent = kids ? "▶" : "";
+      rowEl.appendChild(tw);
+      if (it.icon) { const ic = document.createElement("span"); ic.textContent = it.icon; rowEl.appendChild(ic); }
+      rowEl.appendChild(document.createTextNode(it.label));
+      rowEl.addEventListener("click", () => {
+        if (kids) {
+          if (el._gtreeOpen.has(key)) el._gtreeOpen.delete(key); else el._gtreeOpen.add(key);
+        }
+        el._gtreeSel = key;
+        renderTree(el);
+        sendEv(el._gid, "select", {v: {key: it.key != null ? it.key : key, label: it.label,
+          path: path.concat(it.label)}});
+      });
+      li.appendChild(rowEl);
+      if (kids && el._gtreeOpen.has(key)) {
+        const ul = document.createElement("ul");
+        build(it.children, ul, path.concat(it.label));
+        li.appendChild(ul);
+      }
+      parent.appendChild(li);
+    }
+  };
+  build(p.data, el, []);
+}
+
+// --------------------------------------------------------------- upload
+function wireUpload(el) {
+  const file = document.createElement("input");
+  file.type = "file"; file.style.display = "none";
+  el._gfile = file;
+  el.appendChild(file);
+  const send = (files) => {
+    const max = el._gprops.maxBytes || 10485760;
+    const list = [...files];
+    for (const f of list) if (f.size > max) {
+      toast(`File too large: ${f.name}`, "error", 4000);
+      return;
+    }
+    Promise.all(list.map(f => new Promise(res => {
+      const r = new FileReader();
+      r.onload = () => res({name: f.name, size: f.size, type: f.type,
+        base64: String(r.result).split(",")[1] || ""});
+      r.readAsDataURL(f);
+    }))).then(fs => { if (fs.length) sendEv(el._gid, "upload", {v: fs}); });
+    file.value = "";
+  };
+  el.addEventListener("click", () => file.click());
+  file.addEventListener("change", () => send(file.files));
+  el.addEventListener("dragover", (e) => { e.preventDefault(); el.classList.add("over"); });
+  el.addEventListener("dragleave", () => el.classList.remove("over"));
+  el.addEventListener("drop", (e) => {
+    e.preventDefault(); el.classList.remove("over");
+    send(e.dataTransfer.files);
+  });
+}
+
+// ----------------------------------------------------------- construction
+function make(tag, cls, inner) {
+  const el = document.createElement(tag);
+  el.className = cls;
+  el._gbase = cls;
+  if (inner) el.appendChild(inner);
+  return el;
+}
+
+function build(node) {
+  if (node.x !== undefined && node.t === undefined) {
+    const tn = document.createTextNode(node.x);
+    tn._gid = node.i;
+    reg.set(node.i, tn);
+    return tn;
+  }
+  const t = node.t;
+  let el, slot = null;
+  switch (t) {
+    case "box": {
+      el = make("div", "g-box");
+      break;
+    }
+    case "ctr": el = make("div", "g-ctr"); break;
+    case "text": el = make("span", "g-text"); break;
+    case "heading": {
+      const lv = node.p && node.p.level ? node.p.level : 2;
+      el = make("h" + Math.min(6, Math.max(1, lv)), "g-heading");
+      break;
+    }
+    case "button": {
+      el = make("button", "g-btn");
+      const ic = document.createElement("span");
+      ic.className = "g-btn-icon"; ic.style.display = "none";
+      const lab = document.createElement("span");
+      lab.className = "g-btn-label";
+      el.appendChild(ic); el.appendChild(lab);
+      slot = lab;
+      break;
+    }
+    case "link": el = make("a", "g-link"); break;
+    case "image": el = make("img", "g-img"); break;
+    case "icon": el = make("span", "g-icon"); break;
+    case "badge": el = make("span", "g-badge"); break;
+    case "divider": el = make("hr", "g-divider"); break;
+    case "spacer": el = make("div", "g-spacer"); break;
+    case "html": el = make("div", "g-html"); break;
+    case "md": el = make("div", "g-md"); break;
+    case "code": { el = make("pre", "g-code", document.createElement("code")); break; }
+    case "progress": {
+      el = make("div", "g-progress", make("div", "g-progress-bar"));
+      break;
+    }
+    case "spinner": el = make("div", "g-spin"); break;
+    case "canvas": { el = make("canvas", "g-canvas"); el._gw = 300; el._gh = 150; break; }
+    case "table": {
+      el = make("div", "g-table-wrap");
+      el._gctl = make("table", "g-table");
+      el.appendChild(el._gctl);
+      el._growclick = (node.e || []).includes("rowclick");
+      break;
+    }
+    case "tree": el = make("ul", "g-tree"); break;
+    case "input": {
+      el = make("span", "g-input-wrap");
+      el.style.display = "inline-flex";
+      const inp = make("input", "g-input");
+      inp.style.flex = "1";
+      el._gctl = inp; el.appendChild(inp);
+      break;
+    }
+    case "textarea": {
+      el = make("span", "g-input-wrap");
+      el.style.display = "inline-flex";
+      const ta = make("textarea", "g-input");
+      ta.rows = 3; ta.style.flex = "1";
+      el._gctl = ta; el.appendChild(ta);
+      break;
+    }
+    case "check": {
+      el = make("label", "g-check");
+      const inp = document.createElement("input");
+      inp.type = "checkbox";
+      el._gctl = inp;
+      el.appendChild(inp);
+      el.appendChild(make("span", "g-label"));
+      break;
+    }
+    case "radio": el = make("div", "g-radio"); break;
+    case "dropdown": {
+      el = make("span", "g-input-wrap");
+      el.style.display = "inline-flex";
+      const sel = make("select", "g-input");
+      el._gctl = sel; el.appendChild(sel);
+      break;
+    }
+    case "slider": {
+      el = make("div", "g-slider-wrap");
+      const inp = make("input", "g-input");
+      inp.type = "range";
+      inp.style.flex = "1";
+      el._gctl = inp;
+      el.appendChild(inp);
+      const lab = make("span", "g-slider-val");
+      lab.style.display = "none";
+      el.appendChild(lab);
+      break;
+    }
+    case "upload": {
+      el = make("div", "g-upload");
+      el.appendChild(make("span", "g-label")).textContent = "";
+      const lab = el.querySelector(".g-label");
+      lab.textContent = (node.p && node.p.label) || "Drop files here or click to choose";
+      wireUpload(el);
+      break;
+    }
+    case "details": {
+      el = make("details", "g-details");
+      const sum = document.createElement("summary");
+      sum.appendChild(make("span", "g-label"));
+      el.appendChild(sum);
+      slot = make("div", "g-details-body");
+      el.appendChild(slot);
+      el.addEventListener("toggle", () => {
+        if (el._gopen !== el.open) { el._gopen = el.open; sendEv(node.i, "toggle", {v: el.open}); }
+      });
+      break;
+    }
+    case "dialog": case "drawer": {
+      el = make("div", "g-overlay" + (t === "drawer" ? " g-drawer" : ""));
+      const panel = make("div", t === "drawer" ? "g-drw" : "g-dlg");
+      const head = make("div", "g-dlg-head");
+      head.appendChild(make("div", "g-dlg-title"));
+      const x = make("button", "g-dlg-x");
+      x.innerHTML = "&#10005;";
+      x.addEventListener("click", () => sendEv(node.i, "close", {v: false}));
+      head.appendChild(x);
+      panel.appendChild(head);
+      slot = make("div", "g-dlg-body");
+      panel.appendChild(slot);
+      el.appendChild(panel);
+      el.addEventListener("pointerdown", (e) => {
+        if (e.target === el) sendEv(node.i, "close", {v: false});
+      });
+      break;
+    }
+    case "menu": {
+      el = make("div", "g-menu-wrap");
+      const btn = make("button", "g-btn");
+      btn.appendChild(make("span", "g-label"));
+      el._gctl = btn;
+      el.appendChild(btn);
+      btn.addEventListener("click", () => {
+        const r = btn.getBoundingClientRect();
+        showPop(el._gprops.items, r.left, r.bottom + 4, (key) => sendEv(node.i, "select", {v: key}));
+      });
+      break;
+    }
+    default: el = make("div", "g-" + t);
+  }
+  el._gid = node.i;
+  el._gtag = t;
+  el._gslot = slot;
+  reg.set(node.i, el);
+  if (node.p) {
+    if (t === "menu" && node.p.label != null) el.querySelector(".g-label").textContent = node.p.label;
+    for (const k in node.p) applyProp(el, k, node.p[k]);
+  }
+  wireEvents(el, node);
+  const target = slot || el;
+  if (node.c) for (const c of node.c) target.appendChild(build(c));
+  if (node.p && node.p.transition) enter(el, node.p.transition);
+  return el;
+}
+
+function enter(el, tr) {
+  el.classList.add("g-tr-" + tr);
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    el._gin = true;
+    el.classList.add("g-in");
+  }));
+}
+
+// ---------------------------------------------------------------- events
+function wireEvents(el, node) {
+  const evs = node.e || [];
+  const gid = node.i;
+  const ctl = el._gctl || el;
+  for (const k of evs) {
+    switch (k) {
+      case "click":
+        el.addEventListener("click", (e) => {
+          if (el._gtag === "table" || el._gtag === "menu") return;
+          sendEv(gid, "click", {x: e.clientX, y: e.clientY,
+            alt: e.altKey, shift: e.shiftKey, ctrl: e.ctrlKey || e.metaKey});
+        });
+        break;
+      case "input": {
+        // Debounced while typing, flushed on blur/Enter so a click on a
+        // button right after typing still sees the finished value.
+        let timer = null;
+        const post = () => {
+          timer = null;
+          let v = ctl.value;
+          if (ctl.type === "number" || ctl.type === "range") v = v === "" ? null : Number(v);
+          sendEv(gid, "input", {v});
+        };
+        const flushNow = () => { if (timer) { clearTimeout(timer); post(); } };
+        ctl.addEventListener("input", () => {
+          if (el._gtag === "slider") {
+            const lab = el.querySelector(".g-slider-val");
+            if (lab) lab.textContent = ctl.value;
+          }
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(post, el._gtag === "slider" ? 30 : 80);
+        });
+        ctl.addEventListener("blur", flushNow);
+        el._gflush = flushNow;
+        break;
+      }
+      case "change":
+        if (el._gtag === "check") {
+          ctl.addEventListener("change", () => sendEv(gid, "change", {v: ctl.checked}));
+        } else if (el._gtag === "dropdown") {
+          ctl.addEventListener("change", () => sendEv(gid, "change", {v: coerce(ctl.value)}));
+        } else if (el._gtag !== "radio") {
+          ctl.addEventListener("change", () => sendEv(gid, "change", {v: ctl.value}));
+        }
+        break;
+      case "enter":
+        ctl.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.isComposing) {
+            if (el._gflush) el._gflush();   // bound value first, then the event
+            sendEv(gid, "enter", {v: ctl.value});
+          }
+        });
+        break;
+      case "key":
+        el.addEventListener("keydown", (e) => sendEv(gid, "key",
+          {v: {key: e.key, ctrl: e.ctrlKey, alt: e.altKey, shift: e.shiftKey, meta: e.metaKey}}));
+        break;
+      case "focus": ctl.addEventListener("focus", () => sendEv(gid, "focus", {})); break;
+      case "blur": ctl.addEventListener("blur", () => sendEv(gid, "blur", {})); break;
+      case "pointer": {
+        const pos = (e) => {
+          const r = el.getBoundingClientRect();
+          return {x: Math.round(e.clientX - r.left), y: Math.round(e.clientY - r.top),
+            buttons: e.buttons};
+        };
+        let last = 0;
+        el.addEventListener("pointerdown", (e) => {
+          el.setPointerCapture(e.pointerId);
+          sendEv(gid, "pointer", {v: {type: "down", ...pos(e)}});
+        });
+        el.addEventListener("pointermove", (e) => {
+          const now = Date.now();
+          if (now - last > 25) { last = now; sendEv(gid, "pointer", {v: {type: "move", ...pos(e)}}); }
+        });
+        el.addEventListener("pointerup", (e) => sendEv(gid, "pointer", {v: {type: "up", ...pos(e)}}));
+        break;
+      }
+      case "context":
+        el.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          sendEv(gid, "context", {v: {x: e.clientX, y: e.clientY}});
+        });
+        break;
+      case "menu":
+        el.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          showPop(el._gprops.contextMenu, e.clientX, e.clientY,
+            (key) => sendEv(gid, "menu", {v: key}));
+        });
+        break;
+      // toggle/close/select/rowclick/upload are wired by their builders
+    }
+  }
+}
+
+// ---------------------------------------------------------------- patches
+function unregister(n) {
+  if (n._gid !== undefined) reg.delete(n._gid);
+  if (n.childNodes) for (const c of n.childNodes) unregister(c);
+}
+
+// Removal is immediate: sibling indices in the same patch batch depend on
+// it. Enter transitions animate; exits do not.
+function removeNode(n) {
+  unregister(n);
+  n.remove();
+}
+
+function apply(op) {
+  const [kind, a, b, c] = op;
+  switch (kind) {
+    case "p": { const n = reg.get(a); if (n) applyProp(n, b, c); break; }
+    case "t": { const n = reg.get(a); if (n) n.data = b; break; }
+    case "ins": {
+      const parent = reg.get(a);
+      if (!parent) break;
+      const slot = parent._gslot || parent;
+      const el = build(c);
+      slot.insertBefore(el, slot.childNodes[b] || null);
+      break;
+    }
+    case "rm": { const n = reg.get(a); if (n) removeNode(n); break; }
+    case "rep": {
+      const n = reg.get(a);
+      if (!n) break;
+      const el = build(b);
+      n.replaceWith(el);
+      unregister(n);
+      break;
+    }
+    case "mv": {
+      const parent = reg.get(a);
+      if (!parent) break;
+      const slot = parent._gslot || parent;
+      const n = slot.childNodes[b];
+      if (!n) break;
+      n.remove();
+      slot.insertBefore(n, slot.childNodes[c] || null);
+      break;
+    }
+    case "cmd": command(a, b);
+  }
+}
+
+// --------------------------------------------------------------- commands
+function toast(text, kindName, ms) {
+  let host = document.getElementById("g-toasts");
+  if (!host) { host = document.createElement("div"); host.id = "g-toasts"; document.body.appendChild(host); }
+  const t = document.createElement("div");
+  t.className = "g-toast " + (kindName && kindName !== "info" ? kindName : "");
+  t.textContent = text;
+  host.appendChild(t);
+  setTimeout(() => { t.classList.add("gone"); setTimeout(() => t.remove(), 300); }, ms || 3500);
+}
+
+const hotkeys = new Set();
+const hotkeyButtons = new Map();
+function normCombo(s) {
+  const parts = String(s).toLowerCase().split("+").map(p => p.trim());
+  const key = parts.pop();
+  const mods = new Set(parts.map(p => p === "cmd" || p === "meta" || p === "mod" ? "mod" : p));
+  return [...[...mods].sort(), key].join("+");
+}
+document.addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  const mods = [];
+  if (e.ctrlKey || e.metaKey) mods.push("mod");
+  if (e.altKey) mods.push("alt");
+  if (e.shiftKey) mods.push("shift");
+  const combo = [...mods.sort(), e.key.toLowerCase()].join("+");
+  const btn = hotkeyButtons.get(combo);
+  if (btn && document.contains(btn)) { e.preventDefault(); btn.click(); return; }
+  if (hotkeys.has(combo)) { e.preventDefault(); sendMsg({t: "hk", combo}); }
+});
+
+function command(name, v) {
+  switch (name) {
+    case "notify": toast(v.text, v.kind, v.ms); break;
+    case "title": document.title = v; break;
+    case "dark":
+      if (v === "auto") document.documentElement.removeAttribute("data-theme");
+      else document.documentElement.setAttribute("data-theme", v ? "dark" : "light");
+      break;
+    case "nav": location.href = v; break;
+    case "clip":
+      if (navigator.clipboard) navigator.clipboard.writeText(v).catch(() => {});
+      break;
+    case "focus": { const n = document.getElementById(v); if (n) (n._gctl || n).focus(); break; }
+    case "scroll": { const n = document.getElementById(v);
+      if (n) n.scrollIntoView({behavior: "smooth", block: "nearest"}); break; }
+    case "js": try { new Function(v)(); } catch (e) { console.warn("gui js:", e); } break;
+    case "hotkey": hotkeys.add(normCombo(v)); break;
+    case "download": {
+      const bytes = Uint8Array.from(atob(v.base64), ch => ch.charCodeAt(0));
+      const blob = new Blob([bytes], {type: v.mime || "application/octet-stream"});
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = v.name || "download";
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 800);
+      break;
+    }
+    case "bye":
+      closedByServer = true;
+      window.close();
+      setTimeout(() => banner("This window can be closed now."), 300);
+      break;
+  }
+}
+
+// ------------------------------------------------------------- connection
+function banner(text) {
+  let b = document.getElementById("g-conn");
+  if (!b) { b = document.createElement("div"); b.id = "g-conn"; document.body.appendChild(b); }
+  if (text == null) { b.style.display = "none"; return; }
+  b.textContent = text;
+  b.style.display = "block";
+}
+
+// ESC closes the topmost open dialog/drawer that listens for close.
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  if (openPop) { closePop(); return; }
+  const overlays = [...document.querySelectorAll(".g-overlay.g-open")];
+  const top = overlays[overlays.length - 1];
+  if (top && top._gid !== undefined) sendEv(top._gid, "close", {v: false});
+});
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(proto + "//" + location.host + "/__gui_ws");
+  ws.onopen = () => {
+    const q = {};
+    new URLSearchParams(location.search).forEach((val, key) => q[key] = val);
+    sendMsg({t: "hello", token: CFG.token, path: location.pathname, query: q,
+      client: {dark: matchMedia("(prefers-color-scheme: dark)").matches,
+        lang: navigator.language, width: innerWidth, height: innerHeight}});
+  };
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.t === "init") {
+      const root = document.getElementById("app");
+      reg.clear();
+      root.innerHTML = "";
+      root.appendChild(build(m.root));
+      if (m.title) document.title = m.title;
+      everInit = true;
+      banner(null);
+    } else if (m.t === "patch") {
+      for (const op of m.ops) apply(op);
+    }
+  };
+  ws.onclose = () => {
+    if (closedByServer) return;
+    if (!everInit) { banner("Cannot reach the app."); }
+    else banner("Connection lost — reconnecting…");
+    setTimeout(() => {
+      if (everInit) location.reload();
+      else connect();
+    }, 1200);
+  };
+}
+setInterval(() => sendMsg({t: "ping"}), 20000);
+connect();
+})();
+"""
+
+// Assembles the served page. Static per app: the token identifies the app,
+// the theme paints it, and the tiny favicon keeps the tab tidy.
+def giClientPage(cfg, token) {
+  val title = _escapeHtml(get(cfg, "title", "SFL"))
+  val dark = get(cfg, "dark", "auto")
+  val themeAttr = if (dark == true) then " data-theme=\"dark\""
+                  elsif (dark == false) then " data-theme=\"light\""
+                  else ""
+  val theme = get(cfg, "theme", {})
+  var vars = ""
+  for (k in keys(theme)) {
+    vars = vars + "  --${k}: ${theme[k]};\n"
+  }
+  val themeCss = if (vars == "") then "" else ":root {\n${vars}}\n"
+  val userCss = get(cfg, "css", "")
+  "<!doctype html>\n<html${themeAttr}><head><meta charset=\"utf-8\">" +
+  "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" +
+  "<title>${title}</title>" +
+  "<link rel=\"icon\" href=\"data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%233b6ef5'/><text x='8' y='12' font-size='10' text-anchor='middle' fill='white' font-family='sans-serif'>S</text></svg>\">" +
+  "<style>${_baseCss()}\n${themeCss}${userCss}</style>" +
+  "</head><body><div id=\"app\"></div>" +
+  "<script>window.__SFL = {token: \"${token}\"};</script>" +
+  "<script>${_clientJs()}</script>" +
+  "</body></html>"
+}
+
+def _escapeHtml(s) {
+  var out = "${s}"
+  out = replace(out, "&", "&amp;")
+  out = replace(out, "<", "&lt;")
+  out = replace(out, ">", "&gt;")
+  out
+}

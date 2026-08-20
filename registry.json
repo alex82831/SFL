@@ -9,6 +9,7 @@
     "cli":      { "git": "github.com/alex82831/SFL", "subdir": "packages/cli" },
     "log":      { "git": "github.com/alex82831/SFL", "subdir": "packages/log" },
     "redis":    { "git": "github.com/alex82831/SFL", "subdir": "packages/redis" },
-    "httpd":    { "git": "github.com/alex82831/SFL", "subdir": "packages/httpd" }
+    "httpd":    { "git": "github.com/alex82831/SFL", "subdir": "packages/httpd" },
+    "gui":      { "git": "github.com/alex82831/SFL", "subdir": "packages/gui" }
   }
 }

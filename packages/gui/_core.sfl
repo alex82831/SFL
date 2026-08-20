@@ -1,0 +1,302 @@
+// gui/core — the reactive heart of the GUI framework: signals, computed
+// values, effects and batching, with fine-grained dependency tracking.
+//
+//   val count = signal(0)
+//   val label = computed(() -> "count is ${count.get()}")
+//   effect(() -> println(label.get()))     // runs now and on every change
+//   count.set(1)
+//
+// Tracking is per-thread: a read registers a dependency only while its own
+// thread is evaluating an observer, so background threads read and write
+// signals freely — set() from any thread updates the value under one lock
+// and delivers change notifications outside it. The GUI app loop (gui/app)
+// plugs into the same observer protocol to re-render widgets.
+//
+// Names starting with gi- are cross-module internals of the gui package,
+// not public API. Underscore names are file-private as usual.
+
+// One lock guards the whole dependency graph: values, versions, subscriber
+// tables, the per-thread frame and batch registries, and the id counter.
+// Critical sections are tiny; user code always runs outside the lock.
+val _lock = mutex()
+var _nextId = 0
+
+def _newId() = withLock(_lock, () -> { _nextId += 1; _nextId })
+
+// threadName -> {obs} while that thread evaluates an observer ({obs: null}
+// while it runs untracked()). Absent otherwise.
+val _frames = {}
+
+// threadName -> {depth, queue} while that thread is inside batch().
+val _batches = {}
+
+// ------------------------------------------------------------- observers
+
+// An observer is anything that re-runs when its dependencies change: an
+// effect, a computed value, or (in gui/render) a widget binding. `deliver`
+// is called once per change wave, outside the graph lock, with the observer
+// itself; re-running and clearing `dirty` is the observer's business.
+def giObserver(kind, deliver) {
+  {
+    bid: _newId(),
+    kind: kind,            // "effect" | "computed" | "binding"
+    deliver: deliver,      // (obs) -> _, called outside the lock
+    deps: {},              // sid -> signal record, the current subscriptions
+    dirty: false,
+    dead: false
+  }
+}
+
+def _pushFrame(obs) {
+  withLock(_lock, () -> {
+    val me = currentThreadName()
+    val prev = get(_frames, me, null)
+    _frames[me] = {obs: obs}
+    prev
+  })
+}
+
+def _popFrame(prev) {
+  withLock(_lock, () -> {
+    val me = currentThreadName()
+    if (prev == null) then remove(_frames, me) else _frames[me] = prev
+    null
+  })
+}
+
+// Evaluates fn() with reads tracked into `obs`: old subscriptions are
+// dropped, reads during fn() re-subscribe, and nesting restores the outer
+// frame. The value of fn() is returned; an error unwinds after the frame
+// is restored, with the fresh subscriptions kept (a later run replaces
+// them).
+def giTracked(obs, fn) {
+  withLock(_lock, () -> {
+    for (sid in keys(obs.deps)) { remove(obs.deps[sid].subs, "${obs.bid}") }
+    clear(obs.deps)
+    null
+  })
+  val prev = _pushFrame(obs)
+  val r = attempt(fn)
+  _popFrame(prev)
+  if (!r.ok) { error(r.error.message) }
+  r.value
+}
+
+// Runs fn() with tracking suspended, so its reads subscribe to nothing.
+def untracked(fn) {
+  val prev = _pushFrame(null)
+  val r = attempt(fn)
+  _popFrame(prev)
+  if (!r.ok) { error(r.error.message) }
+  r.value
+}
+
+// Unsubscribes an observer everywhere and marks it dead; a dead observer is
+// skipped by change waves and may be dropped by whoever holds it.
+def giDispose(obs) {
+  withLock(_lock, () -> {
+    obs.dead = true
+    for (sid in keys(obs.deps)) { remove(obs.deps[sid].subs, "${obs.bid}") }
+    clear(obs.deps)
+    null
+  })
+  null
+}
+
+// Registers the current thread's evaluating observer on a signal record.
+// Called with the lock held, by a tracked get().
+def _register(rec) {
+  val frame = get(_frames, currentThreadName(), null)
+  if (frame != null && frame.obs != null && !frame.obs.dead) {
+    frame.obs.deps["${rec.sid}"] = rec
+    rec.subs["${frame.obs.bid}"] = frame.obs
+  }
+  null
+}
+
+// The change wave: from one signal record, mark every transitively affected
+// observer dirty and collect the ones that want delivery. Computed values
+// go stale and pass the wave through to their own subscribers; effects and
+// bindings are collected once each. Runs with the lock held.
+def _collect(rec, out, seen) {
+  for (bidKey in keys(rec.subs)) {
+    val obs = rec.subs[bidKey]
+    if (!obs.dead && !contains(seen, bidKey)) {
+      seen[bidKey] = true
+      if (obs.kind == "computed") {
+        obs.stale()
+        _collect(obs.asSignal(), out, seen)
+      } elsif (!obs.dirty) {
+        obs.dirty = true
+        push(out, obs)
+      }
+    }
+  }
+  null
+}
+
+// Delivery, outside the lock: immediate normally, deferred while this
+// thread is inside batch(). Every observer gets its delivery even when an
+// earlier one fails; the first failure is then re-raised.
+def _deliver(list) {
+  val b = withLock(_lock, () -> get(_batches, currentThreadName(), null))
+  if (b != null) {
+    for (obs in list) { push(b.queue, obs) }
+    null
+  } else {
+    var firstErr = null
+    for (obs in list) {
+      if (!obs.dead) {
+        val r = attempt(() -> obs.deliver(obs))
+        if (!r.ok && firstErr == null) { firstErr = r.error.message }
+      }
+    }
+    if (firstErr != null) { error(firstErr) }
+    null
+  }
+}
+
+// Groups any number of set() calls into one delivery wave: observers run
+// once at the end, not once per write. Nested batches join the outermost.
+// Batching is per-thread; other threads' writes deliver as usual.
+def batch(fn) {
+  val me = currentThreadName()
+  withLock(_lock, () -> {
+    val b = get(_batches, me, null)
+    if (b == null) then _batches[me] = {depth: 1, queue: []}
+    else b.depth += 1
+    null
+  })
+  val r = attempt(fn)
+  val q = withLock(_lock, () -> {
+    val b = _batches[me]
+    b.depth -= 1
+    if (b.depth > 0) then null
+    else {
+      remove(_batches, me)
+      b.queue
+    }
+  })
+  if (q != null && length(q) > 0) {
+    // Deduplicate: a batch may have queued the same observer many times.
+    val seen = {}
+    val once = []
+    for (obs in q) {
+      if (!contains(seen, "${obs.bid}")) {
+        seen["${obs.bid}"] = true
+        push(once, obs)
+      }
+    }
+    _deliver(once)
+  }
+  if (!r.ok) { error(r.error.message) }
+  r.value
+}
+
+// ---------------------------------------------------------------- signals
+
+// Primitive values are compared before notifying, so setting a signal to
+// the value it already holds is free. Arrays and objects always notify:
+// they are routinely mutated in place, and a deep compare against the same
+// reference would make `sig.set(push(sig.get(), x))` a silent no-op.
+def _isPrim(v) = isNull(v) || isBool(v) || isNumber(v) || isString(v)
+
+// A reactive cell. get() tracks, peek() does not, set() notifies dependents,
+// update(f) is set(f(get())), mutate(f) runs f on the value in place and
+// then notifies, touch() re-notifies without changing anything.
+def signal(initial = null) {
+  val rec = {sid: _newId(), v: initial, ver: 0, subs: {}}
+  val self = {sid: rec.sid, kind: "signal"}
+
+  def write(v, force) {
+    val wave = withLock(_lock, () -> {
+      if (!force && _isPrim(v) && _isPrim(rec.v) && v == rec.v) then null
+      else {
+        rec.v = v
+        rec.ver += 1
+        val out = []
+        _collect(rec, out, {})
+        out
+      }
+    })
+    if (wave != null) { _deliver(wave) }
+    null
+  }
+
+  self.get = () -> withLock(_lock, () -> { _register(rec); rec.v })
+  self.peek = () -> withLock(_lock, () -> rec.v)
+  self.set = (v) -> write(v, false)
+  self.touch = () -> write(self.peek(), true)
+  self.update = (f) -> write(f(self.peek()), false)
+  self.mutate = (f) -> {
+    val v = self.peek()
+    f(v)
+    write(v, true)
+  }
+  self
+}
+
+// A derived value, recomputed lazily: a change in a dependency only marks
+// it stale (and passes the wave through); the next get() recomputes. Reads
+// inside the computation are tracked, so dependencies follow the code
+// paths actually taken. Generation counters make a mid-computation
+// invalidation force the next get() to compute again.
+def computed(fn) {
+  val rec = {sid: _newId(), v: null, ver: 0, subs: {}}
+  val state = {gen: 0, freshGen: -1}
+  val obs = giObserver("computed", (o) -> null)
+  obs.stale = () -> { state.gen += 1; null }
+  obs.asSignal = () -> rec
+
+  val self = {sid: rec.sid, kind: "computed"}
+
+  def refresh() {
+    val myGen = withLock(_lock, () -> state.gen)
+    if (withLock(_lock, () -> state.freshGen) != myGen && !obs.dead) {
+      val v = giTracked(obs, fn)
+      withLock(_lock, () -> {
+        rec.v = v
+        rec.ver += 1
+        state.freshGen = myGen
+        null
+      })
+    }
+    null
+  }
+
+  self.get = () -> {
+    refresh()
+    withLock(_lock, () -> { _register(rec); rec.v })
+  }
+  self.peek = () -> {
+    refresh()
+    withLock(_lock, () -> rec.v)
+  }
+  self.dispose = () -> giDispose(obs)
+  self
+}
+
+// A reaction: runs now, and again whenever a tracked dependency changes.
+// opts.via, when given, is a scheduler — via(runThunk) — letting gui/app
+// route re-runs onto its loop thread; without it re-runs happen right on
+// the thread that made the change. Returns {dispose}.
+def effect(fn, opts = {}) {
+  val via = get(opts, "via", null)
+  val obs = giObserver("effect", null)
+  def run() {
+    obs.dirty = false
+    if (!obs.dead) { giTracked(obs, fn) }
+    null
+  }
+  obs.deliver = (o) -> {
+    if (via == null) then run() else via(run)
+  }
+  run()
+  {dispose: () -> giDispose(obs), bid: obs.bid}
+}
+
+// True when v is a signal or computed made here — widgets accept these (or
+// plain zero-argument functions) anywhere a value can be reactive.
+def giIsReactive(v) = isObject(v) && contains(v, "kind") &&
+  (get(v, "kind", "") == "signal" || get(v, "kind", "") == "computed") &&
+  contains(v, "get")

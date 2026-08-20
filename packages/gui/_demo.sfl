@@ -1,0 +1,351 @@
+// gui/demo — the kitchen sink: one app that exercises the whole widget
+// catalogue and every framework feature. Run it from anywhere:
+//
+//   sfl -e 'import "gui"; guiDemo()'
+
+import "_core"
+import "_widgets"
+import "_app"
+
+// The demo app, not yet running — tests drive it headlessly.
+def guiDemoApp(opts = {}) {
+  guiApp(merge({
+    title: "SFL GUI Demo",
+    root: _demoRoot,
+    pages: {"/about": _aboutPage}
+  }, opts))
+}
+
+def guiDemo(opts = {}) {
+  val app = guiDemoApp(opts)
+  app.run()
+  app
+}
+
+def _demoRoot(ctx) {
+  column([
+    row([
+      heading("SFL GUI", {level: 1}),
+      badge("v0.1", {class: "accent"}),
+      spacer(),
+      _themeSwitch(ctx),
+      link("About", {to: "/about"})
+    ], {gap: 12}),
+    text("Every widget below is served live from SFL over one WebSocket.",
+         {muted: true}),
+    tabs({items: [
+      {key: "basics", label: "Basics", content: () -> _basicsTab(ctx)},
+      {key: "inputs", label: "Inputs", content: () -> _inputsTab(ctx)},
+      {key: "data", label: "Data", content: () -> _dataTab(ctx)},
+      {key: "async", label: "Async", content: () -> _asyncTab(ctx)},
+      {key: "canvas", label: "Canvas", content: () -> _canvasTab(ctx)},
+      {key: "overlays", label: "Overlays", content: () -> _overlaysTab(ctx)}
+    ]})
+  ], {gap: 14})
+}
+
+def _themeSwitch(ctx) {
+  val dark = signal(false)
+  toggle("Dark", {bind: dark, onChange: (v) -> ctx.setDark(v)})
+}
+
+// ------------------------------------------------------------------ basics
+
+def _basicsTab(ctx) {
+  val n = signal(0)
+  column([
+    card([
+      heading("Reactive state"),
+      text(() -> "The button was clicked ${n.get()} times — doubled, that is ${n.get() * 2}."),
+      row([
+        button("+1", {kind: "primary", onClick: () -> n.update(v -> v + 1), hotkey: "mod+u"}),
+        button("-1", {onClick: () -> n.update(v -> v - 1)}),
+        button("Reset", {kind: "danger", onClick: () -> n.set(0), disabled: () -> n.get() == 0}),
+        button("Toast", {kind: "ghost", onClick: () -> ctx.notify("Hello from SFL!", {kind: "ok"})})
+      ], {gap: 8}),
+      progressBar(() -> clamp(1.0 * n.get() / 10, 0.0, 1.0)),
+      when(() -> n.get() >= 10,
+           () -> badge("Full!", {class: "ok", transition: "zoom"}))
+    ], {gap: 10}),
+    card([
+      heading("Markdown"),
+      markdownView("Widgets include **markdown**, `code`, [links](https://example.com):\n\n" +
+        "- fine-grained updates over one socket\n- keyed list reconciliation\n" +
+        "- light and dark themes\n\n```\nsfl -e 'import \"gui\"; guiDemo()'\n```")
+    ], {gap: 8})
+  ], {gap: 14})
+}
+
+// ------------------------------------------------------------------ inputs
+
+def _inputsTab(ctx) {
+  val name = signal("Ada")
+  val lang = signal("SFL")
+  val volume = signal(40)
+  val likes = signal(true)
+  val color = signal("#3b6ef5")
+  val bio = signal("")
+  column([
+    card([
+      heading("Two-way binding"),
+      grid([
+        text("Name", {muted: true}), textInput({bind: name, placeholder: "Your name"}),
+        text("Language", {muted: true}), dropdown({bind: lang, options: ["SFL", "Scala", "C", "Rust"]}),
+        text("Volume", {muted: true}), slider({bind: volume, min: 0, max: 100, showValue: true}),
+        text("Accent", {muted: true}), colorInput({bind: color}),
+        text("Bio", {muted: true}), textArea({bind: bio, rows: 2, placeholder: "A few words…"})
+      ], {cols: "110px 1fr", gap: 10}),
+      row([
+        checkbox("I like it", {bind: likes}),
+        radioGroup({options: ["one", "two"], value: "one", inline: true})
+      ], {gap: 18}),
+      divider(),
+      text(() -> "Hello ${name.get()}: ${lang.get()} at volume ${volume.get()}, " +
+                 "accent ${color.get()}" + (if (likes.get()) then " 👍" else "")),
+    ], {gap: 10}),
+    card([
+      heading("Files"),
+      fileUpload({onUpload: (files) -> {
+        for (f in files) { ctx.notify("Got ${f.name} (${f.size} bytes)", {kind: "ok"}) }
+      }}),
+      row([
+        button("Download a file", {onClick: () ->
+          ctx.download("hello.txt", "Written by SFL at ${formatTime(timeMillis())}\n", "text/plain")}),
+        button("Copy to clipboard", {onClick: () -> {
+          ctx.clipboard("From the SFL demo — ${name.get()}")
+          ctx.notify("Copied!")
+        }})
+      ], {gap: 8})
+    ], {gap: 10})
+  ], {gap: 14})
+}
+
+// -------------------------------------------------------------------- data
+
+def _dataTab(ctx) {
+  val items = signal([
+    {id: 1, task: "Ship the GUI package", done: true},
+    {id: 2, task: "Write the docs", done: false}
+  ])
+  val nextId = signal(3)
+  val draft = signal("")
+
+  def addItem() {
+    val t = trim(draft.get())
+    if (t != "") {
+      items.mutate(xs -> push(xs, {id: nextId.get(), task: t, done: false}))
+      nextId.update(v -> v + 1)
+      draft.set("")
+    }
+  }
+
+  column([
+    card([
+      heading("A todo list (keyed each)"),
+      row([
+        textInput({bind: draft, placeholder: "New task…", onEnter: addItem, grow: true}),
+        button("Add", {kind: "primary", onClick: addItem})
+      ], {gap: 8}),
+      each(items, (it) -> row([
+        checkbox("", {checked: it.done, onChange: (v) -> {
+          items.mutate(xs -> {
+            for (x in xs) { if (x.id == it.id) { x.done = v } }
+          })
+        }}),
+        text(it.task, {grow: true, style: if (it.done) then {"text-decoration": "line-through"} else {}}),
+        button("✕", {kind: "ghost", small: true, onClick: () ->
+          items.update(xs -> filter(xs, (x) -> x.id != it.id))})
+      ], {gap: 8, key: it.id})),
+      text(() -> "${count(items.get(), (x) -> !x.done)} open of ${length(items.get())}",
+           {muted: true, size: 13})
+    ], {gap: 8}),
+    card([
+      heading("Table and tree"),
+      table({
+        sortable: true,
+        columns: [{key: "name", label: "Package"}, {key: "kind", label: "Kind"},
+                  {key: "modules", label: "Modules", align: "right"}],
+        rows: [
+          {name: "gui", kind: "framework", modules: 6},
+          {name: "httpd", kind: "server", modules: 7},
+          {name: "mongodb", kind: "driver", modules: 1},
+          {name: "datetime", kind: "library", modules: 1}
+        ],
+        onRowClick: (hit) -> ctx.notify("Row ${hit.index}: ${hit.row.name}")
+      }),
+      treeView({
+        data: [
+          {label: "packages", children: [
+            {label: "gui", key: "gui", children: [
+              {label: "core.sfl"}, {label: "widgets.sfl"}, {label: "render.sfl"}]},
+            {label: "httpd", key: "httpd"}
+          ]},
+          {label: "stdlib"}
+        ],
+        onSelect: (hit) -> ctx.notify("Selected ${hit.label}")
+      })
+    ], {gap: 10})
+  ], {gap: 14})
+}
+
+// ------------------------------------------------------------------- async
+
+def _asyncTab(ctx) {
+  val ticks = signal(0)
+  val running = signal(false)
+  val timerId = signal(null)
+  val fetched = signal("(nothing yet)")
+  val busy = signal(false)
+
+  column([
+    card([
+      heading("Timers"),
+      text(() -> "Ticks: ${ticks.get()}", {size: 22, mono: true}),
+      row([
+        button(() -> if (running.get()) then "Stop" else "Start", {kind: "primary", onClick: () -> {
+          if (running.get()) {
+            ctx.cancel(timerId.get())
+            running.set(false)
+          } else {
+            timerId.set(ctx.interval(100, () -> ticks.update(v -> v + 1)))
+            running.set(true)
+          }
+        }}),
+        button("Once, in 1s", {onClick: () ->
+          ctx.timeout(1000, () -> ctx.notify("One second later", {kind: "ok"}))})
+      ], {gap: 8})
+    ], {gap: 10}),
+    card([
+      heading("Background work"),
+      text("ctx.task runs on its own thread; signals carry the result back."),
+      row([
+        button("Work for 1.5s", {kind: "primary", disabled: busy, onClick: () -> {
+          busy.set(true)
+          fetched.set("working…")
+          ctx.task(() -> {
+            sleep(1500)
+            "computed on ${currentThreadName()} at ${formatTime(timeMillis(), "%H:%M:%S")}"
+          }, (result) -> {
+            fetched.set(result)
+            busy.set(false)
+          })
+        }}),
+        when(busy, () -> spinner())
+      ], {gap: 12}),
+      text(fetched, {mono: true, muted: true})
+    ], {gap: 10})
+  ], {gap: 14})
+}
+
+// ------------------------------------------------------------------ canvas
+
+def _canvasTab(ctx) {
+  val angle = signal(0)
+  val strokes = signal([])
+  val current = signal(null)
+  ctx.interval(50, () -> angle.update(a -> (a + 3) % 360))
+
+  def penDown(p) {
+    if (p.type == "down") { current.set([[p.x, p.y]]) }
+    elsif (p.type == "move" && current.peek() != null) {
+      current.mutate(pts -> push(pts, [p.x, p.y]))
+    } elsif (p.type == "up" && current.peek() != null) {
+      strokes.mutate(ss -> push(ss, current.peek()))
+      current.set(null)
+    }
+  }
+
+  def strokeCmds(pts, cmds) {
+    if (length(pts) > 1) {
+      push(cmds, ["beginPath"], ["moveTo", pts[0][0], pts[0][1]])
+      for (p in drop(pts, 1)) { push(cmds, ["lineTo", p[0], p[1]]) }
+      push(cmds, ["stroke"])
+    }
+    null
+  }
+
+  column([
+    card([
+      heading("An animated dial"),
+      canvasView({w: 260, h: 140, draw: () -> {
+        val a = angle.get() * PI() / 180
+        val cmds = [["clear", "rgba(0,0,0,0)"],
+          ["strokeStyle", "#8b93a3"], ["lineWidth", 6], ["beginPath"],
+          ["arc", 130, 110, 70, PI(), 2 * PI()], ["stroke"],
+          ["strokeStyle", "#3b6ef5"], ["lineWidth", 4], ["beginPath"],
+          ["moveTo", 130, 110],
+          ["lineTo", 130 + 62 * cos(PI() + a / 2), 110 + 62 * sin(PI() + a / 2)],
+          ["stroke"], ["fillStyle", "#3b6ef5"], ["beginPath"],
+          ["arc", 130, 110, 6, 0, 2 * PI()], ["fill"]]
+        cmds
+      }})
+    ], {gap: 8}),
+    card([
+      heading("Draw here"),
+      canvasView({w: 420, h: 200, draw: () -> {
+        val cmds = [["clear", "rgba(0,0,0,0)"], ["strokeStyle", "#e2596a"],
+                    ["lineWidth", 2.5], ["lineCap", "round"]]
+        for (s in strokes.get()) { strokeCmds(s, cmds) }
+        if (current.get() != null) { strokeCmds(current.get(), cmds) }
+        cmds
+      }, onPointer: penDown, style: {"border": "1px solid var(--border)", "border-radius": "10px"},
+      bg: "var(--card)"}),
+      button("Clear", {onClick: () -> { strokes.set([]); current.set(null) }})
+    ], {gap: 8})
+  ], {gap: 14})
+}
+
+// ---------------------------------------------------------------- overlays
+
+def _overlaysTab(ctx) {
+  val dlgOpen = signal(false)
+  val drwOpen = signal(false)
+  val picked = signal("(nothing)")
+  column([
+    card([
+      heading("Dialogs, drawers, menus"),
+      row([
+        button("Open dialog", {kind: "primary", onClick: () -> dlgOpen.set(true)}),
+        button("Open drawer", {onClick: () -> drwOpen.set(true)}),
+        menuButton({label: "Menu ▾", items: [
+          {key: "new", label: "New", icon: "✨"},
+          {key: "rename", label: "Rename"},
+          "---",
+          {key: "delete", label: "Delete", danger: true}
+        ], onSelect: (k) -> picked.set(k)}),
+        text(() -> "picked: ${picked.get()}", {muted: true})
+      ], {gap: 8, wrap: true}),
+      expansion("An expandable section", [
+        text("Hidden until opened. Right-click this text for a context menu."),
+        text("A second line.", {contextMenu: [{key: "hi", label: "Say hi"}],
+             onMenu: (k) -> ctx.notify("Context: ${k}")})
+      ], {})
+    ], {gap: 10}),
+    dialog({bind: dlgOpen, title: "A modal dialog"}, [
+      text("ESC, the backdrop and the × all close it — one bound signal."),
+      row([
+        spacer(),
+        button("Cancel", {onClick: () -> dlgOpen.set(false)}),
+        button("OK", {kind: "primary", onClick: () -> {
+          dlgOpen.set(false)
+          ctx.notify("Confirmed", {kind: "ok"})
+        }})
+      ], {gap: 8})
+    ]),
+    drawer({bind: drwOpen, title: "A drawer"}, [
+      text("Slides in from the side."),
+      button("Close", {onClick: () -> drwOpen.set(false)})
+    ])
+  ], {gap: 14})
+}
+
+// ------------------------------------------------------------------- about
+
+def _aboutPage(ctx) {
+  column([
+    heading("About", {level: 1}),
+    markdownView("A tiny page of its own — each browser window is an " +
+      "independent **session** with its own state.\n\nBuilt with the `gui` package."),
+    link("Back to the demo", {to: "/"})
+  ], {gap: 12, maxw: 640})
+}

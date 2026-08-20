@@ -1,0 +1,37 @@
+// Interpreter/compiler parity for the gui stack: a deterministic headless
+// session — build, connect, event, patch, stop — printing only protocol
+// facts, so the compiled binary's output must equal the interpreter's byte
+// for byte. Run by tests/gui/run.sh under both engines when a C toolchain
+// is present.
+
+import "lib/wsc"
+import "gui"
+
+val n = signal(1)
+val label = computed(() -> "n=${n.get()}")
+val list = signal([{id: 1, name: "one"}])
+
+val app = guiApp({quiet: true, title: "parity", root: (ctx) ->
+  column([
+    text(label, {id: "l"}),
+    each(list, (it) -> text(it.name), {key: (it) -> it.id}),
+    button("+", {id: "b", onClick: () -> n.update((v) -> v + 1)})
+  ])})
+app.start()
+val port = app.port()
+val tok = guiToken(port)
+
+val c = guiDial(port, tok)
+println("init:", c.init.t, c.init.title)
+println("tree:", jsonStringify(c.init.root))
+
+guiEvent(c.conn, byUid(c.init.root, "b").i, "click")
+println("click:", jsonStringify(wsJson(c.conn).ops))
+
+list.mutate((xs) -> push(xs, {id: 2, name: "two"}))
+println("each:", jsonStringify(wsJson(c.conn).ops))
+
+closeSocket(c.conn)
+sleep(150)
+app.stop()
+println("sessions:", app.sessions())

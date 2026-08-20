@@ -1,0 +1,459 @@
+// gui/render — turns widget specs into live, session-bound instances and
+// keeps the browser in sync with fine-grained patches.
+//
+// Every spec node (gui/widgets) mounts to exactly one instance with a
+// session-unique id, dynamic containers (each/when/dyn) included — they
+// render client-side as display:contents wrappers, so the server tree and
+// the DOM stay 1:1 and child indices are trivial.
+//
+// A reactive prop, text, or container driver is an observer (gui/core).
+// When its dependencies change, the app loop re-runs it here and the
+// difference goes to the session's patch queue:
+//   ["p", id, key, value]      set a prop
+//   ["t", id, text]            set text content
+//   ["ins", parent, idx, node] insert a serialised subtree
+//   ["rm", id]                 remove a node
+//   ["rep", id, node]          replace a node with a new subtree
+//   ["mv", parent, from, to]   move a child (remove at from, insert at to)
+
+import "_core"
+import "_widgets"
+
+// value | signal | zero-arg function -> the current value.
+def giVal(v) {
+  if (giIsReactive(v)) then v.get()
+  elsif (isFunction(v)) then v()
+  else v
+}
+
+def giPatch(session, op) {
+  if (session.alive) { push(session.pending, op) }
+  null
+}
+
+// ------------------------------------------------------------ prop mount
+
+// Event-prop name -> wire event name: onRowClick -> "rowclick".
+def _eventName(propName) = toLower(substring(propName, 2))
+
+// The serialised form, which doubles as the change-detection snapshot: a
+// value the program mutates in place is the same reference before and
+// after, so only its serialisation can say whether anything changed.
+def _propJson(tag, key, v) {
+  val r = attempt(() -> jsonStringify(v))
+  if (!r.ok) {
+    error("gui: prop '${key}' of <${tag}> is not serialisable: ${r.error.message}")
+  }
+  r.value
+}
+
+// Registers one reactive prop: evaluates now (tracked), patches on change.
+def _mountPropBinding(session, inst, key, raw) {
+  val obs = giObserver("binding", session.app.markDirty)
+  obs.run = () -> {
+    val v = giTracked(obs, () -> giVal(raw))
+    val json = _propJson(inst.tag, key, v)
+    if (get(inst.propJson, key, null) != json) {
+      inst.props[key] = v
+      inst.propJson[key] = json
+      giPatch(session, ["p", inst.id, key, v])
+    }
+    null
+  }
+  push(inst.bindings, obs)
+  // First evaluation, without the change compare or a patch.
+  val v0 = giTracked(obs, () -> giVal(raw))
+  inst.props[key] = v0
+  inst.propJson[key] = _propJson(inst.tag, key, v0)
+  null
+}
+
+def _addListener(inst, event, f) {
+  val prev = get(inst.listeners, event, null)
+  inst.listeners[event] = if (prev == null) then f else {
+    (payload) -> {
+      giCall1(prev, payload)
+      giCall1(f, payload)
+    }
+  }
+  null
+}
+
+// Splits a spec's props into static values, live bindings, and listeners.
+def _mountProps(session, inst, props) {
+  val bindSig = get(props, "bind", null)
+  val bk = get(props, "__bk", null)
+  val be = get(props, "__be", null)
+  for (key in keys(props)) {
+    val raw = props[key]
+    if (key == "bind" || key == "__bk" || key == "__be") {
+      null // handled below
+    } elsif (startsWith(key, "on") && length(key) > 2) {
+      if (raw != null) {
+        if (!isFunction(raw)) { error("gui: ${key} of <${inst.tag}> must be a function") }
+        _addListener(inst, _eventName(key), raw)
+      }
+    } elsif (isFunction(raw) || giIsReactive(raw)) {
+      _mountPropBinding(session, inst, key, raw)
+    } elsif (raw != null) {
+      _propJson(inst.tag, key, raw)
+      inst.props[key] = raw
+    }
+  }
+  if (bindSig != null) {
+    if (!giIsReactive(bindSig)) {
+      error("gui: bind on <${inst.tag}> takes a signal, got ${typeOf(bindSig)}")
+    }
+    if (bk != null) { _mountPropBinding(session, inst, bk, bindSig) }
+    if (be != null) { _addListener(inst, be, (v) -> bindSig.set(v)) }
+  }
+  null
+}
+
+// ---------------------------------------------------------------- mounting
+
+def _newInst(session, tag) {
+  session.nextId += 1
+  val inst = {
+    id: session.nextId,
+    tag: tag,
+    kind: "el",           // "el" | "txt" | "ctr"
+    props: {},
+    propJson: {},         // serialised snapshots, for change detection
+    listeners: {},
+    children: [],
+    bindings: [],
+    meta: {}
+  }
+  session.byId["${inst.id}"] = inst
+  inst
+}
+
+// Mounts a spec into an instance tree (no patches; the caller either
+// serialises the result or emits an insert/replace op).
+def giMount(session, spec) {
+  val gk = spec.gk
+  if (gk == "el") then _mountEl(session, spec)
+  elsif (gk == "txt") then _mountTxt(session, spec.value)
+  elsif (gk == "txtf") then _mountTxtf(session, spec.fn)
+  elsif (gk == "each") then _mountEach(session, spec)
+  elsif (gk == "when") then _mountWhen(session, spec)
+  elsif (gk == "dyn") then _mountDyn(session, spec)
+  else error("gui: unknown spec kind '${gk}'")
+}
+
+def _mountEl(session, spec) {
+  val inst = _newInst(session, spec.tag)
+  _mountProps(session, inst, spec.props)
+  for (childSpec in spec.children) {
+    push(inst.children, giMount(session, childSpec))
+  }
+  inst
+}
+
+def _mountTxt(session, value) {
+  val inst = _newInst(session, "#text")
+  inst.kind = "txt"
+  inst.text = "${value}"
+  inst
+}
+
+def _mountTxtf(session, fn) {
+  val inst = _newInst(session, "#text")
+  inst.kind = "txt"
+  val obs = giObserver("binding", session.app.markDirty)
+  obs.run = () -> {
+    val v = "${giTracked(obs, () -> giVal(fn))}"
+    if (inst.text != v) {
+      inst.text = v
+      giPatch(session, ["t", inst.id, v])
+    }
+    null
+  }
+  push(inst.bindings, obs)
+  inst.text = "${giTracked(obs, () -> giVal(fn))}"
+  inst
+}
+
+// Containers: real instances with tag "ctr" (display:contents client-side),
+// so child indices always match the DOM.
+def _newCtr(session) {
+  val inst = _newInst(session, "ctr")
+  inst.kind = "ctr"
+  inst
+}
+
+// Builders run untracked: only the driver expression itself (items, cond,
+// or dyn's fn) subscribes the container. Reads inside child props subscribe
+// those props' own bindings when they mount.
+def _buildKids(session, thunk) {
+  val specs = giKids(untracked(thunk))
+  val out = []
+  for (s in specs) { push(out, giMount(session, s)) }
+  out
+}
+
+def _mountDyn(session, spec) {
+  val inst = _newCtr(session)
+  val obs = giObserver("binding", session.app.markDirty)
+  obs.run = () -> {
+    val built = giTracked(obs, () -> giKids(spec.fn()))
+    _replaceChildren(session, inst, built)
+    null
+  }
+  push(inst.bindings, obs)
+  val first = giTracked(obs, () -> giKids(spec.fn()))
+  for (s in first) { push(inst.children, giMount(session, s)) }
+  inst
+}
+
+def _mountWhen(session, spec) {
+  val inst = _newCtr(session)
+  val obs = giObserver("binding", session.app.markDirty)
+  def branchOf() = if (toBool(giVal(spec.cond))) then 0 else 1
+  def buildBranch(b) {
+    if (b == 0) then _buildKids(session, spec.thenFn)
+    elsif (spec.elseFn != null) then _buildKids(session, spec.elseFn)
+    else []
+  }
+  obs.run = () -> {
+    val b = giTracked(obs, branchOf)
+    if (b != inst.meta.branch) {
+      inst.meta.branch = b
+      _setChildren(session, inst, buildBranch(b))
+    }
+    null
+  }
+  push(inst.bindings, obs)
+  inst.meta.branch = giTracked(obs, branchOf)
+  for (i in buildBranch(inst.meta.branch)) { push(inst.children, i) }
+  inst
+}
+
+def _mountEach(session, spec) {
+  val inst = _newCtr(session)
+  val keyFn = get(spec.props, "key", null)
+  inst.meta.keyFn = keyFn
+  inst.meta.itemFn = spec.itemFn
+  val obs = giObserver("binding", session.app.markDirty)
+  obs.run = () -> {
+    val items = _itemsOf(giTracked(obs, () -> giVal(spec.items)))
+    _reconcile(session, inst, items)
+    null
+  }
+  push(inst.bindings, obs)
+  val items = _itemsOf(giTracked(obs, () -> giVal(spec.items)))
+  val keyed = _keyItems(inst, items)
+  for (ki in keyed) {
+    val child = _mountItem(session, inst, ki)
+    push(inst.children, child)
+  }
+  inst
+}
+
+def _itemsOf(v) {
+  if (v == null) then []
+  elsif (isArray(v)) then v
+  else error("gui: each() items must be an array, got ${typeOf(v)}")
+}
+
+// ------------------------------------------------------------- serialising
+
+// Instance -> wire JSON. Empty fields are omitted to keep messages small.
+def giSerialize(inst) {
+  if (inst.kind == "txt") then {i: inst.id, x: inst.text}
+  else {
+    val node = {i: inst.id, t: inst.tag}
+    if (length(inst.props) > 0) { node.p = inst.props }
+    val evs = keys(inst.listeners)
+    if (length(evs) > 0) { node.e = evs }
+    if (length(inst.children) > 0) {
+      node.c = map(inst.children, giSerialize)
+    }
+    node
+  }
+}
+
+// --------------------------------------------------------------- unmounting
+
+// Disposes an instance tree: bindings unsubscribed, ids forgotten. Emitting
+// the removal patch is the caller's business.
+def giUnmount(session, inst) {
+  for (b in inst.bindings) { giDispose(b) }
+  clear(inst.bindings)
+  for (c in inst.children) { giUnmount(session, c) }
+  remove(session.byId, "${inst.id}")
+  null
+}
+
+// Replaces every child of a container (dyn re-runs, when switches).
+def _setChildren(session, inst, newKids) {
+  for (c in inst.children) {
+    giPatch(session, ["rm", c.id])
+    giUnmount(session, c)
+  }
+  clear(inst.children)
+  var idx = 0
+  for (c in newKids) {
+    push(inst.children, c)
+    giPatch(session, ["ins", inst.id, idx, giSerialize(c)])
+    idx += 1
+  }
+  null
+}
+
+// dyn: mount the new result, drop the old one.
+def _replaceChildren(session, inst, specs) {
+  val newKids = []
+  for (s in specs) { push(newKids, giMount(session, s)) }
+  _setChildren(session, inst, newKids)
+  null
+}
+
+// ----------------------------------------------------------- each reconcile
+
+// Attaches a reconciliation key to every item: props.key(item) when given,
+// else the item's "id" or "key" field, else its JSON form, else its index.
+// Duplicates get a #n suffix so they stay distinct.
+def _keyItems(inst, items) {
+  val keyFn = inst.meta.keyFn
+  val seen = {}
+  val out = []
+  var idx = 0
+  for (it in items) {
+    val json = attempt(() -> jsonStringify(it))
+    val snapshot = if (json.ok) then json.value else null
+    var k = null
+    if (keyFn != null) then k = "${keyFn(it)}"
+    elsif (isObject(it) && contains(it, "id")) then k = "${it.id}"
+    elsif (isObject(it) && contains(it, "key")) then k = "${it.key}"
+    else k = snapshot ?? "@${idx}"
+    if (contains(seen, k)) {
+      seen[k] += 1
+      k = "${k}#${seen[k]}"
+    } else {
+      seen[k] = 0
+    }
+    push(out, {key: k, item: it, snapshot: snapshot})
+    idx += 1
+  }
+  out
+}
+
+// Did this child's item change? Serialised snapshots see through in-place
+// mutation; items that cannot serialise (say, rows carrying signals) fall
+// back to the value compare, where edits go through the signals anyway.
+def _sameItem(existing, ki) {
+  if (existing.meta.snapshot != null && ki.snapshot != null)
+  then existing.meta.snapshot == ki.snapshot
+  else existing.meta.item == ki.item
+}
+
+def _mountItem(session, inst, ki) {
+  val child = giMount(session, _itemSpec(inst, ki))
+  child.meta.key = ki.key
+  child.meta.item = ki.item
+  child.meta.snapshot = ki.snapshot
+  child
+}
+
+// One item's spec; a builder returning null or an array is wrapped so the
+// child stays a single instance.
+def _itemSpec(inst, ki) {
+  val built = untracked(() -> inst.meta.itemFn(ki.item))
+  val kids = giKids(built)
+  if (length(kids) == 1) then kids[0]
+  else {gk: "el", tag: "ctr", props: {}, children: kids}
+}
+
+// Keyed reconciliation: reuse children whose key and item survived, rebuild
+// in place those whose item changed, insert/remove/move the rest with the
+// fewest ops this simple plan finds.
+def _reconcile(session, inst, items) {
+  val keyed = _keyItems(inst, items)
+  val oldByKey = {}
+  for (c in inst.children) { oldByKey[c.meta.key] = c }
+
+  // Which old children survive?
+  val wantKeys = {}
+  for (ki in keyed) { wantKeys[ki.key] = true }
+
+  // Remove the dead ones first, simulating the client's child array.
+  val sim = []
+  for (c in inst.children) {
+    if (contains(wantKeys, c.meta.key)) then push(sim, c)
+    else {
+      giPatch(session, ["rm", c.id])
+      giUnmount(session, c)
+    }
+  }
+
+  // Now bring sim into the desired order, patching as we go.
+  val out = []
+  var idx = 0
+  for (ki in keyed) {
+    val existing = get(oldByKey, ki.key, null)
+    if (existing == null) {
+      // Brand new: mount and insert.
+      val child = _mountItem(session, inst, ki)
+      insert(sim, idx, child)
+      giPatch(session, ["ins", inst.id, idx, giSerialize(child)])
+      push(out, child)
+    } else {
+      // Present: move into place if needed.
+      var from = -1
+      var j = idx
+      while (j < length(sim)) {
+        if (sim[j].id == existing.id) { from = j; break }
+        j += 1
+      }
+      if (from != idx && from >= 0) {
+        val moved = removeAt(sim, from)
+        insert(sim, idx, moved)
+        giPatch(session, ["mv", inst.id, from, idx])
+      }
+      if (_sameItem(existing, ki)) {
+        // Same item: keep the live subtree, its own bindings cover it.
+        existing.meta.key = ki.key
+        push(out, existing)
+      } else {
+        // Item changed: rebuild this child in place.
+        val fresh = _mountItem(session, inst, ki)
+        giPatch(session, ["rep", existing.id, giSerialize(fresh)])
+        giUnmount(session, existing)
+        sim[idx] = fresh
+        push(out, fresh)
+      }
+    }
+    idx += 1
+  }
+  clear(inst.children)
+  for (c in out) { push(inst.children, c) }
+  null
+}
+
+// ------------------------------------------------------------ the flush
+
+// Runs every queued dirty binding (creation order: containers before the
+// children they created), draining cascades, then returns the sessions
+// that have patches waiting.
+def giFlush(app) {
+  var rounds = 0
+  var firstErr = null
+  var work = app.takeDirty()
+  while (length(work) > 0) {
+    rounds += 1
+    if (rounds > 100) { error("gui: binding cascade did not settle after 100 rounds") }
+    val sorted = sortBy(work, (o) -> o.bid)
+    for (obs in sorted) {
+      if (!obs.dead && obs.dirty) {
+        obs.dirty = false
+        val r = attempt(() -> obs.run())
+        if (!r.ok && firstErr == null) { firstErr = r.error.message }
+      }
+    }
+    work = app.takeDirty()
+  }
+  if (firstErr != null) { error(firstErr) }
+  null
+}

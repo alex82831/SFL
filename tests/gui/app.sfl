@@ -1,0 +1,257 @@
+// The gui framework end to end, headless: a real guiApp on an ephemeral
+// port, driven through the served page and a WebSocket client, asserting on
+// the wire protocol — the init tree, then patch ops one change at a time.
+
+import "lib/assert"
+import "lib/wsc"
+import "gui"
+
+// Shared (module-level) state: visible to every session.
+val items = signal([{id: 1, name: "a"}, {id: 2, name: "b"}])
+val mode = signal(true)
+val temp = signal(20)
+val hot = computed(() -> temp.get() > 25)
+val rows = signal([{pkg: "gui", n: 1}])
+
+val app = guiApp({
+  quiet: true,
+  title: "T",
+  graceMs: 100,
+  root: (ctx) -> {
+    val name = signal("x")
+    ctx.hotkey("mod+k", () -> ctx.notify("hotkey!"))
+    column([
+      textInput({bind: name, id: "in"}),
+      text(() -> "hello ${name.get()}", {id: "greet"}),
+      each(items, (it) -> text(it.name, {id: "item-${it.id}"}), {key: (it) -> it.id}),
+      when(mode, () -> badge("on", {id: "on"}), () -> badge("off", {id: "off"})),
+      text(() -> if (hot.get()) then "HOT" else "cold", {id: "temp"}),
+      table({id: "tbl", columns: [{key: "pkg", label: "Pkg"}], rows: rows}),
+      dropdown({id: "dd", options: ["one", "two"], bind: signal("one")}),
+      menuButton({id: "menu", label: "M", items: [{key: "del", label: "Del"}],
+                  onSelect: (k) -> ctx.notify("menu:${k}")}),
+      button("notify", {id: "b1", onClick: () -> ctx.notify("hi", {kind: "ok"})}),
+      button("boom", {id: "b2", onClick: () -> error("kaboom")}),
+      button("zero", {id: "b0", onClick: () -> ctx.notify("zero-arity")}),
+      fileUpload({id: "up", onUpload: (files) ->
+        ctx.notify("up:${files[0].name}:${fileText(files[0])}")}),
+      button("dl", {id: "b3", onClick: () -> ctx.download("x.bin", [1, 2, 255], "application/x")}),
+      button("clip", {id: "b4", onClick: () -> ctx.clipboard("copied text")})
+    ])
+  },
+  pages: {"/other": (ctx) -> heading("Other page", {id: "other"})}
+})
+
+app.start()
+val port = app.port()
+checkTrue("the server binds a port", port > 0)
+
+// ------------------------------------------------------------- the page
+
+val page = httpGet("http://127.0.0.1:${port}/")
+checkTrue("the shell page carries the app mount", contains(page, "<div id=\"app\">"))
+checkTrue("and the runtime", contains(page, "WebSocket"))
+checkTrue("and the stylesheet", contains(page, "--accent"))
+checkTrue("every page path serves the shell", contains(httpGet("http://127.0.0.1:${port}/other"), "__SFL"))
+val tok = guiToken(port)
+check("the session token is 128-bit hex", length(tok), 32)
+
+// --------------------------------------------------------------- connect
+
+val c1 = guiDial(port, tok)
+check("the upgrade is 101", c1.status, 101)
+check("the init message arrives", c1.init.t, "init")
+check("with the title", c1.init.title, "T")
+check("one live session", app.sessions(), 1)
+
+val t1 = c1.init.root
+check("a reactive text serialises its current value",
+      byUid(t1, "greet").c[0].x, "hello x")
+check("the each container holds both items",
+      length(findNodes(t1, (n) -> startsWith(getIn(n, ["p", "id"], ""), "item-"))), 2)
+checkTrue("the when branch that holds is mounted",
+          byUid(t1, "on") != null && byUid(t1, "off") == null)
+check("a button announces its click listener", byUid(t1, "b1").e, ["click"])
+check("a bound input announces value and input", byUid(t1, "in").e, ["input"])
+check("static table rows serialise", byUid(t1, "tbl").p.rows, [{pkg: "gui", n: 1}])
+
+// ------------------------------------------------------ two-way binding
+
+guiEvent(c1.conn, byUid(t1, "in").i, "input", {v: "world"})
+val p1 = wsJson(c1.conn)
+check("a bound input patches the value and the dependent text",
+      p1.ops, [["p", byUid(t1, "in").i, "value", "world"],
+               ["t", byUid(t1, "greet").c[0].i, "hello world"]])
+
+// -------------------------------------------------- keyed reconciliation
+
+items.mutate((xs) -> push(xs, {id: 3, name: "c"}))
+val p2 = wsJson(c1.conn)
+check("an appended item is one insert", map(p2.ops, (o) -> o[0]), ["ins"])
+check("at the right index", p2.ops[0][2], 2)
+
+items.set([{id: 3, name: "c"}, {id: 1, name: "a"}])
+val p3 = wsJson(c1.conn)
+check("a reorder with a removal is one rm and one mv",
+      map(p3.ops, (o) -> o[0]), ["rm", "mv"])
+
+items.set([{id: 3, name: "C!"}, {id: 1, name: "a"}])
+val p3b = wsJson(c1.conn)
+check("an item whose value changed rebuilds in place",
+      map(p3b.ops, (o) -> o[0]), ["rep"])
+
+// ------------------------------------------------------------------ when
+
+mode.set(false)
+val p4 = wsJson(c1.conn)
+check("flipping the condition swaps the branch",
+      map(p4.ops, (o) -> o[0]), ["rm", "ins"])
+checkTrue("to the else subtree", contains(jsonStringify(p4.ops), "\"off\""))
+
+// -------------------------------------------------------------- computed
+
+temp.set(30)
+val p5 = wsJson(c1.conn)
+check("a computed chain patches the text",
+      p5.ops, [["t", byUid(t1, "temp").c[0].i, "HOT"]])
+
+// -------------------------------------------------------- reactive table
+
+rows.mutate((r) -> push(r, {pkg: "httpd", n: 2}))
+val p6 = wsJson(c1.conn)
+check("reactive rows patch as one prop",
+      map(p6.ops, (o) -> [o[0], o[2]]), [["p", "rows"]])
+
+// -------------------------------------------------------------- commands
+
+guiEvent(c1.conn, byUid(t1, "b1").i, "click")
+check("ctx.notify rides the patch stream",
+      wsJson(c1.conn).ops, [["cmd", "notify", {text: "hi", kind: "ok", ms: 3500}]])
+
+guiEvent(c1.conn, byUid(t1, "b0").i, "click")
+checkTrue("a zero-argument handler works",
+          contains(jsonStringify(wsJson(c1.conn).ops), "zero-arity"))
+
+guiEvent(c1.conn, byUid(t1, "b2").i, "click")
+val perr = wsJson(c1.conn)
+checkTrue("a handler error surfaces as an error toast",
+          contains(jsonStringify(perr.ops), "kaboom"))
+
+guiEvent(c1.conn, byUid(t1, "b3").i, "click")
+val pdl = wsJson(c1.conn)
+check("ctx.download carries the bytes",
+      pdl.ops[0][2].base64, base64EncodeBytes([1, 2, 255]))
+check("and the mime type", pdl.ops[0][2].mime, "application/x")
+
+guiEvent(c1.conn, byUid(t1, "b4").i, "click")
+check("ctx.clipboard sends the text",
+      wsJson(c1.conn).ops, [["cmd", "clip", "copied text"]])
+
+guiEvent(c1.conn, byUid(t1, "menu").i, "select", {v: "del"})
+checkTrue("a menu selection reaches its handler",
+          contains(jsonStringify(wsJson(c1.conn).ops), "menu:del"))
+
+// ---------------------------------------------------------------- upload
+
+guiEvent(c1.conn, byUid(t1, "up").i, "upload",
+         {v: [{name: "f.txt", size: 5, type: "text/plain", base64: base64Encode("hello")}]})
+checkTrue("an upload decodes back to its content",
+          contains(jsonStringify(wsJson(c1.conn).ops), "up:f.txt:hello"))
+
+// --------------------------------------------------------------- hotkeys
+
+wsSendText(c1.conn, jsonStringify({t: "hk", combo: "mod+k"}))
+checkTrue("a hotkey reaches its handler",
+          contains(jsonStringify(wsJson(c1.conn).ops), "hotkey!"))
+
+// ------------------------------------------------------ second session
+
+val c2 = guiDial(port, tok)
+check("two live sessions", app.sessions(), 2)
+check("fresh local state in the new session",
+      byUid(c2.init.root, "greet").c[0].x, "hello x")
+check("shared signals render their current value",
+      length(findNodes(c2.init.root, (n) -> startsWith(getIn(n, ["p", "id"], ""), "item-"))), 2)
+
+// A write from a background thread reaches both sessions.
+await(spawn(() -> temp.set(10)))
+checkTrue("a background write patches session one",
+          contains(jsonStringify(wsJson(c1.conn).ops), "cold"))
+checkTrue("and session two",
+          contains(jsonStringify(wsJson(c2.conn).ops), "cold"))
+
+// Broadcast reaches every session's context.
+app.broadcast((ctx) -> ctx.notify("all hands"))
+checkTrue("broadcast reaches session one",
+          contains(jsonStringify(wsJson(c1.conn).ops), "all hands"))
+checkTrue("and session two",
+          contains(jsonStringify(wsJson(c2.conn).ops), "all hands"))
+
+// ----------------------------------------------------------- other page
+
+val c3 = guiDial(port, tok, "/other")
+checkTrue("a second page builds its own tree", byUid(c3.init.root, "other") != null)
+closeSocket(c3.conn)
+
+// ------------------------------------------------------------- security
+
+val bad = wsConnect(port, "/__gui_ws")
+wsSendText(bad.conn, jsonStringify({t: "hello", token: "wrong", path: "/", query: {}, client: {}}))
+val badf = wsRecv(bad.conn, 2000)
+check("a wrong token is closed", badf.op, 8)
+closeSocket(bad.conn)
+
+// ------------------------------------------------------------ disconnect
+
+closeSocket(c2.conn)
+sleep(200)
+check("a closed window leaves the session count", app.sessions(), 1)
+temp.set(35)
+checkTrue("the remaining session still updates",
+          contains(jsonStringify(wsJson(c1.conn).ops), "HOT"))
+
+closeSocket(c1.conn)
+sleep(200)
+check("all sessions gone", app.sessions(), 0)
+temp.set(5)
+sleep(100)   // nothing to crash into: writes with no sessions are fine
+
+app.stop()
+checkTrue("the app stops", !app.running())
+
+// ----------------------------------------------------------- timers
+
+// A fresh app for timer behaviour, to keep streams clean.
+val ticks = []
+val tapp = guiApp({
+  quiet: true, title: "timers",
+  root: (ctx) -> {
+    val n = signal(0)
+    ctx.timeout(60, () -> n.update((v) -> v + 100))
+    val tid = ctx.interval(40, () -> n.update((v) -> v + 1))
+    ctx.timeout(400, () -> ctx.cancel(tid))
+    text(() -> "n=${n.get()}", {id: "n"})
+  }
+})
+tapp.start()
+val ttok = guiToken(tapp.port())
+val tc = guiDial(tapp.port(), ttok)
+val stream = []
+var deadline = timeMillis() + 900
+while (timeMillis() < deadline) {
+  val m = wsJson(tc.conn, 250)
+  if (m != null && get(m, "t", "") == "patch") {
+    for (op in m.ops) { push(stream, op[2]) }
+  }
+}
+checkTrue("the interval ticked several times", length(stream) >= 4)
+checkTrue("the one-shot fired once", any(stream, (s) -> contains(s, "10")))
+val tailValue = stream[-1]
+sleep(500)
+val after = wsJson(tc.conn, 300)
+check("a cancelled interval goes quiet", after, null)
+closeSocket(tc.conn)
+sleep(150)
+tapp.stop()
+
+report("gui app")
