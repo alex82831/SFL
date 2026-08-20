@@ -16,7 +16,7 @@ val doc = {
   arr: [1, "two", [3]], nested: {a: {b: 1}},
   wide: 9007199254740993
 }
-check("bson round trips the value model", bsonDecode(bsonEncode(doc)), doc)
+check("bson round trips the value model", mongodb.bsonDecode(mongodb.bsonEncode(doc)), doc)
 
 // The wrapper spellings survive too.
 val special = {
@@ -25,15 +25,15 @@ val special = {
   blob: {"$binary": [0, 128, 255], "$subtype": 0},
   pat: {"$regex": "^a.*z$", "$options": "i"}
 }
-check("wrapper types round trip", bsonDecode(bsonEncode(special)), special)
+check("wrapper types round trip", mongodb.bsonDecode(mongodb.bsonEncode(special)), special)
 
 // ObjectIds are 24 hex chars and carry their creation time.
-val oid = newObjectId()
-check("oid shape", [length(oid["$oid"]), oidTimestamp(oid) > 1600000000000],
+val oid = mongodb.objectId()
+check("oid shape", [length(oid["$oid"]), mongodb.objectIdTime(oid) > 1600000000000],
   [24, true])
-check("oids differ", newObjectId()["$oid"] == oid["$oid"], false)
+check("oids differ", mongodb.objectId()["$oid"] == oid["$oid"], false)
 
-val probe = attempt(() -> mongoConnect(getEnv("MONGO_URL") ?? "mongodb://localhost:27017/sfl_demo",
+val probe = attempt(() -> mongodb.connect(getEnv("MONGO_URL") ?? "mongodb://localhost:27017/sfl_demo",
   {timeoutMs: 1200}))
 if (probe?.error != null) {
   println("bson: ok (live checks skipped — no MongoDB server)")

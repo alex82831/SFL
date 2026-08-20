@@ -59,7 +59,7 @@ def wsRecvJson(c) {
   jsonParse(utf8Decode(_exact(c, len)))
 }
 
-val srv = httpServer({quiet: true, handler: chatApp("public")})
+val srv = httpd.server({quiet: true, handler: chatApp("public")})
 srv.start()
 val port = srv.port()
 

@@ -6,7 +6,7 @@ options and positionals from one spec (and generates `--help` from it), the
 
 The store lives in `src/store.sfl` as pure functions over a path, which is
 what makes it testable; the tests also drive the argument grammar through
-`cliParseArgs`, the non-exiting version of `cliParse`.
+`cli.parseArgs`, the non-exiting version of `cli.parse`.
 
 ## Run
 

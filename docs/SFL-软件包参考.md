@@ -40,6 +40,35 @@ import "mongodb"
 import "datetime"
 ```
 
+## 包与命名空间
+
+**一个包就是一个命名空间**,名字就是清单里的 `name`。`import "csv"` 绑定 `csv`,
+包里的东西一律写成 `csv.parse(...)`——包的名字**不会**铺进你的文件,因为两个包
+各有一个 `parse` 是常态,而它们该互不干扰。
+
+```sfl
+import "csv"
+import "toml"
+
+csv.parse("a,b\n1,2")             // csv 的
+toml.parse(readFile("app.toml"))   // toml 的,互不相干
+```
+
+正因为有了命名空间,本套件的公开 API 都**去掉了手写前缀**:过去的 `csvParse`
+现在是 `csv.parse`,`dtIso` 是 `datetime.iso`,`jwtSign` 是 `jwt.sign`,
+`mysqlConnect` 是 `mysql.connect`。包内部要用被自己遮住的内置函数时走 `std`——
+数据库驱动开 TCP 连接写的就是 `std.connect(host, port, timeoutMs)`。
+
+需要扁平写法的时候(比如 `gui` 那一整套控件构造器)显式打开:
+
+```sfl
+import "gui" open
+val app = gui.app({title: "Demo", root: (ctx) -> column([text("hi")])})
+```
+
+命名空间在解析期就解析成对某个全局的直接引用,运行时不做任何额外的事;
+完整规则见 [SFL-使用手册.md](SFL-使用手册.md) §5.13。
+
 | 包 | 用途 | 模块 |
 | --- | --- | --- |
 | [`gui`](#gui) | 跨平台异步 GUI 框架(响应式信号、完整部件库、增量渲染、原生感窗口) | main, _core, _widgets, _render, _app, _client, _demo |
@@ -79,7 +108,7 @@ Web 运行时渲染——`run()` 起一个本机回环服务,在 **macOS / Linux
 远端画布:事件上行、增量补丁下行,全部走一条 WebSocket。
 
 ```sfl
-import "gui"
+import "gui" open
 
 def counter(ctx) {
   val n = signal(0)
@@ -92,10 +121,10 @@ def counter(ctx) {
   ], {gap: 12})
 }
 
-guiApp({title: "计数器", root: counter}).run()
+gui.app({title: "计数器", root: counter}).run()
 ```
 
-先睹为快:`sfl -e 'import "gui"; guiDemo()'` 打开一个六页的全功能演示。
+先睹为快:`sfl -e 'import "gui"; gui.demo()'` 打开一个六页的全功能演示。
 
 ### 响应式内核
 
@@ -141,7 +170,7 @@ each(todos, (it) -> row([checkbox("", {bind: it.done}), text(it.title)]),
 
 ### 应用、会话与页面
 
-`guiApp(opts)` 的选项:`title` `root`(或 `pages: {"/": …, "/settings": …}`)
+`gui.app(opts)` 的选项:`title` `root`(或 `pages: {"/": …, "/settings": …}`)
 `port` `host` `theme`(CSS 变量覆盖,如 `{accent: "#e2596a", radius: "4px"}`)
 `css`(附加样式) `dark`(true/false/"auto") `window: {width, height}` `assets`
 (静态目录映射) `show` `keepAlive` `quiet` `onConnect` `onDisconnect`
@@ -194,13 +223,13 @@ HTTP 服务器框架,稳定与性能优先,纯 SFL 建立在 socket/字节/TLS �
 ```sfl
 import "httpd"
 
-val srv = httpServer({
+val srv = httpd.server({
   port: 8080,
-  handler: routes([
-    GET("/", (req) -> respondText(200, "hello")),
-    GET("/users/:id", (req) -> respondJson(200, {id: req.params.id})),
-    STATIC("/assets", "./public"),
-    WS("/echo", {message: (sock, data, isText) -> sock.send(data)})
+  handler: httpd.routes([
+    httpd.GET("/", (req) -> httpd.respondText(200, "hello")),
+    httpd.GET("/users/:id", (req) -> httpd.respondJson(200, {id: req.params.id})),
+    httpd.STATIC("/assets", "./public"),
+    httpd.WS("/echo", {message: (sock, data, isText) -> sock.send(data)})
   ])
 })
 srv.listen()          // 同步:阻塞直到 srv.stop()
@@ -224,7 +253,7 @@ MongoDB 驱动,纯 SFL 说 OP_MSG 协议(MongoDB 3.6+)。值与 BSON 自然对�
 ```sfl
 import "mongodb"
 
-val client = mongoConnect("mongodb://localhost:27017/app")
+val client = mongodb.connect("mongodb://localhost:27017/app")
 val users  = client.db("app").coll("users")
 
 users.insertOne({name: "ada", age: 36, tags: ["math"]})
@@ -234,7 +263,7 @@ println(users.countDocuments({}))
 client.close()
 ```
 
-**连接**:`mongoConnect(target?, options?)`。`target` 是 `mongodb://` URL 或主机名;
+**连接**:`mongodb.connect(target?, options?)`。`target` 是 `mongodb://` URL 或主机名;
 `options` 覆盖 URL 里的项,认得 `db` / `user` / `password` / `authSource` /
 `authMechanism` / `appName` / `timeoutMs`。密码里的特殊字符在 URL 里按百分号转义。
 客户端由一把互斥量串行化,可跨线程共享。
@@ -266,10 +295,10 @@ client.close()
 的类型走单键包装对象,可手写也可读回:
 
 ```sfl
-{"$oid": "663d..."}                     // ObjectId,newObjectId() 造一个
-{"$date": 1723972000000}                // UTC 毫秒,mongoDate() 造
-{"$binary": [1,2,3], "$subtype": 0}     // 二进制,mongoBinary() 造
-{"$regex": "^a", "$options": "i"}       // 正则,mongoRegex() 造
+{"$oid": "663d..."}                     // ObjectId,mongodb.objectId() 造一个
+{"$date": 1723972000000}                // UTC 毫秒,mongodb.date() 造
+{"$binary": [1,2,3], "$subtype": 0}     // 二进制,mongodb.binary() 造
+{"$regex": "^a", "$options": "i"}       // 正则,mongodb.regex() 造
 {"$timestamp": {"t": 秒, "i": 序号}}
 {"$decimal128": "<32位十六进制>"}
 {"$minKey": true} / {"$maxKey": true}
@@ -277,8 +306,8 @@ client.close()
 ```
 
 `bsonEncode(doc)` → 字节数组,`bsonDecode(bytes, at?)` → 对象;
-`newObjectId()`、`oidTimestamp(oid)`、`mongoDate(ms?)`、`mongoBinary(bytes, sub?)`、
-`mongoRegex(pat, opts?)`。整数按能否放进 int32 自动选 int32/int64,读回都是普通整数。
+`mongodb.objectId()`、`mongodb.objectIdTime(oid)`、`mongodb.date(ms?)`、`mongodb.binary(bytes, sub?)`、
+`mongodb.regex(pat, opts?)`。整数按能否放进 int32 自动选 int32/int64,读回都是普通整数。
 
 **尚不支持**:TLS(连本机、内网或走隧道)、副本集主机列表。
 
@@ -286,14 +315,14 @@ client.close()
 
 MySQL / MariaDB 驱动,纯 SFL 说客户端/服务器协议(MySQL 5.7+ / 8、MariaDB)。
 查询走文本协议,`?` 占位符在客户端按连接的转义规则绑定(字符串转义、数组展开成
-IN 列表、`mysqlBinary(bytes)` 标记二进制),类型映射忠实:INT→整数、DECIMAL→
+IN 列表、`mysql.binary(bytes)` 标记二进制),类型映射忠实:INT→整数、DECIMAL→
 字符串(精确)、BLOB→字节数组、日期→字符串、NULL→null,无符号 BIGINT 溢出
 64 位时以字符串返回。
 
 ```sfl
 import "mysql"
 
-val db = mysqlConnect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
+val db = mysql.connect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
 db.exec("INSERT INTO users (name) VALUES (?)", ["ada"])          // {affectedRows, lastInsertId, ...}
 db.query("SELECT * FROM users WHERE id IN ? AND age > ?", [[1, 2, 3], 18])
 db.transaction(() -> {
@@ -303,7 +332,7 @@ db.transaction(() -> {
 db.close()
 ```
 
-**连接**:`mysqlConnect(target?, options?)`。`target` 是 `mysql://user:pass@host:3306/db`
+**连接**:`mysql.connect(target?, options?)`。`target` 是 `mysql://user:pass@host:3306/db`
 URL、主机名或选项对象;选项认 `host` / `port` / `user` / `password` / `db` /
 `timeoutMs` / `tls`(`true` 或 `{caFile: "..."}`,证书始终校验)/ `charset`
 (整理序号,默认 45 = utf8mb4)。客户端由一把互斥量串行化,可跨线程共享
@@ -337,16 +366,16 @@ PostgreSQL 驱动,纯 SFL 说协议 3.0(PostgreSQL 10+)。`query()` 走扩展协
 ```sfl
 import "postgres"
 
-val db = pgConnect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
+val db = postgres.connect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
 db.query("INSERT INTO users (name) VALUES ($1) RETURNING id", ["ada"])   // [{id: 1}]
-db.query("SELECT * FROM users WHERE id = ANY($1::int[])", [pgArray([1, 2, 3])])
+db.query("SELECT * FROM users WHERE id = ANY($1::int[])", [postgres.array([1, 2, 3])])
 db.exec("BEGIN; UPDATE t SET n = n + 1; COMMIT")
 db.listen("events")
 db.waitNotification(5000)          // {pid, channel, payload} 或 null
 db.close()
 ```
 
-**连接**:`pgConnect(target?, options?)`。`target` 是 `postgres://` URL、主机名或
+**连接**:`postgres.connect(target?, options?)`。`target` 是 `postgres://` URL、主机名或
 选项对象;选项认 `host` / `port` / `user` / `password` / `db` / `timeoutMs` /
 `tls` / `appName` / `params`(额外启动参数)/ `allowCleartext`。
 
@@ -359,8 +388,8 @@ affectedRows}`)/ `exec`(返回末条语句的 `{tag, affectedRows}`)/
 `begin/commit/rollback` / `transaction(fn)` / `ping()` / `serverVersion()` /
 `serverParams()` / `backendPid()` / `txStatus()`(I/T/E)/ `listen` /
 `unlisten` / `notifications()` / `waitNotification(ms)` / `close()`。
-数组参数用 `pgArray(values)` 造 `{...}` 字面量配 `ANY($1::int[])`;二进制用
-`pgBinary(bytes)`。语句失败后连接照常可用(错误在 ReadyForQuery 之后才抛)。
+数组参数用 `postgres.array(values)` 造 `{...}` 字面量配 `ANY($1::int[])`;二进制用
+`postgres.binary(bytes)`。语句失败后连接照常可用(错误在 ReadyForQuery 之后才抛)。
 COPY FROM STDIN 一律拒绝,COPY TO STDOUT 被排空。
 
 ## datetime
@@ -371,21 +400,21 @@ COPY FROM STDIN 一律拒绝,COPY TO STDOUT 被排空。
 ```sfl
 import "datetime"
 
-val t = dtParse("2026-08-19T15:30:00+08:00")   // → 纪元毫秒
-dtIso(t)                                        // "2026-08-19T07:30:00Z"
-dtIso(dtAddMonths(t, 6), 480)                   // 半年后,以 UTC+8 显示
-dtDiffDays(dtParse("2026-12-25"), t)            // 到圣诞还有几天
+val t = datetime.parse("2026-08-19T15:30:00+08:00")   // → 纪元毫秒
+datetime.iso(t)                                        // "2026-08-19T07:30:00Z"
+datetime.iso(datetime.addMonths(t, 6), 480)                   // 半年后,以 UTC+8 显示
+datetime.diffDays(datetime.parse("2026-12-25"), t)            // 到圣诞还有几天
 ```
 
-- **造/拆**:`dtMake(y, mo, d, h?, mi?, s?, ms?, offset?)`、
-  `dtParts(ms, offset?)` → `{year, month, day, hour, minute, second, ms, weekday(1=周一),
+- **造/拆**:`datetime.make(y, mo, d, h?, mi?, s?, ms?, offset?)`、
+  `datetime.parts(ms, offset?)` → `{year, month, day, hour, minute, second, ms, weekday(1=周一),
   yearday, offsetMinutes}`。
-- **ISO 8601**:`dtIso(ms, offset?)`、`dtIsoDate(ms, offset?)`、`dtParse(text)`
+- **ISO 8601**:`datetime.iso(ms, offset?)`、`datetime.isoDate(ms, offset?)`、`datetime.parse(text)`
   (认 `2026-08-19`、`...T15:30`、`...:00`、`...:00.250`,尾部可带 `Z` 或 `±hh:mm`)。
-- **运算**:`dtAddDays/Hours/Minutes/Seconds`、`dtAddMonths`(月末自动钳位:1 月 31 日
-  加一月是 2 月 28/29 日)、`dtAddYears`;`dtDiffDays/Hours/Minutes/Seconds`;
-  `dtStartOfDay/Month/Year`。
-- **历法**:`dtIsLeapYear(y)`、`dtDaysInMonth(y, mo)`、`dtDaysFromCivil`/`dtCivilFromDays`。
+- **运算**:`datetime.addDays/Hours/Minutes/Seconds`、`datetime.addMonths`(月末自动钳位:1 月 31 日
+  加一月是 2 月 28/29 日)、`datetime.addYears`;`datetime.diffDays/Hours/Minutes/Seconds`;
+  `datetime.startOfDay/Month/Year`。
+- **历法**:`datetime.isLeapYear(y)`、`datetime.daysInMonth(y, mo)`、`datetime.daysFromCivil`/`datetime.civilFromDays`。
 
 ## csv
 
@@ -395,31 +424,31 @@ RFC 4180:含分隔符、引号或换行的字段自动加引号,引号内的引�
 ```sfl
 import "csv"
 
-csvParse("a,b\n1,2")               // [["a","b"],["1","2"]]
-csvParseObjects("a,b\n1,2")        // [{a:"1", b:"2"}]
-csvStringify([["x", "y,z"]])       // "x,\"y,z\"\n"
-csvStringifyObjects([{a:1, b:2}])  // "a,b\n1,2\n"
+csv.parse("a,b\n1,2")               // [["a","b"],["1","2"]]
+csv.parseObjects("a,b\n1,2")        // [{a:"1", b:"2"}]
+csv.stringify([["x", "y,z"]])       // "x,\"y,z\"\n"
+csv.stringifyObjects([{a:1, b:2}])  // "a,b\n1,2\n"
 ```
 
-`opts` 认 `{sep: ";"}` 换分隔符;`csvStringifyObjects` 认 `{columns: [...]}` 指定列序。
+`opts` 认 `{sep: ";"}` 换分隔符;`csv.stringifyObjects` 认 `{columns: [...]}` 指定列序。
 
 ## toml
 
-TOML 1.0 配置文件:`tomlParse(text)` 与 `tomlStringify(obj)`。
+TOML 1.0 配置文件:`toml.parse(text)` 与 `toml.stringify(obj)`。
 
 ```sfl
 import "toml"
 
-val cfg = tomlParse(readFile("app.toml"))
+val cfg = toml.parse(readFile("app.toml"))
 cfg.server.port                       // [server] 表的 port
-writeFile("out.toml", tomlStringify({server: {port: 8080}}))
+writeFile("out.toml", toml.stringify({server: {port: 8080}}))
 ```
 
 覆盖的语法:裸/引号/点分键,基本与字面字符串的单行、多行形态(完整转义集、
 行尾反斜杠续行),整数(下划线、0x/0o/0b)、浮点(指数、inf、nan)、布尔,
 数组(多行、尾逗号、内嵌注释)、内联表、`[表]` 与 `[[表数组]]`、`#` 注释。
-日期时间按其字面量以**字符串**返回(SFL 没有日期类型;`dtParse` 能直接吃)。
-重复键与重复定义表按规范报错,错误带行号。`tomlStringify` 先标量后子表
+日期时间按其字面量以**字符串**返回(SFL 没有日期类型;`datetime.parse` 能直接吃)。
+重复键与重复定义表按规范报错,错误带行号。`toml.stringify` 先标量后子表
 (TOML 要求的顺序),字符串按需转义,键按需加引号;TOML 没有 null——遇到即报错。
 
 ## markdown
@@ -429,10 +458,10 @@ Markdown 渲染为 HTML,实用子集。
 ```sfl
 import "markdown"
 
-mdToHtml("# Title\n\nSome *emphasis* and `code`.")
-mdToHtml(untrusted)                    // 原始 HTML 默认转义,注入不进来
-mdToHtml(trusted, {allowHtml: true})   // 信任的输入放行 HTML
-mdInline("**加粗**")                    // 只做行内(标题、表格单元格用)
+markdown.toHtml("# Title\n\nSome *emphasis* and `code`.")
+markdown.toHtml(untrusted)                    // 原始 HTML 默认转义,注入不进来
+markdown.toHtml(trusted, {allowHtml: true})   // 信任的输入放行 HTML
+markdown.inline("**加粗**")                    // 只做行内(标题、表格单元格用)
 ```
 
 块级:`#`…`######` 标题(自动生成 slug 锚点 id)、段落(行尾两个空格硬换行)、
@@ -448,9 +477,9 @@ mdInline("**加粗**")                    // 只做行内(标题、表格单元�
 ```sfl
 import "template"
 
-tplRender("Hello, {{name}}!", {name: "ada"})
-tplRender("{{#items}}{{n}} {{/items}}", {items: [{n: 1}, {n: 2}]})   // "1 2 "
-val page = tplCompile(readFile("page.html"))   // 编译一次,渲染多次
+template.render("Hello, {{name}}!", {name: "ada"})
+template.render("{{#items}}{{n}} {{/items}}", {items: [{n: 1}, {n: 2}]})   // "1 2 "
+val page = template.compile(readFile("page.html"))   // 编译一次,渲染多次
 page(data, {partials: {row: "<li>{{.}}</li>"}})
 ```
 
@@ -458,7 +487,7 @@ page(data, {partials: {row: "<li>{{.}}</li>"}})
 点分路径与 `{{.}}`、`{{#节}}`(数组迭代、真值压栈、函数先调用)、`{{^反节}}`、
 `{{! 注释}}`、`{{> partial}}`(来自 opts.partials,循环有深度上限)。独占一行
 的块标签连行一起消失,块状排版保持干净。名字查找沿上下文栈向外走;缺失的名字
-渲染为空,不报错。`tplEscape(s)` 单独可用。不支持自定义分隔符。
+渲染为空,不报错。`template.escape(s)` 单独可用。不支持自定义分隔符。
 
 ## jwt
 
@@ -467,13 +496,13 @@ JSON Web Token(RFC 7519),HMAC-SHA-256 签名。
 ```sfl
 import "jwt"
 
-val token = jwtSign({sub: "user-1", exp: timeMillis() / 1000 + 3600}, "secret")
-val claims = jwtVerify(token, "secret")    // 伪造、过期都抛错
-jwtDecode(token)                            // 只解不验,{header, payload, signature}
+val token = jwt.sign({sub: "user-1", exp: timeMillis() / 1000 + 3600}, "secret")
+val claims = jwt.verify(token, "secret")    // 伪造、过期都抛错
+jwt.decode(token)                            // 只解不验,{header, payload, signature}
 ```
 
 只提供 HS256(运行时的摘要是 md5/sha1/sha256,非对称一族需要本包没有的
-RSA/EC)。`jwtVerify` 先整体验签(恒定路径比较)再看时间声明:`exp` / `nbf`
+RSA/EC)。`jwt.verify` 先整体验签(恒定路径比较)再看时间声明:`exp` / `nbf`
 (Unix 秒,`leewaySec` 给时钟偏差),可选 `issuer` / `audience`(`aud` 字符串
 或数组皆可),`atSec` 指定"现在"(测试用)。`alg: "none"` 与一切非 HS256 直接
 拒绝。密钥是字符串或字节数组;`opts.header` 可加 `kid` 等头字段。
@@ -485,7 +514,7 @@ RSA/EC)。`jwtVerify` 先整体验签(恒定路径比较)再看时间声明:`exp
 ```sfl
 import "smtp"
 
-val m = smtpConnect("smtp.example.com", 587, {
+val m = smtp.connect("smtp.example.com", 587, {
   tls: "starttls", user: "app@example.com", password: "secret"
 })
 m.send({
@@ -502,7 +531,7 @@ TLS:`"starttls"`(587 的路数)在 EHLO 后升级,`"implicit"`(465)先包一层;
 `to` / `cc` / `bcc`(bcc 只进信封不进信头)/ `replyTo` / `subject`(非 ASCII
 自动编码词)/ `text` / `html`(两者都给出 multipart/alternative)/ `headers` /
 `attachments`(`bytes` 或 `text`,base64 折行)。点填充、CRLF、Message-ID 都由
-构建器负责;`smtpBuildMime(mail)` 单独可用(预览、测试)。地址里的换行一律拒收
+构建器负责;`smtp.buildMime(mail)` 单独可用(预览、测试)。地址里的换行一律拒收
 (信头注入的路)。其余:`noop()`、`capabilities()`、`quit()`。
 
 ## uuid
@@ -512,13 +541,13 @@ RFC 4122 标识符。
 ```sfl
 import "uuid"
 
-uuid4()               // "8f14e45f-ceea-467f-a0e6-6ffbc0eafd6a" 随机
-uuid7()               // 时间有序,适合做数据库主键
-uuidValidate(s)       // 是否合法 UUID
-uuidVersion(s)        // 4、7 ...
+uuid.v4()               // "8f14e45f-ceea-467f-a0e6-6ffbc0eafd6a" 随机
+uuid.v7()               // 时间有序,适合做数据库主键
+uuid.validate(s)       // 是否合法 UUID
+uuid.version(s)        // 4、7 ...
 ```
 
-还有 `uuidNil()`、`uuidToBytes(s)`/`uuidFromBytes(b)`。v7 前 48 位是纪元毫秒,按创建
+还有 `uuid.nil()`、`uuid.toBytes(s)`/`uuid.fromBytes(b)`。v7 前 48 位是纪元毫秒,按创建
 时间排序,对索引友好。
 
 ## cli
@@ -534,13 +563,13 @@ val spec = {
   options: {times: {short: "n", doc: "重复几次", default: "1"}},
   positionals: [{name: "who", required: true}, {name: "rest", variadic: true}]
 }
-val got = cliParse(spec)   // 解析 args();遇到 -h/--help 打印帮助并退出
+val got = cli.parse(spec)   // 解析 args();遇到 -h/--help 打印帮助并退出
 // got = {flags: {loud: bool}, options: {times: "3"}, positionals: {who: "x", rest: [...]}}
 ```
 
 认 `--flag`、`--opt v`、`--opt=v`、`-s`、`-s v`、成串短标志 `-ln5`,`--` 结束选项解析。
-`cliParse(spec, argv?)` 带退出与打印;`cliParseArgs(spec, argv)` 是纯函数版(只抛错、
-不打印,测试用);`cliHelp(spec)` 单出帮助文本。
+`cli.parse(spec, argv?)` 带退出与打印;`cli.parseArgs(spec, argv)` 是纯函数版(只抛错、
+不打印,测试用);`cli.help(spec)` 单出帮助文本。
 
 ## log
 
@@ -549,14 +578,14 @@ val got = cliParse(spec)   // 解析 args();遇到 -h/--help 打印帮助并退�
 ```sfl
 import "log"
 
-logInfo("started", {port: 8080})   // 2026-08-19 15:30:00 INFO started {"port": 8080}
-logSetLevel("warn")                // debug | info | warn | error | off
-logWarn("careful"); logError("boom")
+log.info("started", {port: 8080})   // 2026-08-19 15:30:00 INFO started {"port": 8080}
+log.setLevel("warn")                // debug | info | warn | error | off
+log.warn("careful"); log.error("boom")
 ```
 
-`logDebug/logInfo/logWarn/logError(...parts)`(多参照 println 渲染、空格连接);
-`logSetLevel(name)`/`logLevel()`;`logSetFile(path)` 同时追加到文件;
-`logSetSink(fn)` 把行交给函数(测试或转发用)。级别、文件、sink 是进程级的。
+`log.debug/log.info/log.warn/log.error(...parts)`(多参照 println 渲染、空格连接);
+`log.setLevel(name)`/`log.level()`;`log.setFile(path)` 同时追加到文件;
+`log.setSink(fn)` 把行交给函数(测试或转发用)。级别、文件、sink 是进程级的。
 
 ## redis
 
@@ -566,7 +595,7 @@ Redis 客户端,说 RESP2。回复自然映射:简单/批量字符串→字符�
 ```sfl
 import "redis"
 
-val r = redisConnect("127.0.0.1", 6379)
+val r = redis.connect("127.0.0.1", 6379)
 r.set("greeting", "hello")
 r.get("greeting")                    // "hello"
 r.cmd("INCRBY", "counter", 5)        // 任意命令,一参一个
@@ -580,7 +609,7 @@ r.close()
 `ping/flushDb/dbSize/publish`。还有 `cmd(...)` 发任意命令、`pipeline(commands)`
 一趟往返、`subscribe(channels, handler)` 订阅。字节安全:值里有换行、二进制也能过。
 
-`redisConnect(host?, port?, opts?)` 的 `opts` 认 `timeoutMs`/`password`/`user`/`db`。
+`redis.connect(host?, port?, opts?)` 的 `opts` 认 `timeoutMs`/`password`/`user`/`db`。
 
 ## ansi
 
@@ -589,15 +618,15 @@ r.close()
 ```sfl
 import "ansi"
 
-println(ansiGreen("ok") + " " + ansiBold("42ms"))
-println(ansiStyle("warning", "yellow", "bold", "underline"))
-ansiRgb("orange", 255, 136, 0)      // 24 位;ansi256(text, n) 是 256 色
+println(ansi.green("ok") + " " + ansi.bold("42ms"))
+println(ansi.style("warning", "yellow", "bold", "underline"))
+ansi.rgb("orange", 255, 136, 0)      // 24 位;ansi.color256(text, n) 是 256 色
 ```
 
 进程级开关:默认开,`NO_COLOR` 环境变量或 `TERM=dumb` 时自动关;
-`ansiSetEnabled(false)` 让所有函数退化为恒等——库代码放心着色,调用方一处决定。
-快捷函数 `ansiRed/Green/Yellow/Blue/Magenta/Cyan/Gray/Bold/Dim/Underline`,
-全表见 `ansiCodes()`。`ansiStrip(s)` 剥掉任何来源的 ANSI 序列。
+`ansi.setEnabled(false)` 让所有函数退化为恒等——库代码放心着色,调用方一处决定。
+快捷函数 `ansi.red/Green/Yellow/Blue/Magenta/Cyan/Gray/Bold/Dim/Underline`,
+全表见 `ansi.codes()`。`ansi.strip(s)` 剥掉任何来源的 ANSI 序列。
 
 ## dotenv
 
@@ -606,9 +635,9 @@ ansiRgb("orange", 255, 136, 0)      // 24 位;ansi256(text, n) 是 256 色
 ```sfl
 import "dotenv"
 
-dotenvLoad()                        // 读 ./.env(不存在则安静返回 {})
+dotenv.load()                        // 读 ./.env(不存在则安静返回 {})
 getEnv("DATABASE_URL")
-dotenvParse(text)                   // 只解析,不碰环境
+dotenv.parse(text)                   // 只解析,不碰环境
 ```
 
 格式取 dotenv 家族的公约数:每行一个 KEY=VALUE、`#` 注释(整行或未引值尾部)、

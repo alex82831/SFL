@@ -2,7 +2,7 @@
 //
 //   import "mongodb"
 //
-//   val client = mongoConnect("mongodb://localhost:27017/app")
+//   val client = mongodb.connect("mongodb://localhost:27017/app")
 //   val users  = client.db("app").coll("users")
 //   users.insertOne({name: "ada", age: 36})
 //   val grown  = users.find({age: {"$gte": 18}}, {sort: {age: -1}, limit: 10})
@@ -26,7 +26,7 @@ import "scram"
 // Opens a connection. `target` is a mongodb:// URL or a host name; recognised
 // options (URL query or the options object, the object winning): db, user,
 // password, authSource, authMechanism, appName, timeoutMs.
-def mongoConnect(target = "mongodb://localhost:27017", options = {}) {
+def connect(target = "mongodb://localhost:27017", options = {}) {
   val u = _parseTarget(target)
   val opt = merge(u.options, options)
   val timeoutMs = _optInt(opt, "timeoutMs", 10000)
@@ -35,7 +35,7 @@ def mongoConnect(target = "mongodb://localhost:27017", options = {}) {
   val defaultDb = _optStr(opt, "db", if (u.db != "") then u.db else "test")
   val authSource = _optStr(opt, "authSource", if (u.db != "") then u.db else "admin")
 
-  val sock = connect(u.host, u.port, timeoutMs)
+  val sock = std.connect(u.host, u.port, timeoutMs)
   val state = {sock: sock, timeoutMs: timeoutMs, lock: mutex()}
 
   val hello = {hello: 1, client: {
@@ -232,7 +232,7 @@ def _collApi(state, dbName, collName, guard) {
     val ids = []
     for (d in docs) {
       if (!isObject(d)) then error("mongodb: cannot insert a " + typeOf(d))
-      val doc = if (contains(d, "_id")) then d else merge({_id: newObjectId()}, d)
+      val doc = if (contains(d, "_id")) then d else merge({_id: objectId()}, d)
       push(withIds, doc)
       push(ids, doc._id)
     }

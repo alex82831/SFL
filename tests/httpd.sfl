@@ -6,7 +6,7 @@
 // without it.
 
 import "lib/assert"
-import "../packages/httpd/main"
+import "../packages/httpd/main" open
 
 // --------------------------------------------------------------- tiny client
 
@@ -95,7 +95,7 @@ writeFile(joinPath(staticDir, "index.html"), "<h1>index</h1>")
 
 // ------------------------------------------------------------------ HTTP/1.1
 
-val srv = httpServer({handler: demoApp(), quiet: true})
+val srv = httpd.server({handler: demoApp(), quiet: true})
 srv.start()
 val port = srv.port()
 checkTrue("the server bound a port", port > 0)
@@ -256,7 +256,7 @@ check("the server reports it stopped", srv.stopping(), true)
 // ----------------------------------------------------------------- HTTP/2
 
 // A prior-knowledge h2c connection: preface, SETTINGS, one GET, read the reply.
-val h2srv = httpServer({handler: demoApp(), quiet: true})
+val h2srv = httpd.server({handler: demoApp(), quiet: true})
 h2srv.start()
 val h2port = h2srv.port()
 
@@ -288,7 +288,7 @@ socketWrite(h2c, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
 socketWriteBytes(h2c, h2Frame(4, 0, 0, [])) // empty SETTINGS
 
 // Encode a GET / request block with our own hpack encoder (the server decodes it).
-import "../packages/httpd/hpack"
+import "../packages/httpd/hpack" open
 val reqBlock = hpackEncode([[":method", "GET"], [":scheme", "http"],
                             [":path", "/"], [":authority", "127.0.0.1"]])
 socketWriteBytes(h2c, h2Frame(1, 5, 1, reqBlock)) // HEADERS, END_STREAM | END_HEADERS
@@ -339,7 +339,7 @@ if (!hasOpenssl) {
   if (gen.code != 0) {
     println("skip: could not generate a test certificate")
   } else {
-    val tsrv = httpServer({handler: demoApp(), quiet: true, tls: {cert: cert, key: key}})
+    val tsrv = httpd.server({handler: demoApp(), quiet: true, tls: {cert: cert, key: key}})
     tsrv.start()
     val tport = tsrv.port()
     // The client stack over TLS: connect, wrap with ALPN, negotiate, and — since

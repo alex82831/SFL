@@ -3,7 +3,7 @@
 //
 //   import "mysql"
 //
-//   val db = mysqlConnect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
+//   val db = mysql.connect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
 //   db.exec("CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)")
 //   db.exec("INSERT INTO users (name) VALUES (?)", ["ada"])
 //   db.query("SELECT * FROM users WHERE id > ?", [0])   // [{id: 1, name: "ada"}]
@@ -13,7 +13,7 @@
 // shared between threads — though a transaction owns the connection, so keep
 // a transaction to one thread. Queries use the text protocol; `?` placeholders
 // are bound client-side with proper escaping (strings, numbers, booleans,
-// null, arrays for IN (...), and mysqlBinary(bytes) for blobs).
+// null, arrays for IN (...), and binary(bytes) for blobs).
 //
 // Authentication: mysql_native_password and caching_sha2_password. The
 // caching_sha2 fast path works over plain TCP; the full exchange (an account
@@ -54,7 +54,7 @@ val _COM_PING = 0x0e
 // options object itself. Recognised options (over the URL, the object wins):
 // host, port, user, password, db, timeoutMs, tls (true or {caFile: "..."}),
 // charset (a collation id; 45 = utf8mb4_general_ci).
-def mysqlConnect(target = "127.0.0.1", options = {}) {
+def connect(target = "127.0.0.1", options = {}) {
   val opt = merge(_parseTarget(target), options)
   val host = get(opt, "host", "127.0.0.1")
   val port = get(opt, "port", 3306)
@@ -64,7 +64,7 @@ def mysqlConnect(target = "127.0.0.1", options = {}) {
   val timeoutMs = get(opt, "timeoutMs", 10000)
   val tls = get(opt, "tls", null)
 
-  val sock = connect(host, port, timeoutMs)
+  val sock = std.connect(host, port, timeoutMs)
   val state = {sock: sock, timeoutMs: timeoutMs, seq: 0, lock: mutex(),
     caps: 0, status: 0, serverVersion: "", threadId: 0}
 
@@ -120,7 +120,7 @@ def mysqlConnect(target = "127.0.0.1", options = {}) {
   def run(sql, params) {
     withLock(state.lock, () -> {
       guard()
-      val text = if (params == null) then sql else mysqlBind(sql, params, _noBackslash(state))
+      val text = if (params == null) then sql else bind(sql, params, _noBackslash(state))
       _command(state, _COM_QUERY, utf8Encode(text))
       _readResultSets(state)
     })
@@ -218,7 +218,7 @@ def mysqlConnect(target = "127.0.0.1", options = {}) {
       autocommit: bitAnd(state.status, _STATUS_AUTOCOMMIT) != 0
     },
     // One value as a SQL literal, exactly as ? binding would render it.
-    escape: (v) -> mysqlEscape(v, _noBackslash(state)),
+    escape: (v) -> escape(v, _noBackslash(state)),
 
     close: () -> {
       if (!closed) {
@@ -238,7 +238,7 @@ def _noBackslash(state) = bitAnd(state.status, _STATUS_NO_BACKSLASH) != 0
 
 // Wraps raw bytes so a parameter binds as a binary literal (x'...') rather
 // than being mistaken for an IN (...) list, which is what a bare array means.
-def mysqlBinary(bytes) = {"$mysqlBinary": bytes}
+def binary(bytes) = {"$binary": bytes}
 
 // ------------------------------------------------------- target parsing
 
@@ -346,8 +346,8 @@ def _sendAuthResponse(state, caps, charset, user, password, db, plugin, nonce, i
 // The token for one auth plugin; `moreRound` marks a mid-conversation reply
 // (an AuthSwitchRequest), where cleartext must only ever cross a TLS link.
 def _authToken(plugin, password, nonce, isTls) {
-  if (plugin == "mysql_native_password") then mysqlNativeToken(password, nonce)
-  elsif (plugin == "caching_sha2_password") then mysqlSha2Token(password, nonce)
+  if (plugin == "mysql_native_password") then nativeToken(password, nonce)
+  elsif (plugin == "caching_sha2_password") then sha2Token(password, nonce)
   elsif (plugin == "mysql_clear_password") {
     if (!isTls) {
       error("mysql: the server asked for a cleartext password without tls; refusing " +
@@ -624,7 +624,7 @@ def _textToInt(s, unsigned) {
 
 // Renders one parameter as a SQL literal. `noBackslash` mirrors the server's
 // NO_BACKSLASH_ESCAPES mode, where '' is the only escape.
-def mysqlEscape(v, noBackslash = false) {
+def escape(v, noBackslash = false) {
   if (v == null) then "NULL"
   elsif (isBool(v)) then (if (v) then "TRUE" else "FALSE")
   elsif (isInt(v)) then toString(v)
@@ -633,12 +633,12 @@ def mysqlEscape(v, noBackslash = false) {
     toString(v)
   }
   elsif (isString(v)) then "'" + _escapeText(v, noBackslash) + "'"
-  elsif (isObject(v) && contains(v, "$mysqlBinary")) {
-    if (isEmpty(v["$mysqlBinary"])) then "''" else "x'" + hexEncodeBytes(v["$mysqlBinary"]) + "'"
+  elsif (isObject(v) && contains(v, "$binary")) {
+    if (isEmpty(v["$binary"])) then "''" else "x'" + hexEncodeBytes(v["$binary"]) + "'"
   }
   elsif (isArray(v)) {
     if (isEmpty(v)) then "(NULL)"
-    else "(" + join(map(v, (x) -> mysqlEscape(x, noBackslash)), ", ") + ")"
+    else "(" + join(map(v, (x) -> escape(x, noBackslash)), ", ") + ")"
   }
   else error("mysql: cannot bind a " + typeOf(v) + " parameter")
 }
@@ -669,7 +669,7 @@ def _escapeText(s, noBackslash) {
 
 // Substitutes ? placeholders with escaped parameters, leaving quoted strings,
 // backtick identifiers and comments alone. Raises when the counts disagree.
-def mysqlBind(sql, params, noBackslash = false) {
+def bind(sql, params, noBackslash = false) {
   var out = ""
   var pi = 0
   val n = length(sql)
@@ -682,7 +682,7 @@ def mysqlBind(sql, params, noBackslash = false) {
         if (pi >= length(params)) {
           error("mysql: the query has more ? placeholders than parameters (" + length(params) + ")")
         }
-        out += mysqlEscape(params[pi], noBackslash)
+        out += escape(params[pi], noBackslash)
         pi += 1
       } else {
         out += ch

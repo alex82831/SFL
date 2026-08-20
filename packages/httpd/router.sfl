@@ -1,11 +1,11 @@
 // httpd/router — routes, path patterns and middleware.
 //
-//   val app = routes([
-//     GET("/", (req) -> respondText(200, "hello")),
-//     GET("/users/:id", (req) -> respondJson(200, {id: req.params.id})),
-//     POST("/echo", (req) -> respondText(200, req.body)),
-//     STATIC("/assets", "./public"),
-//     WS("/chat", {message: (sock, msg, isText) -> sock.send("echo " + msg)})
+//   val app = httpd.routes([
+//     httpd.GET("/", (req) -> httpd.respondText(200, "hello")),
+//     httpd.GET("/users/:id", (req) -> httpd.respondJson(200, {id: req.params.id})),
+//     httpd.POST("/echo", (req) -> httpd.respondText(200, req.body)),
+//     httpd.STATIC("/assets", "./public"),
+//     httpd.WS("/chat", {message: (sock, msg, isText) -> sock.send("echo " + msg)})
 //   ])
 //
 // A route pattern is matched segment by segment: a literal must equal the

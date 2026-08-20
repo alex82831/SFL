@@ -6,75 +6,75 @@ import "../packages/template/main"
 
 // ------------------------------------------------------------ interpolation
 
-check("plain text passes through", tplRender("just text", {}), "just text")
-check("variables interpolate", tplRender("Hello, {{name}}!", {name: "ada"}), "Hello, ada!")
-check("missing names render as nothing", tplRender("[{{ghost}}]", {}), "[]")
-check("numbers render", tplRender("{{n}}/{{f}}", {n: 42, f: 2.5}), "42/2.5")
-check("booleans render as words", tplRender("{{t}} {{f}}", {t: true, f: false}), "true false")
-check("dotted paths descend", tplRender("{{user.name.first}}", {user: {name: {first: "Ada"}}}), "Ada")
-check("dotted misses render as nothing", tplRender("[{{user.nope.x}}]", {user: {}}), "[]")
-check("whitespace in tags is fine", tplRender("{{ name }}", {name: "x"}), "x")
+check("plain text passes through", template.render("just text", {}), "just text")
+check("variables interpolate", template.render("Hello, {{name}}!", {name: "ada"}), "Hello, ada!")
+check("missing names render as nothing", template.render("[{{ghost}}]", {}), "[]")
+check("numbers render", template.render("{{n}}/{{f}}", {n: 42, f: 2.5}), "42/2.5")
+check("booleans render as words", template.render("{{t}} {{f}}", {t: true, f: false}), "true false")
+check("dotted paths descend", template.render("{{user.name.first}}", {user: {name: {first: "Ada"}}}), "Ada")
+check("dotted misses render as nothing", template.render("[{{user.nope.x}}]", {user: {}}), "[]")
+check("whitespace in tags is fine", template.render("{{ name }}", {name: "x"}), "x")
 
-check("html escapes by default", tplRender("{{x}}", {x: "<b>&\"'</b>"}),
+check("html escapes by default", template.render("{{x}}", {x: "<b>&\"'</b>"}),
   "&lt;b&gt;&amp;&quot;&#39;&lt;/b&gt;")
-check("triple braces stay raw", tplRender("{{{x}}}", {x: "<b>"}), "<b>")
-check("ampersand stays raw", tplRender("{{& x}}", {x: "<b>"}), "<b>")
-check("tplEscape stands alone", tplEscape("a<b"), "a&lt;b")
+check("triple braces stay raw", template.render("{{{x}}}", {x: "<b>"}), "<b>")
+check("ampersand stays raw", template.render("{{& x}}", {x: "<b>"}), "<b>")
+check("template.escape stands alone", template.escape("a<b"), "a&lt;b")
 
 // ---------------------------------------------------------------- sections
 
-check("array sections iterate", tplRender("{{#ns}}{{.}},{{/ns}}", {ns: [1, 2, 3]}), "1,2,3,")
+check("array sections iterate", template.render("{{#ns}}{{.}},{{/ns}}", {ns: [1, 2, 3]}), "1,2,3,")
 check("object items expose their keys",
-  tplRender("{{#users}}{{name}};{{/users}}", {users: [{name: "a"}, {name: "b"}]}), "a;b;")
+  template.render("{{#users}}{{name}};{{/users}}", {users: [{name: "a"}, {name: "b"}]}), "a;b;")
 check("truthy sections render once with context",
-  tplRender("{{#user}}{{name}}{{/user}}", {user: {name: "ada"}}), "ada")
-check("false sections skip", tplRender("[{{#no}}x{{/no}}]", {no: false}), "[]")
-check("empty arrays skip", tplRender("[{{#xs}}x{{/xs}}]", {xs: []}), "[]")
-check("null sections skip", tplRender("[{{#gone}}x{{/gone}}]", {gone: null}), "[]")
+  template.render("{{#user}}{{name}}{{/user}}", {user: {name: "ada"}}), "ada")
+check("false sections skip", template.render("[{{#no}}x{{/no}}]", {no: false}), "[]")
+check("empty arrays skip", template.render("[{{#xs}}x{{/xs}}]", {xs: []}), "[]")
+check("null sections skip", template.render("[{{#gone}}x{{/gone}}]", {gone: null}), "[]")
 check("outer names stay visible inside",
-  tplRender("{{#items}}{{label}}{{n}} {{/items}}", {label: "#", items: [{n: 1}, {n: 2}]}),
+  template.render("{{#items}}{{label}}{{n}} {{/items}}", {label: "#", items: [{n: 1}, {n: 2}]}),
   "#1 #2 ")
 check("inner names shadow outer",
-  tplRender("{{#items}}{{n}}{{/items}}", {n: 0, items: [{n: 5}]}), "5")
+  template.render("{{#items}}{{n}}{{/items}}", {n: 0, items: [{n: 5}]}), "5")
 check("sections nest",
-  tplRender("{{#rows}}{{#cols}}{{.}}{{/cols}};{{/rows}}", {rows: [{cols: [1, 2]}, {cols: [3]}]}),
+  template.render("{{#rows}}{{#cols}}{{.}}{{/cols}};{{/rows}}", {rows: [{cols: [1, 2]}, {cols: [3]}]}),
   "12;3;")
 check("function values are called",
-  tplRender("{{#f}}{{.}}{{/f}}", {f: () -> [7, 8]}), "78")
+  template.render("{{#f}}{{.}}{{/f}}", {f: () -> [7, 8]}), "78")
 
-check("inverted renders on absence", tplRender("{{^xs}}none{{/xs}}", {xs: []}), "none")
-check("inverted skips on presence", tplRender("[{{^xs}}none{{/xs}}]", {xs: [1]}), "[]")
+check("inverted renders on absence", template.render("{{^xs}}none{{/xs}}", {xs: []}), "none")
+check("inverted skips on presence", template.render("[{{^xs}}none{{/xs}}]", {xs: [1]}), "[]")
 
-checkFails("an unclosed section is named", () -> tplRender("{{#a}}x", {}), "never closes")
-checkFails("a stray close is named", () -> tplRender("x{{/a}}", {}), "closes nothing")
-checkFails("mismatched sections are named", () -> tplRender("{{#a}}{{/b}}", {}), "closes nothing")
+checkFails("an unclosed section is named", () -> template.render("{{#a}}x", {}), "never closes")
+checkFails("a stray close is named", () -> template.render("x{{/a}}", {}), "closes nothing")
+checkFails("mismatched sections are named", () -> template.render("{{#a}}{{/b}}", {}), "closes nothing")
 
 // ---------------------------------------------------------------- partials
 
 check("partials render with the current context",
-  tplRender("{{#users}}{{> row}}{{/users}}", {users: [{n: 1}, {n: 2}]},
+  template.render("{{#users}}{{> row}}{{/users}}", {users: [{n: 1}, {n: 2}]},
     {partials: {row: "[{{n}}]"}}), "[1][2]")
-checkFails("a missing partial is named", () -> tplRender("{{> ghost}}", {}, {}), "ghost")
+checkFails("a missing partial is named", () -> template.render("{{> ghost}}", {}, {}), "ghost")
 checkFails("partial cycles are caught",
-  () -> tplRender("{{> a}}", {}, {partials: {a: "{{> b}}", b: "{{> a}}"}}), "100 deep")
+  () -> template.render("{{> a}}", {}, {partials: {a: "{{> b}}", b: "{{> a}}"}}), "100 deep")
 
 // ------------------------------------------------------- standalone trimming
 
 check("standalone section lines vanish",
-  tplRender("start\n{{#xs}}\n- {{.}}\n{{/xs}}\nend", {xs: [1, 2]}),
+  template.render("start\n{{#xs}}\n- {{.}}\n{{/xs}}\nend", {xs: [1, 2]}),
   "start\n- 1\n- 2\nend")
 check("indented standalone tags vanish too",
-  tplRender("a\n  {{#x}}\nb\n  {{/x}}\nc", {x: true}), "a\nb\nc")
+  template.render("a\n  {{#x}}\nb\n  {{/x}}\nc", {x: true}), "a\nb\nc")
 check("standalone comments vanish",
-  tplRender("a\n{{! note to self }}\nb", {}), "a\nb")
+  template.render("a\n{{! note to self }}\nb", {}), "a\nb")
 check("inline tags keep their line",
-  tplRender("a {{#x}}b{{/x}} c", {x: true}), "a b c")
+  template.render("a {{#x}}b{{/x}} c", {x: true}), "a b c")
 
 // --------------------------------------------------------------- compiled
 
-val row = tplCompile("{{a}}-{{b}}")
+val row = template.compile("{{a}}-{{b}}")
 check("a compiled template renders many times", row({a: 1, b: 2}) + row({a: 3, b: 4}), "1-23-4")
-checkFails("empty tags are refused", () -> tplRender("{{}}", {}), "empty")
-checkFails("custom delimiters are refused", () -> tplRender("{{=<% %>=}}", {}), "not supported")
+checkFails("empty tags are refused", () -> template.render("{{}}", {}), "empty")
+checkFails("custom delimiters are refused", () -> template.render("{{=<% %>=}}", {}), "not supported")
 
 report("template")

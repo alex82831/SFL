@@ -9,6 +9,7 @@
 //   editors/vscode/language-configuration.json
 //   editors/intellij/src/main/resources/syntax/sfl-keywords.txt
 //   editors/intellij/src/main/resources/syntax/sfl-builtins.txt
+//   editors/intellij/src/main/resources/syntax/sfl-namespaces.txt
 
 val root = dirName(dirName(absPath(scriptPath())))
 val exe = exePath() ?? "sfl"
@@ -51,6 +52,11 @@ val control   = filter(spec.keywords, (k) ->
 
 val builtinNames = map(spec.builtins, (b) -> b.name)
 
+// The namespaces that need no import: `std` and one per builtin group. They are
+// highlighted as namespaces wherever they appear before a dot, which is the only
+// place they mean one.
+val namespaceNames = map(spec.namespaces ?? [], (n) -> n.name)
+
 // Punctuation reads better uncoloured; everything else is an operator.
 val operators = filter(spec.operators, (o) -> !contains([",", ";", ":", "."], o))
 
@@ -81,6 +87,9 @@ val grammar = {
     // name, and would never fire if the bare keyword rule consumed `def` first.
     { "include": "#function-definition" },
     { "include": "#keywords" },
+    // Qualified names before bare ones: `std.map` is one construct, and the
+    // builtin rule would otherwise colour its member as a free-standing builtin.
+    { "include": "#namespace-member" },
     { "include": "#builtins" },
     { "include": "#function-call" },
     { "include": "#operators" }
@@ -145,6 +154,30 @@ val grammar = {
       "name": "support.function.builtin.sfl",
       "match": r'\b(?:' + wordAlt(builtinNames) + r')\b'
     },
+    // `ns.member`: the namespace itself, the dot, and the member. Builtin
+    // namespaces get the stronger `support` scope; anything else that reads as a
+    // namespace — a package or module an import bound — gets the entity scope, so
+    // both colour without the grammar having to know what a project imported.
+    "namespace-member": {
+      "patterns": [
+        {
+          "match": r'\b(' + wordAlt(namespaceNames) + r')(\.)([A-Za-z_$][A-Za-z0-9_$]*)',
+          "captures": {
+            "1": { "name": "support.class.namespace.sfl" },
+            "2": { "name": "punctuation.accessor.sfl" },
+            "3": { "name": "support.function.builtin.sfl" }
+          }
+        },
+        {
+          "match": r'\b([A-Za-z_$][A-Za-z0-9_$]*)(\.)([A-Za-z_$][A-Za-z0-9_$]*)\s*(?=\()',
+          "captures": {
+            "1": { "name": "entity.name.namespace.sfl" },
+            "2": { "name": "punctuation.accessor.sfl" },
+            "3": { "name": "entity.name.function.call.sfl" }
+          }
+        }
+      ]
+    },
     "function-call": {
       "name": "entity.name.function.call.sfl",
       "match": r'\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?=\()'
@@ -204,3 +237,4 @@ emit(root + "/editors/vscode/language-configuration.json", jsonStringify(langCfg
 val ijSyntax = root + "/editors/intellij/src/main/resources/syntax"
 emit(ijSyntax + "/sfl-keywords.txt", join(spec.keywords, "\n") + "\n")
 emit(ijSyntax + "/sfl-builtins.txt", join(builtinNames, "\n") + "\n")
+emit(ijSyntax + "/sfl-namespaces.txt", join(namespaceNames, "\n") + "\n")

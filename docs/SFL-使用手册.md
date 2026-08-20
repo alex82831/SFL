@@ -1,6 +1,6 @@
 # SFL 使用手册
 
-**SFL — Scripting for Fun**，版本 0.7.0
+**SFL — Scripting for Fun**，版本 0.8.0
 
 SFL 是一门小巧的动态脚本语言，用 Scala 3 实现，通过 Scala Native 编译成独立的原生可执行文件。
 它没有虚拟机、没有启动预热，二进制启动到执行完毕通常只要几毫秒，适合写命令行小工具、
@@ -943,6 +943,47 @@ println(join(map(nums, toString), ", "))
 
 ### 5.13 模块导入与命名空间
 
+**每个文件的顶层名字都属于它自己的命名空间。** 你写的 `def map` 就是你的 `map`——
+它不会替掉内置的那一个，也不会跟着你去改别人的代码。这是 SFL 处理重名的全部办法，
+下面的规则都是从这一条推出来的。
+
+```sfl
+// lib/stats.sfl
+def summarise(xs) = map(xs, (x) -> x * 2)   // 这里的 map 永远是内置的那个
+```
+
+```sfl
+// main.sfl
+import "lib/stats"
+def map(a, b) = "我的 map"                   // 只在本文件里生效
+
+println(map([1], (x) -> x))                 // 我的 map
+println(summarise([1, 2, 3]))               // [2, 4, 6]——库看到的还是内置 map
+println(std.map([1, 2], (x) -> x * 3))      // [3, 6]——随时能绕回内置的
+```
+
+在没有命名空间之前，上面这段的 `summarise` 会拿到你的 `map`，而且没有任何提示。
+
+#### 名字的查找顺序
+
+一个不带点的名字，按由近及远的顺序解析：
+
+1. 局部变量与参数（包括闭包捕获的外层变量）；
+2. **本文件的顶层声明**——包括以 `_` 开头的私有名字；
+3. **同一命名空间里兄弟文件的声明**（见下面的"一个单元就是一个命名空间"）；
+4. **被 `import` 打开（open）的命名空间**里的名字；
+5. **内置函数**。
+
+如果第 4 步有两个被打开的命名空间都导出这个名字，SFL 不会挑一个，而是在引用处报错，
+让你写清楚要哪一个：
+
+```
+Syntax error: 'label' is ambiguous: one and two both export it
+  help: qualify it — one.label or two.label — or import one of them under an alias
+```
+
+#### 查找模块文件
+
 ```sfl
 import "utils"          // 会找 utils.sfl
 import "lib/strings"    // 相对路径
@@ -954,26 +995,54 @@ import "lib/strings"    // 相对路径
 2. 引入该模块的那个脚本所在的目录
 3. `$SFL_HOME/libs/`
 
-被导入的文件在导入处执行一次，它的顶层定义成为全局可见。同一个模块被多次导入只会执行一次；
+被导入的文件在导入处执行一次，它的顶层定义随即可用。同一个模块被多次导入只会执行一次；
 出现循环导入会明确报错，而不是无限递归。
 
-```sfl
-// lib/geometry.sfl
-val TAU = 6.283185307179586
-def circleArea(r) = PI() * r * r
-```
+#### 一个 import 做两件事
+
+`import "m"` 会**绑定一个命名空间**，还可能**打开**它：
+
+| 写法 | 绑定命名空间 | 打开（名字直接可见） |
+| --- | --- | --- |
+| `import "lib/geometry"` | `geometry` | 是——普通文件是你自己程序的一部分 |
+| `import "csv"` | `csv` | 否——包是别人写的一个有名字的单元 |
+| `import "csv" as c` | `c` | 否 |
+| `import "gui" open` | `gui` | 是——显式要求 |
+
+绑定总会发生，所以 `geometry.dist(p)` 和 `csv.parse(text)` 一样都能写；
+区别只在于要不要连带把名字铺进当前文件。
 
 ```sfl
-// main.sfl
-import "lib/geometry"
-println(circleArea(2.0))
+import "lib/geometry"          // 普通文件：两种写法都行
+println(dist({"x": 3, "y": 4}))
+println(geometry.dist({"x": 3, "y": 4}))
+
+import "csv"                   // 包：只有带命名空间的写法
+println(csv.parse("a,b\n1,2"))
+println(parse("a,b"))          // 报错：undefined variable 'parse'
+```
+
+包默认不打开，是因为包是装来的：`csv` 有 `parse`，`toml` 也有 `parse`，
+把它们一起铺进同一个文件只会撞车。真想要扁平的写法——比如 `gui` 那种一整套
+控件构造器的 DSL——就写 `open`，这时是你自己选的：
+
+```sfl
+import "gui" open
+val app = gui.app({title: "Demo", root: (ctx) -> column([text("hi")])})
+```
+
+`x.name` 在**解析期**就解析成了对某个全局的直接引用，所以它和写一个普通名字一样快——
+没有对象查找，运行时不做任何额外的事。它也是普通的值：
+
+```sfl
+val f = geometry.dist
+println(map(points, geometry.dist))
 ```
 
 #### 私有名字
 
-**以 `_` 开头的顶层名字只属于声明它的那个文件。** 别的文件看不到它，两个模块可以各有
-一个同名的 `_helper` 而互不干扰。这让模块能有真正的内部实现，而不必靠给名字加前缀来
-躲避冲突。
+**以 `_` 开头的顶层名字只属于声明它的那个文件。** 别的文件看不到它——通过命名空间
+也看不到——两个模块可以各有一个同名的 `_helper` 而互不干扰。
 
 ```sfl
 // lib/geometry.sfl
@@ -985,41 +1054,78 @@ def dist(p) = sqrt(_square(p.x) + _square(p.y))
 import "lib/geometry"
 println(dist({"x": 3, "y": 4}))   // 5.0
 println(_square(3))               // 报错：undefined variable '_square'
+println(geometry._square(3))      // 报错：'_square' is private to 'geometry'
 ```
 
 规则只作用于**顶层**：函数内部的 `val _tmp = 1` 就是一个普通局部变量。
 
-SFL 自己的标准库就是这样写的——`stdlib/` 下的七个模块共有 130 个私有名字，其中
+SFL 自己的标准库就是这样写的——`stdlib/` 下的模块共有 130 个私有名字，其中
 `_bad`、`_show` 这样的名字同时出现在四个文件里。
 
-#### 限定导入
+#### 一个单元就是一个命名空间
 
-`import "m" as x` 把模块的公开名字放在 `x` 后面，**而不放进当前文件的命名空间**。
-这样两个模块可以导出同名的东西：
+命名空间是按**单元**划分的，不是按文件：
 
-```sfl
-import "lib/geometry" as geo
-import "lib/text" as txt
+- 目录里有 `sfl.pkg` 的，那份清单的 `name` 就是这个单元的名字，
+  它下面所有 `.sfl` 文件**共用**一个命名空间；
+- 没有清单的文件，自己就是一个命名空间，名字取文件名。
 
-println(geo.dist({"x": 3, "y": 4}))
-println(txt.dist("abc"))          // 两个 dist 互不相干
-println(dist)                     // 报错：undefined variable 'dist'
+所以一个包的七个模块合起来是一个 `httpd`，`httpd.GET` 和 `httpd.mimeType`
+不管定义在哪个文件里都能拿到；一个项目的 `src/a.sfl` 和 `src/b.sfl` 也是一家人，
+互相调用不需要先 `import`（`import` 仍然负责让那个文件**执行**一次）。
+
+同一个命名空间里的两个文件声明同一个公开名字会直接报错，而不是后者覆盖前者：
+
+```
+Syntax error: 'shared' is already defined in 'dup'
+  help: other.sfl declares it too, and both files share one namespace
+  help: rename one of them, or make it private by starting the name with '_'
 ```
 
-`x.name` 在**解析期**就解析成了对某个全局的直接引用，所以它和写一个普通名字一样快——
-没有对象查找，运行时不做任何额外的事。它也是普通的值：
+#### 内置函数的命名空间
+
+所有内置函数除了本来的名字，还住在两个命名空间里：
+
+- **`std`**——全部 367 个，`std.map`、`std.println`、`std.connect`；
+- **按类别分组**——`math.abs`、`string.toUpper`、`array.concat`、`io.println`、
+  `fs.readFile`、`json.jsonParse`、`thread.spawn`……组名就是手册第 9 章的分组名。
+
+它们是同一个函数的不同写法，不是副本：`std.length == string.length` 为真，
+两者都能当值传递。这条通道的用处是：**本文件遮住了某个内置函数之后，还能拿回它。**
 
 ```sfl
-val f = geo.dist
-println(map(points, geo.dist))
+def connect(a, b) = "我的 connect"      // 本文件的
+val sock = std.connect(host, port, 5000)  // 内置的
 ```
 
-几条规则：
+数据库驱动包就是这么写的：`mysql.connect` 是包的公开 API，包内部要开 TCP 连接时
+写 `std.connect`。
 
-- 模块的私有名字（`_` 开头）也不能通过别名访问；
-- 不能从外部给模块的名字赋值——要改就由模块自己导出一个函数来改；
-- 一个模块只能用一种方式导入。同时写 `import "m"` 和 `import "m" as x` 会报错，
-  因为模块只解析一次，它的名字放在哪里是那一次决定的。
+命名空间不是关键字。本文件声明过、或者局部绑定过的名字总是赢：
+
+```sfl
+val math = {abs: (x) -> "字段"}
+println(math.abs(-1))                     // 字段
+```
+
+#### 几条规则
+
+- 模块的私有名字（`_` 开头）不能通过命名空间访问；
+- 不能从外部给命名空间里的名字赋值——要改就由模块自己导出一个函数来改；
+- 同一个模块既 `import "m"` 又 `import "m" as x` 是允许的：名字放在哪里不取决于
+  怎么导入它，两个写法指向同一份定义；
+- 别名重名会报错（`'csv' already names another namespace`），换个别名即可。
+
+#### eval 与命名空间
+
+`eval` 和 `parse` 在**调用方的命名空间**里编译，所以交给它们的文本看到的东西，
+和调用它的那个文件看到的完全一样——不多也不少：
+
+```sfl
+def helper() = 41
+println(eval("helper() + 1"))    // 42
+```
+
 
 #### 包与版本
 
@@ -1037,7 +1143,16 @@ println(map(points, geo.dist))
 import "mathx"            // 该包的 main 模块
 import "mathx/stats"      // 包内指定模块
 import "mathx/geo" as g   // 与 as 别名照常组合
+import "mathx" open       // 要扁平写法时显式打开
 ```
+
+**一个包就是一个命名空间**,名字取清单里的 `name`。包内所有模块共用它,所以
+`import "mathx/stats"` 之后 `mathx.mean(...)` 照样能拿到 `main.sfl` 里的东西;
+包内的模块彼此引用也不必先 `import`(`import` 只负责让那个文件执行一次)。
+
+包默认**只绑定命名空间、不打开**:两个包各有一个 `parse` 是常态,而它们该互不
+干扰。标准包套件的公开 API 因此都不再带手写前缀——`csv.parse`、`datetime.iso`、
+`jwt.sign`、`mysql.connect`——前缀的活儿交给命名空间了。
 
 查找根有两个,项目本地优先:`./sfl_packages/<名>/<版本>/`,然后
 `$SFL_HOME/packages/<名>/<版本>/`。选哪个版本由**需求方的清单**决定:包内模块
@@ -1060,8 +1175,9 @@ sfl pkg list
 sfl pkg remove mathx@1.2.0
 ```
 
-包对语言不引入任何新语义:解析结果就是一个文件,`_` 私有名、`as` 别名、编译器
-(import 在解析期内联)全部照常工作——编译产物与解释器逐字节一致由差分测试盯着。
+包对语言不引入任何新语义:解析结果就是一个文件,`_` 私有名、`as` 别名、命名空间、
+编译器(import 在解析期内联)全部照常工作——编译产物与解释器逐字节一致由差分测试
+盯着。
 
 #### 从 git 仓库或 registry 安装
 
@@ -1823,6 +1939,11 @@ println(twice(1.5))    // 一份 float -> float 的特化
 可以随时查阅同样的内容。
 
 参数名后带 `?` 表示可省略，`...` 表示可接受任意多个参数。
+
+下面的每个**分组名同时是一个命名空间**：`math.abs`、`string.toUpper`、
+`io.println` 与不带前缀的写法是同一个函数，而 `std` 一个命名空间装下全部
+（`std.abs`、`std.println`）。这两条通道在本文件用自己的定义遮住某个内置函数
+之后仍然有效，详见 [5.13](#513-模块导入与命名空间)。
 
 #### 输入输出 (io)
 

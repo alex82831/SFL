@@ -2,7 +2,7 @@
 //
 //   import "postgres"
 //
-//   val db = pgConnect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
+//   val db = postgres.connect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
 //   db.exec("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT)")
 //   db.query("INSERT INTO users (name) VALUES ($1) RETURNING id", ["ada"])  // [{id: 1}]
 //   db.query("SELECT * FROM users WHERE id > $1", [0])
@@ -29,7 +29,7 @@ import "sasl"
 // the options object itself. Recognised options (over the URL, the object
 // wins): host, port, user, password, db, timeoutMs, tls, appName,
 // allowCleartext, params (extra startup parameters, e.g. {search_path: ...}).
-def pgConnect(target = "127.0.0.1", options = {}) {
+def connect(target = "127.0.0.1", options = {}) {
   val opt = merge(_parseTarget(target), options)
   val host = get(opt, "host", "127.0.0.1")
   val port = get(opt, "port", 5432)
@@ -39,7 +39,7 @@ def pgConnect(target = "127.0.0.1", options = {}) {
   val timeoutMs = get(opt, "timeoutMs", 10000)
   val tls = get(opt, "tls", null)
 
-  val sock = connect(host, port, timeoutMs)
+  val sock = std.connect(host, port, timeoutMs)
   val state = {sock: sock, timeoutMs: timeoutMs, lock: mutex(), params: {},
     pid: 0, secret: 0, tx: "I", notifications: []}
 
@@ -247,17 +247,17 @@ def pgConnect(target = "127.0.0.1", options = {}) {
 def _ident(name) = "\"" + replace(name, "\"", "\"\"") + "\""
 
 // Wraps raw bytes so a parameter binds as bytea ("\x..." hex text form).
-def pgBinary(bytes) = {"$pgBinary": bytes}
+def binary(bytes) = {"$binary": bytes}
 
 // Renders values as a PostgreSQL array literal, for `= ANY($1)` and casts
-// like $1::int[]: pgArray([1, 2]) -> "{1,2}". Strings are quoted, null is
+// like $1::int[]: array([1, 2]) -> "{1,2}". Strings are quoted, null is
 // NULL, nested arrays nest.
-def pgArray(values) {
+def array(values) {
   val parts = map(values, (v) ->
     if (v == null) then "NULL"
     elsif (isBool(v)) then (if (v) then "t" else "f")
     elsif (isInt(v) || isFloat(v)) then toString(v)
-    elsif (isArray(v)) then pgArray(v)
+    elsif (isArray(v)) then array(v)
     elsif (isString(v)) then "\"" + replace(replace(v, "\\", "\\\\"), "\"", "\\\"") + "\""
     else error("postgres: a " + typeOf(v) + " cannot go into an array literal"))
   "{" + join(parts, ",") + "}"
@@ -274,9 +274,10 @@ def _paramText(v) {
     else toString(v)
   }
   elsif (isString(v)) then v
-  elsif (isObject(v) && contains(v, "$pgBinary")) then "\\x" + hexEncodeBytes(v["$pgBinary"])
+  elsif (isObject(v) && contains(v, "$binary")) then "\\x" + hexEncodeBytes(v["$binary"])
   elsif (isArray(v)) {
-    error("postgres: bind arrays with pgArray(values) and `= ANY($1)` (or pgBinary for bytea)")
+    error("postgres: bind arrays with postgres.array(values) and `= ANY($1)` " +
+      "(or postgres.binary for bytea)")
   }
   else error("postgres: cannot bind a " + typeOf(v) + " parameter")
 }

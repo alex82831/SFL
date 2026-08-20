@@ -325,4 +325,21 @@ check("eval string", eval("1 + 2"), 3)
 check("parse then eval", eval(parse("3 * 4")), 12)
 check("eval sees globals", eval("immutable + 1"), 2)
 
+// eval and parse compile into the namespace of whoever called them, so the text
+// reads exactly the names its own file reads — no more, and no less.
+def evalHelper() = 41
+check("eval reaches this file's own names", eval("evalHelper() + 1"), 42)
+check("eval reaches what this file opened", eval("isFunction(check)"), true)
+check("parse inherits the same namespace", eval(parse("evalHelper()")), 41)
+
+// A name of this file's own shadows a builtin for eval too, and `std` still
+// reaches past it.
+def toUpper(s) = "shadowed"
+check("eval sees this file's shadowing", eval("toUpper(\"x\")"), "shadowed")
+check("and can still reach past it", eval("std.toUpper(\"x\")"), "X")
+
+// A module's private name is not reachable through its namespace.
+checkFails("a private name stays inside its file",
+  () -> eval("geometryPrivateProbe()"), "undefined variable")
+
 report("language")

@@ -17,7 +17,7 @@ def checkHas(what, hay, needle) {
 check("the walk is deterministic", map(range(1, 4), tickerValue), [106, 101, 96])
 
 // A finite stream (3 ticks, no delay) ends, so the whole body reads at once.
-val srv = httpServer({quiet: true, handler: tickerApp(3, 0)})
+val srv = httpd.server({quiet: true, handler: tickerApp(3, 0)})
 srv.start()
 val base = "http://127.0.0.1:${srv.port()}"
 

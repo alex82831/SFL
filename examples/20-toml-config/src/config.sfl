@@ -8,8 +8,8 @@ import "dotenv"
 // Applies APP_* environment overrides onto a parsed config. Values keep the
 // type of what they replace: numbers parse, booleans read true/false.
 def configLoad(tomlPath, envPath = ".env") {
-  dotenvLoad(envPath)
-  val cfg = tomlParse(readFile(tomlPath))
+  dotenv.load(envPath)
+  val cfg = toml.parse(readFile(tomlPath))
   _override(cfg, [])
   cfg
 }

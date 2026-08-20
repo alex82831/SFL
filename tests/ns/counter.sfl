@@ -1,0 +1,4 @@
+// Its own state, reachable only through it.
+var _n = 0
+def bump() { _n += 1; _n }
+def value() = _n

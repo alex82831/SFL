@@ -2,7 +2,7 @@
 //
 //   import "dotenv"
 //
-//   dotenvLoad()                    // reads ./.env if present, fills the env
+//   dotenv.load()                    // reads ./.env if present, fills the env
 //   getEnv("DATABASE_URL")
 //
 // The format is the common ground of the dotenv family: one KEY=VALUE per
@@ -13,7 +13,7 @@
 // developer checked in.
 
 // Parses .env text into an object, without touching the environment.
-def dotenvParse(text) {
+def parse(text) {
   val out = {}
   for (rawLine in lines(text)) {
     val line = trim(rawLine)
@@ -35,9 +35,9 @@ def dotenvParse(text) {
 // setEnv. Returns what was parsed. A missing file is not an error — it
 // returns {} — so code can call this unconditionally. opts:
 //   override (false)  replace variables the environment already has
-def dotenvLoad(path = ".env", opts = {}) {
+def load(path = ".env", opts = {}) {
   if (!isFile(path)) then return {}
-  val vars = dotenvParse(readFile(path))
+  val vars = parse(readFile(path))
   val override = get(opts, "override", false)
   for (k in keys(vars)) {
     if (override || getEnv(k) == null) then setEnv(k, vars[k])

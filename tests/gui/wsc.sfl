@@ -1,7 +1,31 @@
 // A minimal WebSocket client for driving a gui app in tests: handshake,
 // masked text frames out, text frames in, JSON on both ends. Deliberately
 // independent of packages/httpd — the tests should not trust the code under
-// test to talk to itself.
+// test to talk to itself, so the two byte helpers it needs live here rather
+// than being borrowed from the server's namespace.
+
+// Appends every byte of `src` to `dst`, and returns `dst`.
+def _pushBytes(dst, src) {
+  var i = 0
+  while (i < length(src)) {
+    push(dst, src[i])
+    i += 1
+  }
+  dst
+}
+
+// Exactly `n` bytes, or null if the socket ends first.
+def _readExactBytes(c, n, timeoutMs) {
+  if (n == 0) { return [] }
+  var out = null
+  while (true) {
+    val need = n - (if (out == null) then 0 else length(out))
+    if (need == 0) { return out }
+    val got = socketReadBytes(c, need, timeoutMs)
+    if (got == null || length(got) == 0) { return null }
+    if (out == null) { out = got } else { _pushBytes(out, got) }
+  }
+}
 
 def wsConnect(port, path) {
   val c = connect("127.0.0.1", port, 5000)
@@ -30,7 +54,7 @@ def wsSendText(c, textv) {
     push(out, bitOr(128, 127))
     for (i in [56, 48, 40, 32, 24, 16, 8, 0]) { push(out, bitAnd(shiftRightU(n, i), 255)) }
   }
-  pushBytes(out, mask)
+  _pushBytes(out, mask)
   var i = 0
   while (i < n) { push(out, bitXor(payload[i], mask[i % 4])); i += 1 }
   socketWriteBytes(c, out)
@@ -38,19 +62,19 @@ def wsSendText(c, textv) {
 
 // One frame: {op, text}; null when the peer is quiet past the timeout.
 def wsRecv(c, timeoutMs = 5000) {
-  val h = readExactBytes(c, 2, timeoutMs)
+  val h = _readExactBytes(c, 2, timeoutMs)
   if (h == null) { return null }
   val op = bitAnd(h[0], 15)
   var len = bitAnd(h[1], 127)
   if (len == 126) {
-    val ext = readExactBytes(c, 2, timeoutMs)
+    val ext = _readExactBytes(c, 2, timeoutMs)
     len = ext[0] * 256 + ext[1]
   } elsif (len == 127) {
-    val ext = readExactBytes(c, 8, timeoutMs)
+    val ext = _readExactBytes(c, 8, timeoutMs)
     len = 0
     for (b in ext) { len = len * 256 + b }
   }
-  val payload = if (len > 0) then readExactBytes(c, len, timeoutMs) else []
+  val payload = if (len > 0) then _readExactBytes(c, len, timeoutMs) else []
   {op: op, text: if (op == 1) then utf8Decode(payload) else ""}
 }
 

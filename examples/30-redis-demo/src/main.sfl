@@ -7,7 +7,7 @@ import "redis"
 val host = getEnv("REDIS_HOST") ?? "127.0.0.1"
 val port = parseInt(getEnv("REDIS_PORT") ?? "6379")
 
-val attemptConn = attempt(() -> redisConnect(host, port, {timeoutMs: 3000}))
+val attemptConn = attempt(() -> redis.connect(host, port, {timeoutMs: 3000}))
 if (attemptConn?.error != null) {
   eprintln("cannot reach Redis at ${host}:${port}: " + attemptConn.error.message)
   eprintln("start one with:  docker run --rm -p 6379:6379 redis:7   (or redis-server)")
@@ -75,7 +75,7 @@ println("pipeline: " + jsonStringify(r.pipeline([
 // Pub/sub: a second connection subscribes on a thread; this one publishes.
 val heard = channel()
 val sub = spawn(() -> {
-  val r2 = redisConnect(host, port)
+  val r2 = redis.connect(host, port)
   r2.subscribe(["demo:news"], (chan, msg) -> {
     send(heard, msg)
     false                                 // one message is enough; unsubscribe

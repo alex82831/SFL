@@ -4,7 +4,7 @@ Layered configuration: `app.toml` carries the checked-in defaults (tables,
 inline tables, arrays of tables), `.env` and the real environment override
 individual keys through a naming convention (`APP_SERVER_PORT` →
 `server.port`), with values cast to the type they replace. The effective
-config prints back out through `tomlStringify`.
+config prints back out through `toml.stringify`.
 
 ## Run
 

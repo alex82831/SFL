@@ -111,7 +111,7 @@ object Repl:
 
   private def evalAndPrint(source: String): Unit =
     try
-      val v = Sfl.run(source, "<repl>")
+      val v = Sfl.run(source, "<repl>", Sfl.sessionTag)
       printResult(v)
     catch
       case e: ExitSignal  => throw e
@@ -195,7 +195,7 @@ object Repl:
         if rest.isEmpty then warn(":type needs an expression")
         else
           try
-            val v = Sfl.run(rest, "<repl>")
+            val v = Sfl.run(rest, "<repl>", Sfl.sessionTag)
             println(s"${Ansi.cyan}${v.typeName}${Ansi.reset}")
           catch case e: SflError => println(e.render(Ansi.enabled))
         0
@@ -204,7 +204,7 @@ object Repl:
         else
           try
             val start = System.nanoTime()
-            val v = Sfl.run(rest, "<repl>")
+            val v = Sfl.run(rest, "<repl>", Sfl.sessionTag)
             val ms = (System.nanoTime() - start) / 1e6
             printResult(v)
             println(f"${Ansi.dim}elapsed: $ms%.3f ms${Ansi.reset}")
@@ -213,7 +213,7 @@ object Repl:
       case ":ast" =>
         if rest.isEmpty then warn(":ast needs an expression")
         else
-          try println(Dump.render(Sfl.compile(rest, "<repl>")._1))
+          try println(Dump.render(Sfl.compile(rest, "<repl>", Sfl.sessionTag)._1))
           catch case e: SflError => println(e.render(Ansi.enabled))
         0
       case ":load" =>
@@ -273,14 +273,14 @@ object Repl:
           else s"${b.minArity} to ${b.maxArity} arguments"
         println(s"  ${Ansi.dim}takes $arity${Ansi.reset}")
       case None =>
-        Sfl.globals.valueOf(name) match
+        Sfl.sessionValueOf(name) match
           case Some(f: VFun) =>
             println(s"${Ansi.cyan}${f.proto.signature}${Ansi.reset}  ${Ansi.dim}[user-defined]${Ansi.reset}")
             println(s"  ${Ansi.dim}defined at ${f.proto.src.name}:${f.proto.line}${Ansi.reset}")
           case Some(v) =>
             println(s"${Ansi.dim}$name is a ${v.typeName}, not a function${Ansi.reset}")
           case None =>
-            val hint = Err.suggest(name, Builtins.publicNames ++ Sfl.globals.definedNames)
+            val hint = Err.suggest(name, Builtins.publicNames ++ Sfl.sessionNames)
             warn(s"no builtin named '$name'" + hint.fold("")(h => s"; did you mean '$h'?"))
 
   private def showThreads(): Unit =
@@ -310,7 +310,7 @@ object Repl:
       warn(":bench needs an expression after the repeat count")
       return
     try
-      val (block, ref) = Sfl.compile(source, "<bench>")
+      val (block, ref) = Sfl.compile(source, "<bench>", Sfl.sessionTag)
       // One untimed run first, so compilation and any lazy initialisation are excluded.
       Sfl.execute(block, ref)
       var best = Double.MaxValue
@@ -332,9 +332,10 @@ object Repl:
         println(e.render(Ansi.enabled))
 
   private def showVars(functions: Boolean): Unit =
-    val names = Sfl.globals.definedNames.filter(n => Builtins.lookup(n).isEmpty).sorted
+    val names = (Sfl.globals.definedNames.filter(n => Builtins.lookup(n).isEmpty) ++
+      Sfl.sessionNames).distinct.sorted
     val chosen = names.filter { n =>
-      val v = Sfl.globals.valueOf(n)
+      val v = Sfl.sessionValueOf(n)
       v.exists(x => Values.isCallable(x) == functions)
     }
     if chosen.isEmpty then
@@ -342,7 +343,7 @@ object Repl:
     else
       val width = chosen.map(_.length).max
       for n <- chosen do
-        val v = Sfl.globals.valueOf(n).get
+        val v = Sfl.sessionValueOf(n).get
         val shown =
           if functions then v match
             case f: VFun => f.proto.signature

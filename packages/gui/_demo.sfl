@@ -1,23 +1,23 @@
 // gui/demo — the kitchen sink: one app that exercises the whole widget
 // catalogue and every framework feature. Run it from anywhere:
 //
-//   sfl -e 'import "gui"; guiDemo()'
+//   sfl -e 'import "gui"; gui.demo()'
 
 import "_core"
 import "_widgets"
 import "_app"
 
 // The demo app, not yet running — tests drive it headlessly.
-def guiDemoApp(opts = {}) {
-  guiApp(merge({
+def demoApp(opts = {}) {
+  app(merge({
     title: "SFL GUI Demo",
     root: _demoRoot,
     pages: {"/about": _aboutPage}
   }, opts))
 }
 
-def guiDemo(opts = {}) {
-  val app = guiDemoApp(opts)
+def demo(opts = {}) {
+  val app = demoApp(opts)
   app.run()
   app
 }
@@ -71,7 +71,7 @@ def _basicsTab(ctx) {
       heading("Markdown"),
       markdownView("Widgets include **markdown**, `code`, [links](https://example.com):\n\n" +
         "- fine-grained updates over one socket\n- keyed list reconciliation\n" +
-        "- light and dark themes\n\n```\nsfl -e 'import \"gui\"; guiDemo()'\n```")
+        "- light and dark themes\n\n```\nsfl -e 'import \"gui\"; demo()'\n```")
     ], {gap: 8})
   ], {gap: 14})
 }

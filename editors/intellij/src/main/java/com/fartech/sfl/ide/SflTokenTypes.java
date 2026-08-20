@@ -6,6 +6,7 @@ import com.intellij.psi.tree.TokenSet;
 public final class SflTokenTypes {
     public static final IElementType KEYWORD = new IElementType("SFL_KEYWORD", SflLanguage.INSTANCE);
     public static final IElementType BUILTIN = new IElementType("SFL_BUILTIN", SflLanguage.INSTANCE);
+    public static final IElementType NAMESPACE = new IElementType("SFL_NAMESPACE", SflLanguage.INSTANCE);
     public static final IElementType IDENTIFIER = new IElementType("SFL_IDENTIFIER", SflLanguage.INSTANCE);
     public static final IElementType NUMBER = new IElementType("SFL_NUMBER", SflLanguage.INSTANCE);
     public static final IElementType STRING = new IElementType("SFL_STRING", SflLanguage.INSTANCE);

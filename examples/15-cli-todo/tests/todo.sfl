@@ -23,17 +23,17 @@ check("remove", storeRemove(f, 2), true)
 check("store is empty again", storeLoad(f), [])
 removeFile(f)
 
-// The argument grammar, through cliParseArgs — the pure, non-exiting parser.
+// The argument grammar, through cli.parseArgs — the pure, non-exiting parser.
 val spec = {
   name: "todo", doc: "d",
   flags: {all: {short: "a", doc: "x"}},
   options: {file: {short: "f", doc: "x", default: "todo.json"}},
   positionals: [{name: "command"}, {name: "rest", variadic: true}]
 }
-val p1 = cliParseArgs(spec, ["add", "buy", "milk"])
+val p1 = cli.parseArgs(spec, ["add", "buy", "milk"])
 check("positionals split", [p1.positionals.command, p1.positionals.rest], ["add", ["buy", "milk"]])
 check("defaults fill", p1.options.file, "todo.json")
-val p2 = cliParseArgs(spec, ["-a", "--file=other.json", "list"])
+val p2 = cli.parseArgs(spec, ["-a", "--file=other.json", "list"])
 check("flags and options parse", [p2.flags.all, p2.options.file], [true, "other.json"])
 
 println("todo: ok")

@@ -7,9 +7,9 @@
 // implementation under test.
 
 import "lib/assert"
-import "../packages/mysql/main"
-import "../packages/mysql/packets"
-import "../packages/mysql/auth"
+import "../packages/mysql/main" open
+import "../packages/mysql/packets" open
+import "../packages/mysql/auth" open
 
 // --------------------------------------------------------------- constants
 
@@ -162,20 +162,20 @@ def _serveQueries(state, onQuery) {
 // Independently computed with Python hashlib for password "sflpass" and the
 // 1..20 salt; a second pair covers UTF-8 passwords and another salt.
 check("native token vector",
-  hexEncodeBytes(mysqlNativeToken("sflpass", _SALT1)),
+  hexEncodeBytes(mysql.nativeToken("sflpass", _SALT1)),
   "050d831d8d9306b7f9f2e1d0464cfc8f6b96f730")
 check("sha2 token vector",
-  hexEncodeBytes(mysqlSha2Token("sflpass", _SALT1)),
+  hexEncodeBytes(mysql.sha2Token("sflpass", _SALT1)),
   "1a2f72cf180ceaa6de4d5f80f1aa4ff5b00a162bc57c7e7a74c55b43cfc917fa")
 val _SALT2 = concat(flatten(map(range(6), (i) -> [255, 0, 127])), [9, 9])
 check("native token vector, utf-8 password",
-  hexEncodeBytes(mysqlNativeToken("päss", _SALT2)),
+  hexEncodeBytes(mysql.nativeToken("päss", _SALT2)),
   "76836cd163ac3ea632f811c39ec1d01a527c0da8")
 check("sha2 token vector, utf-8 password",
-  hexEncodeBytes(mysqlSha2Token("päss", _SALT2)),
+  hexEncodeBytes(mysql.sha2Token("päss", _SALT2)),
   "257e783e043eacf318e132437f26cc6e33559f77f8b7a66ed0e6aa17a2e675ec")
-check("empty password token is empty", mysqlNativeToken("", _SALT1), [])
-check("empty password sha2 token is empty", mysqlSha2Token("", _SALT1), [])
+check("empty password token is empty", mysql.nativeToken("", _SALT1), [])
+check("empty password sha2 token is empty", mysql.sha2Token("", _SALT1), [])
 
 // --------------------------------------------------------- lenenc and ints
 
@@ -200,34 +200,34 @@ check("u32 high", mypU32(mypCur(_b32)), 0xfffffffe)
 
 // ---------------------------------------------------------------- escaping
 
-check("escape null", mysqlEscape(null), "NULL")
-check("escape true", mysqlEscape(true), "TRUE")
-check("escape false", mysqlEscape(false), "FALSE")
-check("escape int", mysqlEscape(-42), "-42")
-check("escape float", mysqlEscape(3.5), "3.5")
-check("escape string quotes", mysqlEscape("it's"), "'it''s'")
-check("escape backslash", mysqlEscape("a\\b"), "'a\\\\b'")
-check("escape newline", mysqlEscape("a\nb"), "'a\\nb'")
-check("escape no-backslash mode", mysqlEscape("a\\b'c", true), "'a\\b''c'")
-check("escape binary", mysqlEscape(mysqlBinary([222, 173, 190, 239])), "x'deadbeef'")
-check("escape empty binary", mysqlEscape(mysqlBinary([])), "''")
-check("escape array", mysqlEscape([1, "x", null]), "(1, 'x', NULL)")
-check("escape empty array", mysqlEscape([]), "(NULL)")
-checkFails("escape rejects NaN", () -> mysqlEscape(0.0 / 0.0), "no SQL literal")
-checkFails("escape rejects objects", () -> mysqlEscape({a: 1}), "cannot bind")
+check("escape null", mysql.escape(null), "NULL")
+check("escape true", mysql.escape(true), "TRUE")
+check("escape false", mysql.escape(false), "FALSE")
+check("escape int", mysql.escape(-42), "-42")
+check("escape float", mysql.escape(3.5), "3.5")
+check("escape string quotes", mysql.escape("it's"), "'it''s'")
+check("escape backslash", mysql.escape("a\\b"), "'a\\\\b'")
+check("escape newline", mysql.escape("a\nb"), "'a\\nb'")
+check("escape no-backslash mode", mysql.escape("a\\b'c", true), "'a\\b''c'")
+check("escape binary", mysql.escape(mysql.binary([222, 173, 190, 239])), "x'deadbeef'")
+check("escape empty binary", mysql.escape(mysql.binary([])), "''")
+check("escape array", mysql.escape([1, "x", null]), "(1, 'x', NULL)")
+check("escape empty array", mysql.escape([]), "(NULL)")
+checkFails("escape rejects NaN", () -> mysql.escape(0.0 / 0.0), "no SQL literal")
+checkFails("escape rejects objects", () -> mysql.escape({a: 1}), "cannot bind")
 
-check("bind basic", mysqlBind("SELECT ?, ?", [1, "a"]), "SELECT 1, 'a'")
-check("bind skips quoted ?", mysqlBind("SELECT '?' , ?", [7]), "SELECT '?' , 7")
-check("bind skips doubled-quote strings", mysqlBind("SELECT 'it''s ?', ?", [7]), "SELECT 'it''s ?', 7")
-check("bind skips escaped quote", mysqlBind("SELECT 'a\\'? ', ?", [7]), "SELECT 'a\\'? ', 7")
-check("bind skips backticks", mysqlBind("SELECT `a?b` FROM t WHERE x = ?", [5]),
+check("bind basic", mysql.bind("SELECT ?, ?", [1, "a"]), "SELECT 1, 'a'")
+check("bind skips quoted ?", mysql.bind("SELECT '?' , ?", [7]), "SELECT '?' , 7")
+check("bind skips doubled-quote strings", mysql.bind("SELECT 'it''s ?', ?", [7]), "SELECT 'it''s ?', 7")
+check("bind skips escaped quote", mysql.bind("SELECT 'a\\'? ', ?", [7]), "SELECT 'a\\'? ', 7")
+check("bind skips backticks", mysql.bind("SELECT `a?b` FROM t WHERE x = ?", [5]),
   "SELECT `a?b` FROM t WHERE x = 5")
-check("bind skips line comments", mysqlBind("SELECT ? -- and ?\n+ ?", [1, 2]),
+check("bind skips line comments", mysql.bind("SELECT ? -- and ?\n+ ?", [1, 2]),
   "SELECT 1 -- and ?\n+ 2")
-check("bind skips hash comments", mysqlBind("SELECT ? # w? \n+ ?", [1, 2]), "SELECT 1 # w? \n+ 2")
-check("bind skips block comments", mysqlBind("SELECT /* ? */ ?", [3]), "SELECT /* ? */ 3")
-checkFails("bind rejects too few params", () -> mysqlBind("? ?", [1]), "more ? placeholders")
-checkFails("bind rejects too many params", () -> mysqlBind("?", [1, 2]), "fewer ? placeholders")
+check("bind skips hash comments", mysql.bind("SELECT ? # w? \n+ ?", [1, 2]), "SELECT 1 # w? \n+ 2")
+check("bind skips block comments", mysql.bind("SELECT /* ? */ ?", [3]), "SELECT /* ? */ 3")
+checkFails("bind rejects too few params", () -> mysql.bind("? ?", [1]), "more ? placeholders")
+checkFails("bind rejects too many params", () -> mysql.bind("?", [1, 2]), "fewer ? placeholders")
 
 // ------------------------------------------- old-style framing plus native
 
@@ -263,7 +263,7 @@ val f1 = _fake((state) -> {
     _eof(state)
   })
 })
-val db1 = mysqlConnect({host: "127.0.0.1", port: f1.port, user: "u1", password: "sflpass",
+val db1 = mysql.connect({host: "127.0.0.1", port: f1.port, user: "u1", password: "sflpass",
   db: "testdb", timeoutMs: 5000})
 check("server version parsed", db1.serverVersion(), "8.0.0-fake")
 check("thread id parsed", db1.threadId(), 99)
@@ -322,7 +322,7 @@ val f2 = _fake((state) -> {
     }
   })
 })
-val db2 = mysqlConnect({host: "127.0.0.1", port: f2.port, user: "u2", password: "sflpass",
+val db2 = mysql.connect({host: "127.0.0.1", port: f2.port, user: "u2", password: "sflpass",
   timeoutMs: 5000})
 val multi = db2.queryMulti("CALL twice()")
 check("multi returns both sets", length(multi), 2)
@@ -358,7 +358,7 @@ val f3 = _fake((state) -> {
   _ok(state)
   _serveQueries(state, (sql) -> _ok(state))
 })
-val db3 = mysqlConnect({host: "127.0.0.1", port: f3.port, user: "u3", password: "päss",
+val db3 = mysql.connect({host: "127.0.0.1", port: f3.port, user: "u3", password: "päss",
   timeoutMs: 5000})
 db3.close()
 await(f3.thread)
@@ -372,7 +372,7 @@ val f4 = _fake((state) -> {
   null
 })
 checkFails("caching_sha2 full auth over plain tcp is refused",
-  () -> mysqlConnect({host: "127.0.0.1", port: f4.port, user: "u4", password: "x", timeoutMs: 5000}),
+  () -> mysql.connect({host: "127.0.0.1", port: f4.port, user: "u4", password: "x", timeoutMs: 5000}),
   "full authentication")
 await(f4.thread)
 
@@ -385,7 +385,7 @@ val f5 = _fake((state) -> {
   null
 })
 checkFails("access denied surfaces the server's message",
-  () -> mysqlConnect({host: "127.0.0.1", port: f5.port, user: "u5", password: "wrong", timeoutMs: 5000}),
+  () -> mysql.connect({host: "127.0.0.1", port: f5.port, user: "u5", password: "wrong", timeoutMs: 5000}),
   "Access denied")
 await(f5.thread)
 
@@ -396,12 +396,12 @@ val f6 = _fake((state) -> {
   val resp = _clientResponse(state)
   check("url credentials decode", resp.user, "u@6")
   check("url password decodes", hexEncodeBytes(resp.token),
-    hexEncodeBytes(mysqlNativeToken("p:ss", _SALT1)))
+    hexEncodeBytes(mysql.nativeToken("p:ss", _SALT1)))
   check("url db arrives", resp.db, "mydb")
   _ok(state)
   _serveQueries(state, (sql) -> _ok(state))
 })
-val db6 = mysqlConnect("mysql://u%406:p%3Ass@127.0.0.1:" + f6.port + "/mydb?timeoutMs=5000")
+val db6 = mysql.connect("mysql://u%406:p%3Ass@127.0.0.1:" + f6.port + "/mydb?timeoutMs=5000")
 db6.close()
 await(f6.thread)
 

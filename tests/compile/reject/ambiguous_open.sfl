@@ -1,0 +1,4 @@
+// EXPECT: 'label' is ambiguous
+import "ns/one"
+import "ns/two"
+println(label(1))

@@ -125,7 +125,7 @@ def wsServe(c, srv, req, route) {
     }
   }
 
-  def fire(hook, f) = try(f, (e) -> srv.logError(req, "ws ${hook}: ${e}"))
+  def fire(hook, f) = try(f, (e) -> srv.reportError(req, "ws ${hook}: ${e}"))
 
   if (contains(hooks, "open")) { fire("open", () -> hooks.open(sock)) }
 

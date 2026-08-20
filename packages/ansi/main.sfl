@@ -2,15 +2,15 @@
 //
 //   import "ansi"
 //
-//   println(ansiGreen("ok") + " " + ansiBold("42ms"))
-//   println(ansiStyle("warning", "yellow", "bold", "underline"))
-//   println(ansiRgb("#ff8800 vibes", 255, 136, 0))
+//   println(ansi.green("ok") + " " + ansi.bold("42ms"))
+//   println(ansi.style("warning", "yellow", "bold", "underline"))
+//   println(ansi.rgb("#ff8800 vibes", 255, 136, 0))
 //
 // Styling is a process-wide switch: it starts on unless the NO_COLOR
 // environment variable is set or TERM is "dumb" (the conventions terminals
-// agreed on), and ansiSetEnabled(false) turns every function here into the
+// agreed on), and setEnabled(false) turns every function here into the
 // identity — so library code can colour unconditionally and let the caller
-// decide once. ansiStrip removes any ANSI codes from a string, styled here
+// decide once. strip removes any ANSI codes from a string, styled here
 // or elsewhere.
 
 val _codes = {
@@ -27,19 +27,19 @@ val _ESC = chr(27)
 
 var _enabled = getEnv("NO_COLOR") == null && getEnv("TERM") != "dumb"
 
-def ansiEnabled() = _enabled
+def enabled() = _enabled
 
-def ansiSetEnabled(on) {
+def setEnabled(on) {
   _enabled = on
   null
 }
 
-// Applies any number of style names: ansiStyle("hi", "red", "bold").
-def ansiStyle(text, ...names) {
+// Applies any number of style names: style("hi", "red", "bold").
+def style(text, ...names) {
   if (!_enabled || isEmpty(names)) then return text
   val on = map(names, (n) -> {
     if (!contains(_codes, n)) {
-      error("ansi: unknown style '" + n + "' (see keys(ansiCodes()))")
+      error("ansi: unknown style '" + n + "' (see keys(ansi.codes()))")
     }
     toString(_codes[n])
   })
@@ -47,33 +47,33 @@ def ansiStyle(text, ...names) {
 }
 
 // The name -> SGR code table, for building custom sequences.
-def ansiCodes() = copy(_codes)
+def codes() = copy(_codes)
 
-def ansiBold(text) = ansiStyle(text, "bold")
-def ansiDim(text) = ansiStyle(text, "dim")
-def ansiUnderline(text) = ansiStyle(text, "underline")
-def ansiRed(text) = ansiStyle(text, "red")
-def ansiGreen(text) = ansiStyle(text, "green")
-def ansiYellow(text) = ansiStyle(text, "yellow")
-def ansiBlue(text) = ansiStyle(text, "blue")
-def ansiMagenta(text) = ansiStyle(text, "magenta")
-def ansiCyan(text) = ansiStyle(text, "cyan")
-def ansiGray(text) = ansiStyle(text, "gray")
+def bold(text) = style(text, "bold")
+def dim(text) = style(text, "dim")
+def underline(text) = style(text, "underline")
+def red(text) = style(text, "red")
+def green(text) = style(text, "green")
+def yellow(text) = style(text, "yellow")
+def blue(text) = style(text, "blue")
+def magenta(text) = style(text, "magenta")
+def cyan(text) = style(text, "cyan")
+def gray(text) = style(text, "gray")
 
 // 256-colour foreground (0..255).
-def ansi256(text, n) {
+def color256(text, n) {
   if (!_enabled) then return text
   "[38;5;" + n + "m" + text + "[0m"
 }
 
 // 24-bit foreground.
-def ansiRgb(text, r, g, b) {
+def rgb(text, r, g, b) {
   if (!_enabled) then return text
   "[38;2;" + r + ";" + g + ";" + b + "m" + text + "[0m"
 }
 
 // Removes ANSI escape sequences (CSI ... final-byte), whoever put them there.
-def ansiStrip(text) {
+def strip(text) {
   var out = ""
   var i = 0
   val n = length(text)

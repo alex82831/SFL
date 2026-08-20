@@ -21,11 +21,11 @@ def _broadcast(payload) {
 def chatMembers() = withLock(_lock, () -> length(keys(_members)))
 
 def chatApp(publicDir = "public") {
-  routes([
-    GET("/", (req) -> redirect("/assets/index.html")),
-    GET("/stats", (req) -> respondJson(200, {members: chatMembers()})),
-    STATIC("/assets", publicDir),
-    WS("/ws", {
+  httpd.routes([
+    httpd.GET("/", (req) -> httpd.redirect("/assets/index.html")),
+    httpd.GET("/stats", (req) -> httpd.respondJson(200, {members: chatMembers()})),
+    httpd.STATIC("/assets", publicDir),
+    httpd.WS("/ws", {
       open: (sock) -> {
         val id = "guest-" + atomicAdd(_seq, 1)
         sock.name = id

@@ -7,7 +7,7 @@
 import "mysql"
 import "settings"
 
-val attemptConn = attempt(() -> mysqlConnect(mysqlSettings()))
+val attemptConn = attempt(() -> mysql.connect(mysqlSettings()))
 if (attemptConn?.error != null) {
   eprintln("cannot reach MySQL: " + attemptConn.error.message)
   eprintln("")
@@ -34,9 +34,9 @@ db.exec(join([
 ], "\n"))
 
 // Parameters bind with ? — strings escape, numbers pass, arrays make IN
-// lists, mysqlBinary() marks blobs.
+// lists, mysql.binary() marks blobs.
 val first = db.exec("INSERT INTO books (title, author, price, pages, cover) VALUES (?, ?, ?, ?, ?)",
-  ["Structure and Interpretation", "Abelson & Sussman", "39.90", 657, mysqlBinary([137, 80, 78, 71])])
+  ["Structure and Interpretation", "Abelson & Sussman", "39.90", 657, mysql.binary([137, 80, 78, 71])])
 println("inserted id ${first.lastInsertId}")
 db.exec("INSERT INTO books (title, author, price, pages) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
   ["The Little Schemer", "Friedman & Felleisen", "24.50", 216,

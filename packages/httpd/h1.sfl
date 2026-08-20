@@ -286,7 +286,7 @@ def runHandler(srv, req) {
     }
     resp
   }, (e) -> {
-    srv.logError(req, e)
+    srv.reportError(req, e)
     try(() -> srv.errorHandler(req, e), (e2) -> respond(500, {}, "internal server error\n"))
   })
 }

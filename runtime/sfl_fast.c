@@ -146,7 +146,9 @@ static int edit_distance(const char *a, const char *b, int limit) {
 /*
  * "did you mean 'x'?", searched over the same candidates, in the same order and
  * with the same distance bound, as the interpreter's Err.suggest: the first
- * strictly-best match wins, so iteration order decides ties.
+ * strictly-best match wins, so iteration order decides ties. The name itself is
+ * never a candidate — another namespace may spell a name exactly as this one
+ * does, and proposing that spelling back would say nothing.
  */
 static const char *suggest(const char *name) {
   int n = (int)strlen(name);
@@ -157,6 +159,7 @@ static const char *suggest(const char *name) {
   for (int64_t i = 0; i < suggest_row_count; i++) {
     if (suggest_rows[i].slot != NULL && *suggest_rows[i].slot == NULL) continue;
     const char *c = suggest_rows[i].name;
+    if (strcmp(c, name) == 0) continue;
     int len = (int)strlen(c);
     if (len - n > limit || n - len > limit) continue;
     int d = edit_distance(name, c, limit);

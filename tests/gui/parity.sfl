@@ -5,13 +5,12 @@
 // is present.
 
 import "lib/wsc"
-import "gui"
-
+import "gui" open
 val n = signal(1)
 val label = computed(() -> "n=${n.get()}")
 val list = signal([{id: 1, name: "one"}])
 
-val app = guiApp({quiet: true, title: "parity", root: (ctx) ->
+val app = gui.app({quiet: true, title: "parity", root: (ctx) ->
   column([
     text(label, {id: "l"}),
     each(list, (it) -> text(it.name), {key: (it) -> it.id}),

@@ -25,5 +25,5 @@ check("float override", cfg.server.timeouts.read, 2.5)
 check("untouched keys stay", cfg.server.host, "127.0.0.1")
 
 // The effective config still round-trips as TOML.
-check("round trip", tomlParse(tomlStringify(cfg)).server.port, 6000)
+check("round trip", toml.parse(toml.stringify(cfg)).server.port, 6000)
 println("config: ok")

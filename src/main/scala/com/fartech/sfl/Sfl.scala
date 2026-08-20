@@ -8,7 +8,7 @@ import java.io.File
  * and the REPL, so definitions made in one place are visible in the others.
  */
 object Sfl:
-  val version: String = "0.7.0"
+  val version: String = "0.8.0"
 
   val globals: Globals = new Globals
 
@@ -18,11 +18,36 @@ object Sfl:
   var importer: Importer = new Importer(new File("."))
 
   /**
-   * Module aliases bound by `import "m" as x` at the top level. The REPL parses each
-   * entry on its own, so this is what makes an alias outlive the line that bound it.
+   * Namespace aliases bound by `import` at the top level. The REPL parses each entry
+   * on its own, so this is what makes an alias outlive the line that bound it.
    */
   private val sessionNamespaces: scala.collection.mutable.Map[String, String] =
     scala.collection.mutable.HashMap.empty
+
+  /**
+   * The namespace an interactive entry — a REPL line, `sfl -e`, a debugger watch —
+   * declares into. One tag for the whole session, so `def f` typed at one prompt is
+   * still there at the next, and none of it can reach the builtins.
+   */
+  val sessionTag: String = "<session>"
+
+  /** Names the interactive session has defined, for `:vars` and completion. */
+  def sessionNames: Seq[String] = globals.membersOf(sessionTag)
+
+  /** A name as the session sees it: its own definitions first, then the builtins. */
+  def sessionValueOf(name: String): Option[Value] =
+    globals.valueOf(s"$sessionTag#$name").orElse(globals.valueOf(name))
+
+  /**
+   * The members of a namespace the session can reach by that name — an alias bound
+   * by `import`, or one of the builtin namespaces — or None when it names none.
+   */
+  def namespaceMembers(alias: String): Option[Seq[String]] =
+    val tag =
+      if sessionNamespaces.contains(alias) then sessionNamespaces(alias)
+      else if Builtins.isNamespace(alias) then alias
+      else null
+    if tag == null then None else Some(globals.membersOf(tag))
 
   @volatile private var initialised = false
 
@@ -48,14 +73,32 @@ object Sfl:
       Builtins.interp = fresh
       fresh
 
-  /** Parses `source` without running it. Serialised: parsing mutates the global table. */
-  def compile(source: String, name: String): (Block, SourceRef) =
+  /**
+   * Parses `source` without running it. Serialised: parsing mutates the global table.
+   *
+   * `ns` names the namespace the text declares into: `null` lets the importer decide
+   * from where the file is, which is what a script wants. The REPL and `eval` pass
+   * one explicitly — see [[sessionTag]] and [[callerTag]].
+   */
+  def compile(source: String, name: String, ns: String = null): (Block, SourceRef) =
     init()
     synchronized {
       val ref = SourceRef(name, source)
-      val parser = new Parser(ref, globals, importer, false, sessionNamespaces)
+      val parser = new Parser(ref, globals, importer, ns, sessionNamespaces)
       (parser.parseProgram(), ref)
     }
+
+  /**
+   * The namespace of the code currently running, which is what `eval` and `parse`
+   * compile into: text handed to `eval` sees exactly what the file calling it sees,
+   * and nothing more.
+   */
+  def callerTag: String =
+    val rt = Builtins.interp
+    val src = if rt == null then null else rt.src
+    if src == null || src.name.isEmpty || src == SourceRef.unknown then sessionTag
+    else if src.hidden then "" // standard-library source: the root namespace
+    else importer.namespaceOf(src.name)._1
 
   /**
    * Parses only to find out whether the text is a complete program, which is what the
@@ -70,7 +113,7 @@ object Sfl:
     synchronized {
       val ref = SourceRef(name, source)
       // A copy of the aliases, so probing cannot bind one that the entry never ran.
-      new Parser(ref, globals, new Importer(importer.baseDir), false,
+      new Parser(ref, globals, new Importer(importer.baseDir), sessionTag,
         scala.collection.mutable.HashMap.from(sessionNamespaces)).parseProgram()
     }
 
@@ -78,11 +121,11 @@ object Sfl:
    * Wraps source text in a zero-argument function, which is what `parse()` hands back
    * and what `eval()` invokes.
    */
-  def compileThunk(source: String, name: String): VFun =
+  def compileThunk(source: String, name: String, ns: String = null): VFun =
     // Anything reached through eval()/parse() must fail with a locatable, catchable
     // error. Only the REPL wants the raw "input ran out" signal, to prompt for more.
     val (block, ref) =
-      try compile(source, name)
+      try compile(source, name, ns)
       catch case e: IncompleteInput => throw Err.fromIncomplete(e, SourceRef(name, source))
     val proto = new FnProto(name, Array.empty, Array.empty, block, 1, ref)
     proto.nSlots = 0
@@ -98,7 +141,7 @@ object Sfl:
     init()
     val (block, ref) = synchronized {
       val r = SourceRef(name, source, hidden = true)
-      val parser = new Parser(r, globals, importer, false, sessionNamespaces)
+      val parser = new Parser(r, globals, importer, "", sessionNamespaces)
       (parser.parseProgram(), r)
     }
     val proto = new FnProto(name, Array.empty, Array.empty, block, 1, ref)
@@ -106,8 +149,8 @@ object Sfl:
     new VFun(proto, Frame.root)
 
   /** Compiles and runs, returning the value of the last top-level statement. */
-  def run(source: String, name: String): Value =
-    val (block, ref) = compile(source, name)
+  def run(source: String, name: String, ns: String = null): Value =
+    val (block, ref) = compile(source, name, ns)
     execute(block, ref)
 
   def execute(block: Block, ref: SourceRef): Value =
@@ -134,6 +177,10 @@ object Sfl:
     init()
     for name <- globals.definedNames do
       if Builtins.lookup(name).isEmpty then globals.set(globals.id(name), null)
+    // Whatever the session itself declared, which is where `def f` at the prompt
+    // goes now that nothing a program writes lands among the builtins.
+    for name <- globals.membersOf(sessionTag) do
+      globals.set(globals.id(s"$sessionTag#$name"), null)
     importer = new Importer(new File("."))
     sessionNamespaces.clear()
     interp.resetStack()

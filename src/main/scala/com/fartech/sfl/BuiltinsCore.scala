@@ -136,13 +136,15 @@ object BuiltinsCore:
       "Compiles SFL source text and returns a zero-argument function that runs it.") { a =>
       val code = argStr(a, 0, "parse")
       VStr(code)
-      Sfl.compileThunk(code, "<parse>")
+      // Compiled into the namespace of whoever called: text handed to parse() reads
+      // the names its own file reads, and none that file cannot see.
+      Sfl.compileThunk(code, "<parse>", Sfl.callerTag)
     }
 
     define("eval", 1, 1, "meta", "eval(source)",
       "Evaluates SFL source text, or calls a thunk produced by parse().") { a =>
       a(0) match
-        case VStr(code)                => call(Sfl.compileThunk(code, "<eval>"))
+        case VStr(code)                => call(Sfl.compileThunk(code, "<eval>", Sfl.callerTag))
         case f if Values.isCallable(f) => call(f)
         case v                         => Err.eval(s"eval: expected source text or a function, got ${v.typeName}")
     }

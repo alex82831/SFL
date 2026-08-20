@@ -149,22 +149,25 @@ reads them. The full story — every field, custom tasks, incremental builds,
 deployment and distribution — is in
 [docs/SFL-项目与构建指南.md](docs/SFL-项目与构建指南.md).
 
-Packages install with `sfl pkg install`, and `import "name"` finds them. A
-package can also ship prebuilt: `sfl pkg build --bin` compiles it for the current
-platform into an archive that travels beside the source, so a program that links
-it with `sfl -c` skips recompiling the package — while the interpreter still runs
-the source, and a stale or absent archive falls back to it, byte-for-byte the
-same either way. The [standard package suite](docs/SFL-软件包参考.md) under
-`packages/` — a cross-platform GUI framework, the httpd server framework,
-database drivers for MySQL, PostgreSQL, MongoDB and Redis, datetime, csv, toml,
-markdown, template, jwt, smtp, uuid, cli, log, ansi and dotenv — installs the
-same way.
+Packages install with `sfl pkg install`, and `import "name"` finds them. Each is
+a namespace of its own — `csv.parse(text)`, `mysql.connect(opts)` — so two
+packages may export the same name without meeting, and a definition of yours can
+never replace one of theirs. A package can also ship prebuilt: `sfl pkg build
+--bin` compiles it for the current platform into an archive that travels beside
+the source, so a program that links it with `sfl -c` skips recompiling the
+package — while the interpreter still runs the source, and a stale or absent
+archive falls back to it, byte-for-byte the same either way. The [standard
+package suite](docs/SFL-软件包参考.md) under `packages/` — a cross-platform GUI
+framework, the httpd server framework, database drivers for MySQL, PostgreSQL,
+MongoDB and Redis, datetime, csv, toml, markdown, template, jwt, smtp, uuid,
+cli, log, ansi and dotenv — installs the same way.
 
 Editor support lives in `editors/`: a VSCode extension and an IntelliJ plugin
-(IDEA Community works — the LSP client is LSP4IJ). Both get their keyword and
-builtin tables generated from `sfl syntax` by `tools/gen-editor-syntax.sfl`,
-and both talk to the same `sfl lsp` for diagnostics, completion, hover and
-signature help.
+(IDEA Community works — the LSP client is LSP4IJ). Both get their keyword,
+builtin and namespace tables generated from `sfl syntax` by
+`tools/gen-editor-syntax.sfl`, and both talk to the same `sfl lsp` for
+diagnostics, completion, hover and signature help — including completion behind
+a namespace: `csv.` offers the package's surface, `math.` the builtin group's.
 
 ## Test
 
@@ -233,6 +236,24 @@ world by signal to reach the other stacks. The program's own source text is link
 a compiled binary quotes and underlines the failing line exactly as the interpreter does.
 
 ## Version history
+
+**0.8.0** — The namespace release: a top-level name belongs to the namespace of
+the file that declares it, so `def map` is *your* `map` and the builtin one keeps
+working everywhere else, including inside the library you just called. An
+unqualified name resolves nearest-first — this file, then its namespace's sibling
+files, then what an `import` opened, then the builtins — and two opened
+namespaces exporting the same name is an error at the reference instead of a
+silent winner. The unit a file belongs to is its namespace: a package's seven
+modules are one `httpd`, a project's `src/` files are one project, and two files
+of one namespace declaring the same public name is refused. Every builtin now
+also answers to `std.name` and to `group.name` (`math.abs`, `string.toUpper`),
+which is how code reaches a builtin it has shadowed — the database drivers open
+their sockets with `std.connect`. A package import binds its namespace rather
+than opening it (`import "csv"` → `csv.parse`), with `import "m" open` for the
+flat form where a DSL wants it; the standard suite dropped its hand-written
+prefixes accordingly (`csvParse` → `csv.parse`, `jwtSign` → `jwt.sign`). The
+language server, the TextMate grammar and the IntelliJ lexer all learned the
+`ns.member` shape.
 
 **0.7.0** — The network release: the HTTP builtins no longer need libcurl. `httpGet`
 and its siblings are now `stdlib/http.sfl` — one HTTP/1.1 client shared by both

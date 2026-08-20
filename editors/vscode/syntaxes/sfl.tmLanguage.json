@@ -19,6 +19,9 @@
       "include": "#keywords"
     },
     {
+      "include": "#namespace-member"
+    },
+    {
       "include": "#builtins"
     },
     {
@@ -183,6 +186,38 @@
     "builtins": {
       "name": "support.function.builtin.sfl",
       "match": "\\b(?:print|println|eprintln|printf|flush|readLine|readAll|typeOf|isNull|isNumber|isInt|isFloat|isString|isBool|isArray|isTuple|tupleOf|isObject|isFunction|toString|toInt|toFloat|toBool|parse|eval|error|assert|try|attempt|help|builtins|signature|describe|length|isEmpty|charAt|subString|substring|slice|trim|trimStart|trimEnd|utf8Length|toUpper|toLower|capitalize|repeat|padStart|padEnd|split|lines|join|replace|format|chr|ord|strFind|indexOf|lastIndexOf|contains|startsWith|endsWith|reverse|compare|matches|regexFind|regexFindAll|regexReplace|regexSplit|base64Encode|base64Decode|hexEncode|hexDecode|md5|sha1|sha256|urlEncode|urlDecode|utf8Encode|utf8Decode|base64EncodeBytes|base64DecodeBytes|hexEncodeBytes|hexDecodeBytes|digestBytes|hmacBytes|pbkdf2|randomBytes|parseInt|parseFloat|abs|max|min|floor|ceil|round|trunc|sign|clamp|gcd|lcm|isNaN|isInfinite|sqrt|cbrt|exp|log|log2|log10|sin|cos|tan|asin|acos|atan|sinh|cosh|tanh|pow|atan2|hypot|PI|E|INF|NAN|bitAnd|bitOr|bitXor|bitNot|shiftLeft|shiftRight|shiftRightU|doubleToBits|bitsToDouble|random|randomInt|randomSeed|array|newArray|range|push|pop|shift|unshift|insert|removeAt|clear|concat|flatten|unique|zip|first|last|take|drop|sum|sort|sortBy|map|filter|reduce|forEach|find|findIndex|any|every|count|object|keys|values|entries|fromEntries|has|get|set|remove|merge|size|copy|deepCopy|ndarray|shape|isRectangular|iter|hasNext|iterNext|jsonParse|jsonStringify|identity|constantly|compose|pipe|partial|partialRight|flip|curry|uncurry|apply|memoize|once|negate|tap|flatMap|groupBy|partition|zipWith|scan|foldRight|takeWhile|dropWhile|distinctBy|chunk|windows|maxBy|minBy|sumBy|frequencies|intersperse|enumerate|assoc|dissoc|conj|getIn|assocIn|updateIn|naturals|iterate|repeatedly|cycle|toArray|readFile|readLines|writeFile|appendFile|removeFile|listFiles|exists|isDir|isFile|fileSize|mkdirs|fileMtime|copyFile|moveFile|tempFile|absPath|baseName|dirName|joinPath|execute|exit|passthrough|getEnv|setEnv|cwd|args|scriptPath|exePath|sleep|osName|uuid|timeMillis|timeNanos|formatTime|timeParts|httpGet|httpPost|httpRequest|httpGetProxy|spawn|spawnDaemon|await|isAlive|threadName|threadFailed|awaitAll|awaitAny|currentThreadName|cpuCount|yieldThread|parallelMap|async|andThen|race|withTimeout|allSettled|channel|send|receive|tryReceive|closeChannel|channelClosed|channelSize|channelDrain|channelToArray|mutex|lock|unlock|tryLock|withLock|atomic|atomicGet|atomicSet|atomicAdd|atomicUpdate|atomicCompareSet|latch|countDown|awaitLatch|latchCount|semaphore|acquire|release|processStart|processWrite|processWriteLine|processCloseInput|processReadLine|processReadErrLine|processReadAll|processWait|processAlive|processKill|serverSocket|serverPort|accept|connect|socketWrite|socketWriteLine|socketReadLine|socketReadBytes|socketWriteBytes|closeSocket|closeServer|socketPeer|bufNew|bufSize|bufString|bufClear|socketReadToBuf|socketWriteBuf|tlsWrap|tlsAccept|tlsProto|socketNoDelay|socketSendFile|udpSocket|udpPort|udpSend|udpReceive|closeUdp|openFile|fileReadLine|fileWrite|fileWriteLine|fileFlush|fileClose|mkfifo|poll|pid|signalProcess|SIGINT|SIGKILL|SIGTERM|SIGHUP|SIGUSR1|SIGUSR2)\\b"
+    },
+    "namespace-member": {
+      "patterns": [
+        {
+          "match": "\\b(std|array|bits|channel|encoding|fs|function|io|ipc|iterator|json|math|meta|net|object|regex|string|sync|sys|thread|time|type)(\\.)([A-Za-z_$][A-Za-z0-9_$]*)",
+          "captures": {
+            "1": {
+              "name": "support.class.namespace.sfl"
+            },
+            "2": {
+              "name": "punctuation.accessor.sfl"
+            },
+            "3": {
+              "name": "support.function.builtin.sfl"
+            }
+          }
+        },
+        {
+          "match": "\\b([A-Za-z_$][A-Za-z0-9_$]*)(\\.)([A-Za-z_$][A-Za-z0-9_$]*)\\s*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "entity.name.namespace.sfl"
+            },
+            "2": {
+              "name": "punctuation.accessor.sfl"
+            },
+            "3": {
+              "name": "entity.name.function.call.sfl"
+            }
+          }
+        }
+      ]
     },
     "function-call": {
       "name": "entity.name.function.call.sfl",

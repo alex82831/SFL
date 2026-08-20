@@ -2,8 +2,8 @@
 //
 //   import "template"
 //
-//   tplRender("Hello, {{name}}!", {name: "ada"})          // "Hello, ada!"
-//   tplRender("{{#items}}{{n}} {{/items}}", {items: [{n: 1}, {n: 2}]})
+//   template.render("Hello, {{name}}!", {name: "ada"})          // "Hello, ada!"
+//   template.render("{{#items}}{{n}} {{/items}}", {items: [{n: 1}, {n: 2}]})
 //
 // What it speaks, of the mustache spec: {{name}} interpolation with HTML
 // escaping, {{{name}}} and {{& name}} raw, dotted paths {{a.b.c}} and {{.}}
@@ -19,11 +19,11 @@
 // that is what makes templates safe to hand to data that is still settling.
 
 // Renders a template in one go.
-def tplRender(template, data, opts = {}) = tplCompile(template)(data, opts)
+def render(template, data, opts = {}) = compile(template)(data, opts)
 
 // Compiles once, returning a function (data, opts?) -> string; worth it when
 // one template meets many data sets.
-def tplCompile(template) {
+def compile(template) {
   val tree = _tplParse(_tplTokens(template))
   (data, opts = {}) -> {
     val out = []
@@ -33,7 +33,7 @@ def tplCompile(template) {
 }
 
 // HTML-escapes the five characters with meaning in markup.
-def tplEscape(s) {
+def escape(s) {
   var out = ""
   for (ch in toString(s)) {
     out += select (ch) {
@@ -178,7 +178,7 @@ def _tplRenderNodes(out, nodes, stack, partials, depth) {
       push(out, node.text)
     } elsif (node.kind == "var") {
       val v = _tplLookup(stack, node.name)
-      if (v != null) then push(out, tplEscape(_tplShow(v)))
+      if (v != null) then push(out, escape(_tplShow(v)))
     } elsif (node.kind == "raw") {
       val v = _tplLookup(stack, node.name)
       if (v != null) then push(out, _tplShow(v))

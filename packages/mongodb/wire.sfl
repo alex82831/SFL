@@ -13,7 +13,7 @@ val _OP_MSG = 2013
 val _requestId = atomic(0)
 
 // Sends one command document and returns the reply document. `state` is the
-// connection state object mongoConnect builds: {sock, timeoutMs, lock}.
+// connection state object connect builds: {sock, timeoutMs, lock}.
 def wireCommand(state, doc) {
   withLock(state.lock, () -> {
     _send(state, doc)

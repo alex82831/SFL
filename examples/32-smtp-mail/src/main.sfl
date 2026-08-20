@@ -6,7 +6,7 @@ import "smtp"
 import "dotenv"
 import "mail"
 
-dotenvLoad()
+dotenv.load()
 
 val host = getEnv("SMTP_HOST")
 val from = getEnv("MAIL_FROM") ?? "SFL demo <demo@sfl.invalid>"
@@ -17,9 +17,9 @@ if (host == null) {
   println("SMTP_HOST is not set — previewing the message instead of sending it.")
   println("(copy .env.example to .env to make this actually send)")
   println("")
-  print(smtpBuildMime(mail))
+  print(smtp.buildMime(mail))
 } else {
-  val client = smtpConnect(host, parseInt(getEnv("SMTP_PORT") ?? "587"), {
+  val client = smtp.connect(host, parseInt(getEnv("SMTP_PORT") ?? "587"), {
     tls: getEnv("SMTP_TLS") ?? "starttls",
     user: getEnv("SMTP_USER"),
     password: getEnv("SMTP_PASSWORD") ?? ""

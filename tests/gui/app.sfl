@@ -1,11 +1,10 @@
-// The gui framework end to end, headless: a real guiApp on an ephemeral
+// The gui framework end to end, headless: a real gui.app on an ephemeral
 // port, driven through the served page and a WebSocket client, asserting on
 // the wire protocol — the init tree, then patch ops one change at a time.
 
 import "lib/assert"
 import "lib/wsc"
-import "gui"
-
+import "gui" open
 // Shared (module-level) state: visible to every session.
 val items = signal([{id: 1, name: "a"}, {id: 2, name: "b"}])
 val mode = signal(true)
@@ -13,7 +12,7 @@ val temp = signal(20)
 val hot = computed(() -> temp.get() > 25)
 val rows = signal([{pkg: "gui", n: 1}])
 
-val app = guiApp({
+val app = gui.app({
   quiet: true,
   title: "T",
   graceMs: 100,
@@ -223,7 +222,7 @@ checkTrue("the app stops", !app.running())
 
 // A fresh app for timer behaviour, to keep streams clean.
 val ticks = []
-val tapp = guiApp({
+val tapp = gui.app({
   quiet: true, title: "timers",
   root: (ctx) -> {
     val n = signal(0)

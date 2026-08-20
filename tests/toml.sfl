@@ -8,7 +8,7 @@ def _doc(lines1) = join(lines1, "\n")
 
 // ------------------------------------------------------------------ basics
 
-val basic = tomlParse(_doc([
+val basic = toml.parse(_doc([
   "# top comment",
   "title = \"TOML test\"   # inline comment",
   "count = 42",
@@ -40,19 +40,19 @@ check("booleans parse", [basic.yes, basic.no], [true, false])
 check("literal strings keep backslashes", basic.lit, "C:\\no \\escapes")
 check("basic strings unescape", basic.esc, "line\nnext\ttab \"q\" é")
 
-check("inf parses", tomlParse("x = inf").x > 1e308, true)
-check("nan parses", isNaN(tomlParse("x = nan").x), true)
+check("inf parses", toml.parse("x = inf").x > 1e308, true)
+check("nan parses", isNaN(toml.parse("x = nan").x), true)
 
 // ---------------------------------------------------------- dates as strings
 
 check("offset datetimes stay strings",
-  tomlParse("d = 1979-05-27T07:32:00Z").d, "1979-05-27T07:32:00Z")
-check("local dates stay strings", tomlParse("d = 1979-05-27").d, "1979-05-27")
-check("local times stay strings", tomlParse("t = 07:32:00.999").t, "07:32:00.999")
+  toml.parse("d = 1979-05-27T07:32:00Z").d, "1979-05-27T07:32:00Z")
+check("local dates stay strings", toml.parse("d = 1979-05-27").d, "1979-05-27")
+check("local times stay strings", toml.parse("t = 07:32:00.999").t, "07:32:00.999")
 
 // ------------------------------------------------------------------- arrays
 
-val arrs = tomlParse(_doc([
+val arrs = toml.parse(_doc([
   "nums = [1, 2, 3]",
   "mixed = [[1, 2], [\"a\"]]",
   "multi = [",
@@ -68,7 +68,7 @@ check("empty arrays parse", arrs.empty, [])
 
 // ------------------------------------------------------------------- tables
 
-val tables = tomlParse(_doc([
+val tables = toml.parse(_doc([
   "root = 1",
   "",
   "[server]",
@@ -90,10 +90,10 @@ check("subtables nest deeper", tables.server.tls.enabled, true)
 check("quoted keys carry spaces", tables.owner["first last"].ok, true)
 check("dotted keys build tables", tables.dotted.a.b.c, 3)
 
-val inline = tomlParse("point = {x = 1, y = -2, label = \"p\"}")
+val inline = toml.parse("point = {x = 1, y = -2, label = \"p\"}")
 check("inline tables parse", inline.point, {x: 1, y: -2, label: "p"})
 
-val aot = tomlParse(_doc([
+val aot = toml.parse(_doc([
   "[[fruit]]",
   "name = \"apple\"",
   "",
@@ -112,7 +112,7 @@ check("nested table arrays attach too", aot.fruit[1].variety[0].name, "plantain"
 
 // --------------------------------------------------------- multiline strings
 
-val ml = tomlParse(_doc([
+val ml = toml.parse(_doc([
   "a = \"\"\"",
   "first",
   "second\"\"\"",
@@ -127,27 +127,27 @@ check("a line-ending backslash joins lines", ml.c, "one two")
 
 // ------------------------------------------------------------------- errors
 
-checkFails("duplicate keys are refused", () -> tomlParse(_doc(["a = 1", "a = 2"])),
+checkFails("duplicate keys are refused", () -> toml.parse(_doc(["a = 1", "a = 2"])),
   "duplicate key")
 checkFails("redefined tables are refused",
-  () -> tomlParse(_doc(["[t]", "a = 1", "[t]", "b = 2"])), "defined twice")
+  () -> toml.parse(_doc(["[t]", "a = 1", "[t]", "b = 2"])), "defined twice")
 checkFails("values are not tables",
-  () -> tomlParse(_doc(["a = 1", "[a.b]"])), "already a value")
-checkFails("bare words are not values", () -> tomlParse("a = nope"), "not a TOML value")
-checkFails("unclosed strings are caught", () -> tomlParse("a = \"oops"), "never closes")
-checkFails("unclosed arrays are caught", () -> tomlParse("a = [1, 2"), "never closes")
-checkFails("junk after a value is caught", () -> tomlParse("a = 1 b = 2"), "end of the line")
-checkFails("misplaced underscores are caught", () -> tomlParse("a = 1__0"), "underscore")
+  () -> toml.parse(_doc(["a = 1", "[a.b]"])), "already a value")
+checkFails("bare words are not values", () -> toml.parse("a = nope"), "not a TOML value")
+checkFails("unclosed strings are caught", () -> toml.parse("a = \"oops"), "never closes")
+checkFails("unclosed arrays are caught", () -> toml.parse("a = [1, 2"), "never closes")
+checkFails("junk after a value is caught", () -> toml.parse("a = 1 b = 2"), "end of the line")
+checkFails("misplaced underscores are caught", () -> toml.parse("a = 1__0"), "underscore")
 
 // ---------------------------------------------------------------- stringify
 
-check("scalars stringify", tomlStringify({n: 1, s: "x", f: 1.5, b: true}),
+check("scalars stringify", toml.stringify({n: 1, s: "x", f: 1.5, b: true}),
   "n = 1\ns = \"x\"\nf = 1.5\nb = true\n")
-check("strings escape on the way out", tomlStringify({s: "a\"b\\c\nd"}),
+check("strings escape on the way out", toml.stringify({s: "a\"b\\c\nd"}),
   "s = \"a\\\"b\\\\c\\nd\"\n")
-check("keys quote when they must", tomlStringify({"two words": 1}),
+check("keys quote when they must", toml.stringify({"two words": 1}),
   "\"two words\" = 1\n")
-checkFails("null has no TOML form", () -> tomlStringify({x: null}), "no null")
+checkFails("null has no TOML form", () -> toml.stringify({x: null}), "no null")
 
 val round = {
   title: "app",
@@ -155,12 +155,12 @@ val round = {
   servers: [{host: "a", port: 1}, {host: "b", port: 2, tls: {on: true}}],
   point: {x: 1, y: 2}
 }
-check("stringify -> parse round trips", tomlParse(tomlStringify(round)), round)
+check("stringify -> parse round trips", toml.parse(toml.stringify(round)), round)
 
 val nested = {a: {b: {c: 1}}}
-check("deep tables round trip", tomlParse(tomlStringify(nested)), nested)
-check("empty tables round trip", tomlParse(tomlStringify({e: {}})), {e: {}})
+check("deep tables round trip", toml.parse(toml.stringify(nested)), nested)
+check("empty tables round trip", toml.parse(toml.stringify({e: {}})), {e: {}})
 check("inf and nan round trip",
-  tomlParse(tomlStringify({i: 1.0 / 0.0})).i > 1e308, true)
+  toml.parse(toml.stringify({i: 1.0 / 0.0})).i > 1e308, true)
 
 report("toml")

@@ -8,108 +8,108 @@ def _doc(lines1) = join(lines1, "\n")
 
 // ---------------------------------------------------------------- headings
 
-check("h1 renders with a slug id", mdToHtml("# Hello World"),
+check("h1 renders with a slug id", markdown.toHtml("# Hello World"),
   "<h1 id=\"hello-world\">Hello World</h1>")
-check("h3 renders", mdToHtml("### Deep"), "<h3 id=\"deep\">Deep</h3>")
-check("trailing hashes are cosmetic", mdToHtml("## Title ##"),
+check("h3 renders", markdown.toHtml("### Deep"), "<h3 id=\"deep\">Deep</h3>")
+check("trailing hashes are cosmetic", markdown.toHtml("## Title ##"),
   "<h2 id=\"title\">Title</h2>")
-check("cjk slugs survive", mdToHtml("# 你好 world"),
+check("cjk slugs survive", markdown.toHtml("# 你好 world"),
   "<h1 id=\"你好-world\">你好 world</h1>")
-check("seven hashes are a paragraph", startsWith(mdToHtml("####### x"), "<p>"), true)
+check("seven hashes are a paragraph", startsWith(markdown.toHtml("####### x"), "<p>"), true)
 
 // -------------------------------------------------------------- paragraphs
 
-check("paragraphs wrap", mdToHtml("just text"), "<p>just text</p>")
-check("blank lines split paragraphs", mdToHtml(_doc(["a", "", "b"])),
+check("paragraphs wrap", markdown.toHtml("just text"), "<p>just text</p>")
+check("blank lines split paragraphs", markdown.toHtml(_doc(["a", "", "b"])),
   "<p>a</p>\n<p>b</p>")
-check("adjacent lines join", mdToHtml(_doc(["line one", "line two"])),
+check("adjacent lines join", markdown.toHtml(_doc(["line one", "line two"])),
   "<p>line one\nline two</p>")
-check("two trailing spaces break hard", mdToHtml(_doc(["one  ", "two"])),
+check("two trailing spaces break hard", markdown.toHtml(_doc(["one  ", "two"])),
   "<p>one<br>\ntwo</p>")
 
 // ------------------------------------------------------------------ inline
 
-check("strong renders", mdToHtml("**bold** move"), "<p><strong>bold</strong> move</p>")
-check("em renders", mdToHtml("an *em* here"), "<p>an <em>em</em> here</p>")
-check("underscore em renders", mdToHtml("_solo_"), "<p><em>solo</em></p>")
-check("strong nests em", mdToHtml("**a *b* c**"),
+check("strong renders", markdown.toHtml("**bold** move"), "<p><strong>bold</strong> move</p>")
+check("em renders", markdown.toHtml("an *em* here"), "<p>an <em>em</em> here</p>")
+check("underscore em renders", markdown.toHtml("_solo_"), "<p><em>solo</em></p>")
+check("strong nests em", markdown.toHtml("**a *b* c**"),
   "<p><strong>a <em>b</em> c</strong></p>")
-check("strike renders", mdToHtml("~~gone~~"), "<p><del>gone</del></p>")
-check("code spans render raw", mdToHtml("run `f(x) < 2` now"),
+check("strike renders", markdown.toHtml("~~gone~~"), "<p><del>gone</del></p>")
+check("code spans render raw", markdown.toHtml("run `f(x) < 2` now"),
   "<p>run <code>f(x) &lt; 2</code> now</p>")
-check("code spans do not process markdown", mdToHtml("`**not bold**`"),
+check("code spans do not process markdown", markdown.toHtml("`**not bold**`"),
   "<p><code>**not bold**</code></p>")
-check("unclosed emphasis stays literal", mdToHtml("2 * 3 * 4 = 24"),
+check("unclosed emphasis stays literal", markdown.toHtml("2 * 3 * 4 = 24"),
   "<p>2 * 3 * 4 = 24</p>")
-check("backslash escapes silence markdown", mdToHtml("\\*literal\\*"),
+check("backslash escapes silence markdown", markdown.toHtml("\\*literal\\*"),
   "<p>*literal*</p>")
 
-check("links render", mdToHtml("see [the docs](https://x.dev)"),
+check("links render", markdown.toHtml("see [the docs](https://x.dev)"),
   "<p>see <a href=\"https://x.dev\">the docs</a></p>")
-check("link titles ride along", mdToHtml("[t](u \"tip\")"),
+check("link titles ride along", markdown.toHtml("[t](u \"tip\")"),
   "<p><a href=\"u\" title=\"tip\">t</a></p>")
-check("link text processes inline", mdToHtml("[**b**](u)"),
+check("link text processes inline", markdown.toHtml("[**b**](u)"),
   "<p><a href=\"u\"><strong>b</strong></a></p>")
-check("images render", mdToHtml("![alt text](pic.png)"),
+check("images render", markdown.toHtml("![alt text](pic.png)"),
   "<p><img src=\"pic.png\" alt=\"alt text\"></p>")
-check("autolinks render", mdToHtml("<https://sfl.dev>"),
+check("autolinks render", markdown.toHtml("<https://sfl.dev>"),
   "<p><a href=\"https://sfl.dev\">https://sfl.dev</a></p>")
-check("mailto autolinks hide the scheme", mdToHtml("<mailto:a@b.c>"),
+check("mailto autolinks hide the scheme", markdown.toHtml("<mailto:a@b.c>"),
   "<p><a href=\"mailto:a@b.c\">a@b.c</a></p>")
-check("a bare bracket is just text", mdToHtml("a [x] b"), "<p>a [x] b</p>")
+check("a bare bracket is just text", markdown.toHtml("a [x] b"), "<p>a [x] b</p>")
 
 // --------------------------------------------------------------- escaping
 
-check("raw html is escaped by default", mdToHtml("<script>alert(1)</script>"),
+check("raw html is escaped by default", markdown.toHtml("<script>alert(1)</script>"),
   "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>")
-check("ampersands are escaped", mdToHtml("a & b"), "<p>a &amp; b</p>")
-check("allowHtml passes tags through", mdToHtml("<b>hi</b>", {allowHtml: true}),
+check("ampersands are escaped", markdown.toHtml("a & b"), "<p>a &amp; b</p>")
+check("allowHtml passes tags through", markdown.toHtml("<b>hi</b>", {allowHtml: true}),
   "<p><b>hi</b></p>")
 check("attributes cannot escape their quotes",
-  mdToHtml("[x](u \"a\"onmouseover=\"y\")"),
+  markdown.toHtml("[x](u \"a\"onmouseover=\"y\")"),
   "<p><a href=\"u\" title=\"a&quot;onmouseover=&quot;y\">x</a></p>")
 
 // ------------------------------------------------------------- code blocks
 
-check("fenced code renders", mdToHtml(_doc(["```", "if (a < b) {}", "```"])),
+check("fenced code renders", markdown.toHtml(_doc(["```", "if (a < b) {}", "```"])),
   "<pre><code>if (a &lt; b) {}</code></pre>")
-check("the language becomes a class", mdToHtml(_doc(["```sfl", "val x = 1", "```"])),
+check("the language becomes a class", markdown.toHtml(_doc(["```sfl", "val x = 1", "```"])),
   "<pre><code class=\"language-sfl\">val x = 1</code></pre>")
-check("code keeps blank lines", mdToHtml(_doc(["```", "a", "", "b", "```"])),
+check("code keeps blank lines", markdown.toHtml(_doc(["```", "a", "", "b", "```"])),
   "<pre><code>a\n\nb</code></pre>")
-check("markdown inside code stays put", mdToHtml(_doc(["```", "# not a heading", "```"])),
+check("markdown inside code stays put", markdown.toHtml(_doc(["```", "# not a heading", "```"])),
   "<pre><code># not a heading</code></pre>")
 
 // ------------------------------------------------------------------- lists
 
-check("unordered lists render", mdToHtml(_doc(["- a", "- b"])),
+check("unordered lists render", markdown.toHtml(_doc(["- a", "- b"])),
   "<ul>\n<li>a</li>\n<li>b</li>\n</ul>")
-check("ordered lists render", mdToHtml(_doc(["1. one", "2. two"])),
+check("ordered lists render", markdown.toHtml(_doc(["1. one", "2. two"])),
   "<ol>\n<li>one</li>\n<li>two</li>\n</ol>")
-check("ordered lists keep their start", mdToHtml(_doc(["3. three", "4. four"])),
+check("ordered lists keep their start", markdown.toHtml(_doc(["3. three", "4. four"])),
   "<ol start=\"3\">\n<li>three</li>\n<li>four</li>\n</ol>")
-check("items process inline", mdToHtml("- **b** and `c`"),
+check("items process inline", markdown.toHtml("- **b** and `c`"),
   "<ul>\n<li><strong>b</strong> and <code>c</code></li>\n</ul>")
-check("lists nest by indentation", mdToHtml(_doc(["- a", "  - a1", "  - a2", "- b"])),
+check("lists nest by indentation", markdown.toHtml(_doc(["- a", "  - a1", "  - a2", "- b"])),
   "<ul>\n<li>a\n<ul>\n<li>a1</li>\n<li>a2</li>\n</ul></li>\n<li>b</li>\n</ul>")
-check("a list ends at a paragraph", mdToHtml(_doc(["- a", "", "after"])),
+check("a list ends at a paragraph", markdown.toHtml(_doc(["- a", "", "after"])),
   "<ul>\n<li>a</li>\n</ul>\n<p>after</p>")
 
 // ------------------------------------------------------------- blockquotes
 
-check("blockquotes render", mdToHtml("> quoted"),
+check("blockquotes render", markdown.toHtml("> quoted"),
   "<blockquote>\n<p>quoted</p>\n</blockquote>")
-check("blockquotes hold blocks", mdToHtml(_doc(["> # T", "> body"])),
+check("blockquotes hold blocks", markdown.toHtml(_doc(["> # T", "> body"])),
   "<blockquote>\n<h1 id=\"t\">T</h1>\n<p>body</p>\n</blockquote>")
-check("blockquotes nest", mdToHtml(_doc(["> a", "> > b"])),
+check("blockquotes nest", markdown.toHtml(_doc(["> a", "> > b"])),
   "<blockquote>\n<p>a</p>\n<blockquote>\n<p>b</p>\n</blockquote>\n</blockquote>")
 
 // -------------------------------------------------------------------- misc
 
-check("hr renders", mdToHtml("---"), "<hr>")
-check("longer rules too", mdToHtml("*****"), "<hr>")
+check("hr renders", markdown.toHtml("---"), "<hr>")
+check("longer rules too", markdown.toHtml("*****"), "<hr>")
 
-check("tables render with alignment", mdToHtml(_doc([
+check("tables render with alignment", markdown.toHtml(_doc([
   "| Name | N |",
   "| :--- | ---: |",
   "| ada | 1 |",
@@ -123,13 +123,13 @@ check("tables render with alignment", mdToHtml(_doc([
   "</tbody>",
   "</table>"
 ]))
-check("table cells process inline", contains(mdToHtml(_doc([
+check("table cells process inline", contains(markdown.toHtml(_doc([
   "| a |", "| --- |", "| **b** |"])), "<td><strong>b</strong></td>"), true)
 
-check("mdInline stands alone", mdInline("**b**"), "<strong>b</strong>")
+check("markdown.inline stands alone", markdown.inline("**b**"), "<strong>b</strong>")
 
 // A small document end to end.
-val doc = mdToHtml(_doc([
+val doc = markdown.toHtml(_doc([
   "# Title",
   "",
   "Intro with [a link](https://x.y) and *style*.",

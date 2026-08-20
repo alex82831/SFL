@@ -1,3 +1,3 @@
-// EXPECT: is private to module
+// EXPECT: is private to 'g'
 import "ns/geo" as g
 println(g._square(3))

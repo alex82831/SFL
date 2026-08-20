@@ -5,11 +5,11 @@
 // openssl command for its certificate; without it that block is skipped.
 
 import "lib/assert"
-import "../packages/smtp/main"
+import "../packages/smtp/main" open
 
 // ------------------------------------------------------------ mime building
 
-val mime = smtpBuildMime({
+val mime = smtp.buildMime({
   from: "App Sender <app@example.com>",
   to: ["Ada <ada@example.org>", "bo@example.org"],
   cc: "carol@example.org",
@@ -37,19 +37,19 @@ checkTrue("the attachment declares its type",
 checkTrue("the attachment is base64", contains(mime, base64EncodeBytes([0, 255, 10, 13, 128])))
 checkTrue("lines end with crlf", contains(mime, "\r\n"))
 
-val plainOnly = smtpBuildMime({from: "a@b.c", to: "d@e.f", subject: "S", text: "just text"})
+val plainOnly = smtp.buildMime({from: "a@b.c", to: "d@e.f", subject: "S", text: "just text"})
 checkTrue("text-only mail is text/plain", contains(plainOnly, "Content-Type: text/plain; charset=utf-8"))
 check("text-only mail has no boundary", contains(plainOnly, "boundary"), false)
 checkTrue("ascii bodies stay 7bit", contains(plainOnly, "Content-Transfer-Encoding: 7bit"))
-val utfBody = smtpBuildMime({from: "a@b.c", to: "d@e.f", text: "café"})
+val utfBody = smtp.buildMime({from: "a@b.c", to: "d@e.f", text: "café"})
 checkTrue("non-ascii bodies go base64", contains(utfBody, "Content-Transfer-Encoding: base64"))
 checkTrue("and carry the encoded text", contains(utfBody, base64Encode("café")))
 
-check("addresses strip display names", smtpAddress("Ada <ada@x.y>"), "ada@x.y")
-check("plain addresses pass", smtpAddress("  a@b.c "), "a@b.c")
-check("the domain extracts", smtpAddressDomain("Ada <ada@x.y>"), "x.y")
-checkFails("addresses need an @", () -> smtpAddress("nope"), "malformed")
-checkFails("crlf cannot ride in an address", () -> smtpAddress("a@b\nRCPT TO:<x@y>"), "malformed")
+check("addresses strip display names", smtp.address("Ada <ada@x.y>"), "ada@x.y")
+check("plain addresses pass", smtp.address("  a@b.c "), "a@b.c")
+check("the domain extracts", smtp.addressDomain("Ada <ada@x.y>"), "x.y")
+checkFails("addresses need an @", () -> smtp.address("nope"), "malformed")
+checkFails("crlf cannot ride in an address", () -> smtp.address("a@b\nRCPT TO:<x@y>"), "malformed")
 
 // --------------------------------------------------------- fake smtp server
 
@@ -149,7 +149,7 @@ val f1 = _fakeSmtp((c, record) -> {
   push(record, "BODY:" + join(body, "|"))
   _finish(c, record)
 })
-val m1 = smtpConnect("127.0.0.1", f1.port, {heloName: "tester.local", timeoutMs: 5000})
+val m1 = smtp.connect("127.0.0.1", f1.port, {heloName: "tester.local", timeoutMs: 5000})
 check("capabilities are captured", m1.capabilities(), ["SIZE 1000000", "8BITMIME"])
 val receipt = m1.send({
   from: "app@example.com",
@@ -182,7 +182,7 @@ checkFails("AUTH over plaintext is refused by default",
       attempt(() -> _line(c))                // hold the socket until the client leaves
       null
     })
-    smtpConnect("127.0.0.1", f.port, {user: "u", password: "p", timeoutMs: 5000})
+    smtp.connect("127.0.0.1", f.port, {user: "u", password: "p", timeoutMs: 5000})
   }, "refusing AUTH over plaintext")
 
 val f2 = _fakeSmtp((c, record) -> {
@@ -192,7 +192,7 @@ val f2 = _fakeSmtp((c, record) -> {
   _send(c, "235 accepted")
   _finish(c, record)
 })
-val m2 = smtpConnect("127.0.0.1", f2.port,
+val m2 = smtp.connect("127.0.0.1", f2.port,
   {user: "user@x", password: "pä55", allowInsecureAuth: true, timeoutMs: 5000})
 m2.quit()
 await(f2.thread)
@@ -210,7 +210,7 @@ val f3 = _fakeSmtp((c, record) -> {
   _send(c, "235 accepted")
   _finish(c, record)
 })
-val m3 = smtpConnect("127.0.0.1", f3.port,
+val m3 = smtp.connect("127.0.0.1", f3.port,
   {user: "u1", password: "p1", allowInsecureAuth: true, timeoutMs: 5000})
 m3.quit()
 await(f3.thread)
@@ -226,7 +226,7 @@ val f4 = _fakeSmtp((c, record) -> {
   null
 })
 checkFails("rejected credentials surface without leaking them",
-  () -> smtpConnect("127.0.0.1", f4.port,
+  () -> smtp.connect("127.0.0.1", f4.port,
     {user: "u", password: "secret", allowInsecureAuth: true, timeoutMs: 5000}),
   "'AUTH ...' got 535")
 
@@ -241,7 +241,7 @@ val f5 = _fakeSmtp((c, record) -> {
   attempt(() -> _line(c))
   null
 })
-val m5 = smtpConnect("127.0.0.1", f5.port, {timeoutMs: 5000})
+val m5 = smtp.connect("127.0.0.1", f5.port, {timeoutMs: 5000})
 checkFails("a refused recipient is named",
   () -> m5.send({from: "a@b.c", to: "ghost@e.f", text: "x"}),
   "<ghost@e.f> was refused: 550")
@@ -252,7 +252,7 @@ val f5b = _fakeSmtp((c, record) -> {
   _greet(c, record, [])
   _finish(c, record)
 })
-val m5b = smtpConnect("127.0.0.1", f5b.port, {timeoutMs: 5000})
+val m5b = smtp.connect("127.0.0.1", f5b.port, {timeoutMs: 5000})
 checkFails("mail needs recipients",
   () -> m5b.send({from: "a@b.c", text: "x"}), "no recipients")
 checkFails("mail needs a from",
@@ -286,7 +286,7 @@ if (!hasOpenssl) {
       push(record, "BODY:" + join(body, "|"))
       _finish(c, record)
     })
-    val m6 = smtpConnect("127.0.0.1", f6.port, {
+    val m6 = smtp.connect("127.0.0.1", f6.port, {
       tls: "starttls", caFile: cert, user: "u", password: "p",
       heloName: "tester.local", timeoutMs: 5000
     })

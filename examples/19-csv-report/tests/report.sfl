@@ -26,6 +26,6 @@ check("summary sums", [sum1[0].units, sum1[0].revenue], [3, "40.00"])
 check("best seller", bestSeller(sales).product, "widget")
 
 // Round trip through the csv package itself.
-val out = csvStringifyObjects(sum1, {columns: ["month", "region", "units", "revenue"]})
-check("report parses back", csvParseObjects(out)[0].month, "2026-07")
+val out = csv.stringifyObjects(sum1, {columns: ["month", "region", "units", "revenue"]})
+check("report parses back", csv.parseObjects(out)[0].month, "2026-07")
 println("report: ok")

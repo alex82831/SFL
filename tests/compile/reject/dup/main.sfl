@@ -1,0 +1,3 @@
+// Two files of one namespace declaring the same public name.
+import "other"
+def shared() = 1

@@ -1,6 +1,6 @@
 # SFL 项目与构建指南
 
-针对 SFL 0.7.0 · 涵盖：项目创建、`build.sfl` 编写参考、构建与测试、部署与分发、IDE 集成。
+针对 SFL 0.8.0 · 涵盖：项目创建、`build.sfl` 编写参考、构建与测试、部署与分发、IDE 集成。
 
 构建工具内置在 `sfl` 二进制里（`sfl build`），**本体用 SFL 编写**（[buildtool/main.sfl](../buildtool/main.sfl)），
 项目文件 `build.sfl` 也是普通 SFL——没有新语法、没有配置语言：构建工具先定义
@@ -117,6 +117,22 @@ task("greet", (args) -> {
 | `sfl.pkg` | JSON | 是什么包：名字、版本、依赖范围（`sfl pkg --help`） |
 
 只有要把项目作为**库**发布（`sfl build pkg`）或要 `import` 第三方包时才需要 `sfl.pkg`。
+
+### sfl.pkg 也是项目的命名空间
+
+清单里的 `name` 同时是这个项目的**命名空间名**：项目下的所有 `.sfl` 文件共用它，
+所以 `src/main.sfl` 与 `src/report.sfl` 之间互相调用不需要限定，`tests/` 下的
+测试也一样看得见 `src/` 的定义（`import` 仍然负责让那个文件**执行**一次）。
+
+反过来，同一个项目里的两个文件不能声明同一个公开名字——那种覆盖会直接报错：
+
+```
+Syntax error: 'summarise' is already defined in 'csv-report'
+  help: report.sfl declares it too, and both files share one namespace
+```
+
+装进来的包各有自己的命名空间，不会铺进你的文件：写 `csv.parse(...)`，不写
+`parse(...)`。完整规则见 [SFL-使用手册.md](SFL-使用手册.md) §5.13。
 
 ## 4. 内置任务
 
@@ -301,6 +317,8 @@ sfl pkg list / remove                # 管理
 ```sfl
 import "mathkit"          // 清单 main 指向的模块
 import "mathkit/matrix"   // 包内指定模块
+
+println(mathkit.mean(xs)) // 包名就是命名空间，包内所有模块共用
 ```
 
 版本范围支持 `1.2.3`、`^1.2.3`、`~1.2.3`、`>=1.2.3 <2.0.0`、`*`；一次程序运行
@@ -354,6 +372,7 @@ sfl build pkg                                                   # 库项目：�
 | 断点/单步/变量/求值 | `sfl dap`（stdio） | `sfl dap --socket`（经 LSP4IJ） |
 | 诊断/补全/悬停/签名 | `sfl lsp` | `sfl lsp`（经 LSP4IJ） |
 | `.` 成员补全 / `import` 路径补全 | 同上（服务器触发字符 `.` `"` `/`） | 同上 |
+| 命名空间补全（`csv.` / `math.` / `std.`） | 同上（含悬停与签名） | 同上 |
 | 跳转定义 / 大纲 | 同上 | 同上（Structure 视图） |
 
 二进制查找顺序：插件设置（VSCode `sfl.path` / IDEA Settings→Tools→SFL）→

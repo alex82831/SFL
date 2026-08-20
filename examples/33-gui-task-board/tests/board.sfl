@@ -10,7 +10,7 @@
 //   * the driving runs inside attempt() so the app is always stopped before
 //     the process ends — exit() blocks while a gui app is still serving.
 
-import "gui"
+import "gui" open
 import "../src/board"
 
 val failures = []
@@ -144,7 +144,7 @@ removeFile(store)
 boardLoad(store)
 check("a fresh board seeds two tasks", length(tasks.get()), 2)
 
-val app = guiApp({quiet: true, title: "Board test", graceMs: 100, root: boardUi})
+val app = gui.app({quiet: true, title: "Board test", graceMs: 100, root: boardUi})
 app.start()
 val port = app.port()
 

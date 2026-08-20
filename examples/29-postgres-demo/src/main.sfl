@@ -8,7 +8,7 @@
 import "postgres"
 import "settings"
 
-val attemptConn = attempt(() -> pgConnect(pgSettings()))
+val attemptConn = attempt(() -> postgres.connect(pgSettings()))
 if (attemptConn?.error != null) {
   eprintln("cannot reach PostgreSQL: " + attemptConn.error.message)
   eprintln("")
@@ -38,7 +38,7 @@ db.exec(join([
 // hands the generated id straight back.
 val made = db.query(
   "INSERT INTO albums (title, artist, year, price, artwork) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-  ["Kind of Blue", "Miles Davis", 1959, "9.99", pgBinary([255, 216, 255])])
+  ["Kind of Blue", "Miles Davis", 1959, "9.99", postgres.binary([255, 216, 255])])
 println("inserted id ${made[0].id}")
 db.query("INSERT INTO albums (title, artist, year, price) VALUES ($1, $2, $3, $4)",
   ["Giant Steps", "John Coltrane", 1960, "12.50"])
@@ -53,9 +53,9 @@ for (row in db.query("SELECT * FROM albums ORDER BY id")) {
     (if (row.artwork != null) then " [artwork ${length(row.artwork)} bytes]" else ""))
 }
 
-// Arrays bind through pgArray + ANY — the parameterised IN list.
+// Arrays bind through postgres.array + ANY — the parameterised IN list.
 val fifties = db.query("SELECT title FROM albums WHERE year = ANY($1::int[]) ORDER BY id",
-  [pgArray([1959, 1960])])
+  [postgres.array([1959, 1960])])
 println("50s/60s: " + join(map(fifties, (r) -> r.title), "; "))
 
 // queryOne, and exec's affected-rows tag.
@@ -77,7 +77,7 @@ val oops = attempt(() -> db.query("SELECT nope FROM albums"))
 println("a server error reads: " + oops.error.message)
 
 // LISTEN/NOTIFY: a second connection notifies the first.
-val other = pgConnect(pgSettings())
+val other = postgres.connect(pgSettings())
 db.listen("demo_events")
 other.exec("NOTIFY demo_events, 'fresh data'")
 val note = db.waitNotification(3000)

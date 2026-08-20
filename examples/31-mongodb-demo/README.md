@@ -3,7 +3,7 @@
 The **mongodb** package (pure-SFL OP_MSG driver, SCRAM auth): insertMany
 with automatic ObjectIds, `find` with operators/sort/projection, the
 streaming cursor (`findIter`), `aggregate` pipelines, `createIndex`, and
-the BSON wrapper types (`{"$oid"}`, `mongoDate()`, `mongoBinary()`) for
+the BSON wrapper types (`{"$oid"}`, `mongodb.date()`, `mongodb.binary()`) for
 shapes SFL doesn't have natively. The test exercises the pure BSON
 encode/decode layer with no server anywhere near, and adds a live round
 trip when one answers.

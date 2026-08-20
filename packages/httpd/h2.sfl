@@ -207,7 +207,7 @@ def _respondOn(conn, sid, req, resp0) {
         if (text != "") { _writeData(conn, sid, utf8Encode(text), false) }
         null
       }
-    }), (e) -> conn.srv.logError(req, e))
+    }), (e) -> conn.srv.reportError(req, e))
     _writeFrame(conn, _H2_DATA, 1, sid, [])
     return null
   }
@@ -241,7 +241,7 @@ def _dispatch(conn, sid, req) {
   }
   spawnDaemon(() -> {
     val resp = runHandler(conn.srv, req)
-    try(() -> _respondOn(conn, sid, req, resp), (e) -> conn.srv.logError(req, e))
+    try(() -> _respondOn(conn, sid, req, resp), (e) -> conn.srv.reportError(req, e))
     conn.srv.logAccess(req, resp)
     withLock(conn.flowLock, () -> {
       conn.active -= 1

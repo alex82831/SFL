@@ -4,37 +4,37 @@
 import "datetime"
 
 // Parse accepts dates, date-times, fractions, Z or ±hh:mm offsets.
-val t = dtParse("2026-08-19T15:30:00+08:00")
+val t = datetime.parse("2026-08-19T15:30:00+08:00")
 println("parsed:   ${t} ms since the epoch")
-println("as UTC:   " + dtIso(t))
-println("as UTC+8: " + dtIso(t, 480))
-println("date only: " + dtIsoDate(t, 480))
+println("as UTC:   " + datetime.iso(t))
+println("as UTC+8: " + datetime.iso(t, 480))
+println("date only: " + datetime.isoDate(t, 480))
 
 // Parts, in whatever offset you ask for.
-val p = dtParts(t, 480)
+val p = datetime.parts(t, 480)
 println("parts: ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}, " +
   "weekday ${p.weekday} (1=Monday), day ${p.yearday} of the year")
 
 // Arithmetic clamps month ends instead of overflowing them.
-val jan31 = dtMake(2026, 1, 31)
-println("Jan 31 + 1 month:  " + dtIsoDate(dtAddMonths(jan31, 1)))
-println("Jan 31 + 2 months: " + dtIsoDate(dtAddMonths(jan31, 2)))
-println("+90 minutes: " + dtIso(dtAddMinutes(t, 90)))
+val jan31 = datetime.make(2026, 1, 31)
+println("Jan 31 + 1 month:  " + datetime.isoDate(datetime.addMonths(jan31, 1)))
+println("Jan 31 + 2 months: " + datetime.isoDate(datetime.addMonths(jan31, 2)))
+println("+90 minutes: " + datetime.iso(datetime.addMinutes(t, 90)))
 
 // Differences and boundaries.
-val newYear = dtMake(2027, 1, 1)
-println("days to 2027: " + dtDiffDays(newYear, t))
-println("start of that month: " + dtIso(dtStartOfMonth(t)))
+val newYear = datetime.make(2027, 1, 1)
+println("days to 2027: " + datetime.diffDays(newYear, t))
+println("start of that month: " + datetime.iso(datetime.startOfMonth(t)))
 
 // The proleptic calendar helpers stand alone.
-println("2028 is leap: " + dtIsLeapYear(2028) + ", Feb 2028 has " + dtDaysInMonth(2028, 2) + " days")
+println("2028 is leap: " + datetime.isLeapYear(2028) + ", Feb 2028 has " + datetime.daysInMonth(2028, 2) + " days")
 
 // A little report: the Fridays of a month.
 def fridays(year, month) {
   val out = []
-  for (day in range(1, dtDaysInMonth(year, month) + 1)) {
-    val d = dtMake(year, month, day)
-    if (dtParts(d).weekday == 5) then push(out, day)
+  for (day in range(1, datetime.daysInMonth(year, month) + 1)) {
+    val d = datetime.make(year, month, day)
+    if (datetime.parts(d).weekday == 5) then push(out, day)
   }
   out
 }

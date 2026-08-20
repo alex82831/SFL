@@ -19,6 +19,14 @@ Examples that import packages carry an `sfl.pkg` and a `setup` task:
 this repository's `packages/` when run inside a checkout, from the registry
 (`sfl install <name>`) anywhere else.
 
+A package is a namespace, so those examples call it by name — `csv.parse(text)`,
+`jwt.sign(claims, secret)`, `httpd.routes([...])` — while an example's own
+`src/` and `tests/` files share the project's namespace and see each other
+without qualifying. The one exception is `gui`, whose widget catalogue reads
+better flat: `33-gui-task-board` writes `import "gui" open` and then plain
+`column([...])`. The rules are in
+[the manual §5.13](../docs/SFL-使用手册.md#513-模块导入与命名空间).
+
 ## The language
 
 | example | shows |

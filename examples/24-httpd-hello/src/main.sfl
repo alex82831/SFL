@@ -4,7 +4,7 @@
 import "httpd"
 import "app"
 
-val srv = httpServer({port: 8080, handler: app()})
+val srv = httpd.server({port: 8080, handler: app()})
 println("listening on http://127.0.0.1:8080 — Ctrl-C stops it")
 println("  GET  /hello/ada?times=3")
 println("  GET  /api/time")

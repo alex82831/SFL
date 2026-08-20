@@ -2,7 +2,7 @@
 
 The **mysql** package (pure-SFL driver, MySQL 5.7+/8 and MariaDB) doing real
 work: DDL, `?` parameter binding (strings escape, arrays become `IN` lists,
-`mysqlBinary` marks blobs), the faithful type mapping (INT → int, DECIMAL →
+`mysql.binary` marks blobs), the faithful type mapping (INT → int, DECIMAL →
 string, BLOB → bytes, NULL → null), `transaction()` with automatic
 rollback, `queryFull` column metadata, and server errors with errno and
 sqlstate.

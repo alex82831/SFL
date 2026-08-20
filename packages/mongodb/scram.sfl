@@ -20,7 +20,7 @@ def scramAuth(state, user, password, authDb, mechanism) {
   val first = wireRun(state, authDb, {
     saslStart: 1,
     mechanism: mechanism,
-    payload: mongoBinary(utf8Encode("n,," + bare)),
+    payload: binary(utf8Encode("n,," + bare)),
     options: {skipEmptyExchange: true}
   })
   val serverFirst = utf8Decode(first.payload["$binary"])
@@ -48,7 +48,7 @@ def scramAuth(state, user, password, authDb, mechanism) {
   var reply = wireRun(state, authDb, {
     saslContinue: 1,
     conversationId: first.conversationId,
-    payload: mongoBinary(utf8Encode(clientFinal))
+    payload: binary(utf8Encode(clientFinal))
   })
 
   val serverKey = hmacBytes(alg, saltedPassword, utf8Encode("Server Key"))
@@ -63,7 +63,7 @@ def scramAuth(state, user, password, authDb, mechanism) {
     reply = wireRun(state, authDb, {
       saslContinue: 1,
       conversationId: first.conversationId,
-      payload: mongoBinary([])
+      payload: binary([])
     })
   }
   null

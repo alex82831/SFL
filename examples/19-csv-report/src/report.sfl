@@ -1,12 +1,12 @@
-// Reading, shaping and writing back: csvParseObjects gives one object per
+// Reading, shaping and writing back: csv.parseObjects gives one object per
 // row (cells are strings — deciding what is a number is the caller's job),
-// and the report goes out through csvStringifyObjects.
+// and the report goes out through csv.stringifyObjects.
 
 import "csv"
 import "datetime"
 
 def loadSales(text) {
-  map(csvParseObjects(text), (row) -> {
+  map(csv.parseObjects(text), (row) -> {
     date: row.date,
     month: substring(row.date, 0, 7),
     region: row.region,
@@ -16,7 +16,7 @@ def loadSales(text) {
   })
 }
 
-// Revenue by month and region, as rows ready for csvStringifyObjects.
+// Revenue by month and region, as rows ready for csv.stringifyObjects.
 def summarise(sales) {
   val byKey = groupBy(sales, (s) -> s.month + "|" + s.region)
   val rows = map(keys(byKey), (k) -> {

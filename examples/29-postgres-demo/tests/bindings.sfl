@@ -11,14 +11,14 @@ def check(what, got, want) {
   }
 }
 
-check("pgArray plain", pgArray([1, 2, 3]), "{1,2,3}")
-check("pgArray quotes strings", pgArray(["a b", "c\"d", null]), "{\"a b\",\"c\\\"d\",NULL}")
-check("pgArray nests", pgArray([[true], [false]]), "{{t},{f}}")
+check("postgres.array plain", postgres.array([1, 2, 3]), "{1,2,3}")
+check("postgres.array quotes strings", postgres.array(["a b", "c\"d", null]), "{\"a b\",\"c\\\"d\",NULL}")
+check("postgres.array nests", postgres.array([[true], [false]]), "{{t},{f}}")
 
-val probe = attempt(() -> pgConnect(pgSettings(), {timeoutMs: 1500}))
+val probe = attempt(() -> postgres.connect(pgSettings(), {timeoutMs: 1500}))
 if (probe?.error != null) {
   println("bindings: ok (live checks skipped — no PostgreSQL server: " +
-    substring(probe.error.message, 0, 60) + "…)")
+    substring(probe.error.message, 0, min(60, length(probe.error.message))) + "…)")
 } else {
   val db = probe.value
   check("live parameters", db.queryOne("SELECT $1::int * 2 AS n", [21]).n, 42)

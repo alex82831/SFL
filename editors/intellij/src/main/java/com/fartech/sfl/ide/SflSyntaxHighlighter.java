@@ -24,6 +24,7 @@ public final class SflSyntaxHighlighter extends SyntaxHighlighterBase {
     static {
         map(SflTokenTypes.KEYWORD, "SFL_KEYWORD", DefaultLanguageHighlighterColors.KEYWORD);
         map(SflTokenTypes.BUILTIN, "SFL_BUILTIN", DefaultLanguageHighlighterColors.PREDEFINED_SYMBOL);
+        map(SflTokenTypes.NAMESPACE, "SFL_NAMESPACE", DefaultLanguageHighlighterColors.CLASS_REFERENCE);
         map(SflTokenTypes.IDENTIFIER, "SFL_IDENTIFIER", DefaultLanguageHighlighterColors.IDENTIFIER);
         map(SflTokenTypes.NUMBER, "SFL_NUMBER", DefaultLanguageHighlighterColors.NUMBER);
         map(SflTokenTypes.STRING, "SFL_STRING", DefaultLanguageHighlighterColors.STRING);

@@ -90,15 +90,20 @@ final class Compiler(val globals: Globals, val src: SourceRef):
   // their own `max` gets their own function rather than the primitive. A shared-source
   // stdlib function's slot holds the lazy sentinel rather than a VNative (see
   // StdlibModules), and is a builtin all the same.
+  //
+  // Every slot is scanned rather than every name, because one builtin occupies
+  // three: the bare name and the two namespaces it is also reachable through, and
+  // `std.map` has to compile to the same primitive call `map` does.
   private val builtinIds: Map[Int, String] =
     val out = mutable.HashMap.empty[Int, String]
-    for name <- Builtins.names do
-      val id = globals.find(name)
-      if id >= 0 then
-        globals.rawGet(id) match
-          case n: VNative if n.name == name     => out(id) = name
-          case s: VLazyStdlib if s.name == name => out(id) = name
-          case _                                => ()
+    var id = 0
+    val n = globals.size
+    while id < n do
+      globals.rawGet(id) match
+        case b: VNative if Builtins.lookup(b.name).exists(_ eq b) => out(id) = b.name
+        case s: VLazyStdlib                                       => out(id) = s.name
+        case _                                                    => ()
+      id += 1
     out.toMap
 
   private def fail(msg: String, n: Node, hint: String = ""): Nothing =
@@ -2038,9 +2043,10 @@ final class Compiler(val globals: Globals, val src: SourceRef):
   private def moduleRelOf(canonicalPath: String, versionDir: String): String =
     canonicalPath.stripPrefix(versionDir).stripSuffix(".sfl").replace(File.separatorChar, '/')
 
+  /** Whether a global is part of a module's surface: not one of its private names. */
   private def isPublicGlobalName(id: Int): Boolean =
     val nm = globals.nameOf(id)
-    nm != null && !nm.contains("#") && !nm.startsWith("_")
+    nm != null && !nm.substring(nm.lastIndexOf('#') + 1).startsWith("_")
 
   private def exportedSymbol(f: Fn): Option[String] =
     if !f.generic || f.proto == null then None
@@ -2130,23 +2136,27 @@ final class Compiler(val globals: Globals, val src: SourceRef):
 
   /**
    * The "did you mean" candidates, enumerated exactly as the interpreter's
-   * `definedNames` would at the moment of an error: every global id in order —
-   * builtins first, since they are installed before anything is parsed — with
-   * module-qualified names left out. Builtins are defined from startup and
-   * carry no slot. A global the program assigns dynamically is checked through
-   * its runtime cell, so the name only counts once it holds a value — which is
-   * also what keeps an undefined name from suggesting itself. Globals unboxed
-   * to machine words and top-level `def`s have no cell to test and count as
-   * defined from the start; only an error raised above their definition would
-   * notice, and then only if no closer match exists.
+   * `visibleFrom` would at the moment of an error: every global id in order —
+   * builtins first, since they are installed before anything is parsed — spelled
+   * the way its own file spells it, with private names left out and each spelling
+   * emitted once (a builtin occupies three slots and is one candidate). Builtins
+   * are defined from startup and carry no slot. A global the program assigns
+   * dynamically is checked through its runtime cell, so the name only counts once
+   * it holds a value — which is also what keeps an undefined name from suggesting
+   * itself. Globals unboxed to machine words and top-level `def`s have no cell to
+   * test and count as defined from the start; only an error raised above their
+   * definition would notice, and then only if no closer match exists.
    */
   private def suggestRows(): Seq[String] =
     val rows = mutable.ArrayBuffer.empty[String]
+    val seen = mutable.HashSet.empty[String]
     var id = 0
     val n = globals.size
     while id < n do
-      val name = globals.nameOf(id)
-      if !name.contains("#") then
+      val name = globals.displayOf(id)
+      // One row per spelling: the same builtin under `map`, `std#map` and
+      // `array#map` is one candidate, not three.
+      if isPublicGlobalName(id) && seen.add(name) then
         if builtinIds.contains(id) then
           rows += s"{ ptr, ptr } { ptr ${cstr(name)}, ptr null }"
         else

@@ -7,7 +7,7 @@
 
 // mysql_native_password (MySQL up to 5.7's default, MariaDB's default):
 //   SHA1(password) XOR SHA1(nonce + SHA1(SHA1(password)))
-def mysqlNativeToken(password, nonce) {
+def nativeToken(password, nonce) {
   if (password == "" || password == null) then return []
   val pwd1 = digestBytes("sha1", utf8Encode(password))
   val pwd2 = digestBytes("sha1", pwd1)
@@ -19,7 +19,7 @@ def mysqlNativeToken(password, nonce) {
 
 // caching_sha2_password (MySQL 8's default), the scramble of its fast path:
 //   SHA256(password) XOR SHA256(SHA256(SHA256(password)) + nonce)
-def mysqlSha2Token(password, nonce) {
+def sha2Token(password, nonce) {
   if (password == "" || password == null) then return []
   val pwd1 = digestBytes("sha256", utf8Encode(password))
   val pwd2 = digestBytes("sha256", pwd1)

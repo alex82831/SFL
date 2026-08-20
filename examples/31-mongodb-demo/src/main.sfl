@@ -6,7 +6,7 @@
 import "mongodb"
 
 val url = getEnv("MONGO_URL") ?? "mongodb://localhost:27017/sfl_demo"
-val attemptConn = attempt(() -> mongoConnect(url, {timeoutMs: 3000}))
+val attemptConn = attempt(() -> mongodb.connect(url, {timeoutMs: 3000}))
 if (attemptConn?.error != null) {
   eprintln("cannot reach MongoDB: " + attemptConn.error.message)
   eprintln("start one with:  docker run --rm -p 27017:27017 mongo:7")
@@ -56,10 +56,10 @@ for (p in perPlanet) {
 
 // Indexes, and the BSON wrapper types where SFL has no native shape.
 println("index: " + moons.createIndex({planet: 1, radiusKm: -1}))
-val oid = newObjectId()
-println("an ObjectId: " + oid["$oid"] + " made at " + oidTimestamp(oid))
+val oid = mongodb.objectId()
+println("an ObjectId: " + oid["$oid"] + " made at " + mongodb.objectIdTime(oid))
 moons.insertOne({name: "probe", planet: "none", radiusKm: 0, discovered: 2026,
-  seen: mongoDate(), raw: mongoBinary([1, 2, 3])})
+  seen: mongodb.date(), raw: mongodb.binary([1, 2, 3])})
 val probe = moons.findOne({name: "probe"})
 println("wrappers round trip: date ms " + probe.seen["$date"] + ", binary " +
   jsonStringify(probe.raw["$binary"]))

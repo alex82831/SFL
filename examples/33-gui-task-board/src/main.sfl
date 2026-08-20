@@ -3,12 +3,12 @@
 // closes. Open a second window (or a second browser tab on the same URL) to
 // watch both stay in step — the task list is one module-level signal.
 
-import "gui"
+import "gui" open
 import "board"
 
 boardLoad(getEnv("BOARD_FILE") ?? "board.json")
 
-val app = guiApp({
+val app = gui.app({
   title: "Task board",
   root: boardUi,
   window: {width: 720, height: 620},

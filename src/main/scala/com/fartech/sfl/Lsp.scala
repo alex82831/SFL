@@ -178,8 +178,13 @@ final class Lsp:
     val base = new File(path).getParentFile
     val importer = new Importer(if base != null then base else new File("."))
     val intel = new ParseIntel
+    val globals = new Globals
+    Builtins.install(globals)
+    // The namespace this file declares into, so a name that landed in some other
+    // one — a package imported but not opened — still reads as out of scope.
+    intel.rootTag = importer.namespaceOf(path)._1
     try
-      new Parser(ref, new Globals, importer, false,
+      new Parser(ref, globals, importer, null,
         mutable.HashMap.empty[String, String], intel).parseProgram()
       val out = mutable.ArrayBuffer.empty[Value]
       for e <- intel.importErrors do out += lspDiagnostic(e, path, text)
@@ -290,12 +295,16 @@ final class Lsp:
   /** The surface of another module: column-0 definitions only, `_`-private excluded. */
   private val ModuleDefRe = raw"(?m)^def\s+([A-Za-z_$$][A-Za-z0-9_$$]*)\s*\(([^)]*)\)".r
   private val ModuleValRe = raw"(?m)^(?:val|var)\s+([A-Za-z_$$][A-Za-z0-9_$$]*)\s*=".r
-  private val ImportAliasRe = raw"""import\s+"([^"]+)"\s+as\s+([A-Za-z_$$][A-Za-z0-9_$$]*)""".r
-  // RE2 (Scala Native's regex) has no lookahead: match the optional alias too
-  // and keep only the matches where it is absent.
-  private val ImportAnyRe = raw"""import\s+"([^"]+)"(\s+as\b)?""".r
-  private def plainImports(text: String): Iterator[scala.util.matching.Regex.Match] =
-    ImportAnyRe.findAllMatchIn(text).filter(_.group(2) == null)
+  // One regex for every import form. RE2 (Scala Native's regex) has no lookahead,
+  // so the optional alias and `open` are matched as groups and read afterwards.
+  private val ImportRe =
+    raw"""import\s+"([^"]+)"(?:\s+as\s+([A-Za-z_$$][A-Za-z0-9_$$]*))?(\s+open\b)?""".r
+  private def imports(text: String): Iterator[scala.util.matching.Regex.Match] =
+    ImportRe.findAllMatchIn(text)
+  /** Imports whose surface lands in this file's scope unqualified. */
+  private def plainImports(path: String, text: String): Iterator[scala.util.matching.Regex.Match] =
+    imports(text).filter(m =>
+      m.group(3) != null || (m.group(2) == null && !isUnitImport(path, m.group(1))))
   private val ObjectKeyRe = raw""""([A-Za-z_$$][A-Za-z0-9_$$]*)"\s*:""".r
 
   /**
@@ -332,12 +341,18 @@ final class Lsp:
     if isBuildFile(path) then
       for m <- buildDsl do
         items(m.name) = completionItem(m.name, m.kind, s"${m.detail} — sfl build DSL", "", "0")
-    // Plainly imported modules put their public names in scope, so completion
-    // owes them: mongodb's insertOne belongs in the list the moment the file
-    // says import "mongodb". One transitive level covers packages whose main
-    // re-exports submodules.
+    // An opened import puts its public names in scope, so completion owes them.
+    // One transitive level covers a module whose own imports it re-exports.
     for (mod, m) <- plainSurfaces(path, text) if !items.contains(m.name) do
       items(m.name) = completionItem(m.name, m.kind, s"${m.detail} — $mod", "", "1")
+    // A namespace is not a name in scope but it is what the reader types next:
+    // every alias this file bound, and the builtin namespaces that need none.
+    for (alias, spec) <- docAliases(path, text) if !items.contains(alias) do
+      items(alias) = completionItem(alias, 9, s"namespace — $spec", "", "1")
+    for ns <- Builtins.namespaceNames if !items.contains(ns) do
+      items(ns) = completionItem(ns, 9,
+        if ns == Builtins.StdNamespace then "namespace — every builtin"
+        else s"namespace — the $ns builtins", "", "2")
     for b <- Builtins.all if !items.contains(b.name) do
       items(b.name) = completionItem(b.name, 3, b.signature, b.doc, "2")
     for kw <- Tok.keywords.keys.toSeq.sorted if !items.contains(kw) do
@@ -408,16 +423,120 @@ final class Lsp:
   // Member completion: module aliases first, object keys second
   // -------------------------------------------------------------------------
 
-  private def docAliases(text: String): Map[String, String] =
-    ImportAliasRe.findAllMatchIn(text).map(m => m.group(2) -> m.group(1)).toMap
+  /**
+   * Every namespace this file can write `ns.` in front of, mapped to the import
+   * spec it came from. An `as` alias names one; so does a plain import, under
+   * whatever the module calls itself — the package's manifest name, or the file's
+   * own name. The builtin namespaces need no import and are handled separately,
+   * by [[builtinNamespaceItems]].
+   */
+  private def docAliases(path: String, text: String): Map[String, String] =
+    val out = mutable.LinkedHashMap.empty[String, String]
+    for m <- imports(text) do
+      val spec = m.group(1)
+      val alias = if m.group(2) != null then m.group(2) else defaultAlias(path, spec)
+      if alias.nonEmpty then out(alias) = spec
+    out.toMap
+
+  /** What a plain import of `spec` binds it as: its unit's name, or the file's. */
+  private def defaultAlias(path: String, spec: String): String =
+    unitOf(path, spec) match
+      case Some((_, name)) => name
+      case None =>
+        val base = spec.split('/').last
+        if base.endsWith(".sfl") then base.dropRight(4) else base
+
+  /**
+   * The manifest unit a file belongs to: the nearest directory at or above it that
+   * carries an `sfl.pkg`, and the name that manifest declares. Cached, because
+   * completion asks after every import on every keystroke.
+   */
+  private val unitCache = mutable.HashMap.empty[String, Option[(File, String)]]
+
+  private def unitAbove(file: File): Option[(File, String)] =
+    // Canonical first: `new File("a.sfl").getParentFile` is null, and the walk
+    // would stop before it ever reached the project root.
+    val start =
+      try file.getCanonicalFile.getParentFile
+      catch case _: java.io.IOException => file.getAbsoluteFile.getParentFile
+    if start == null then None
+    else
+      unitCache.getOrElseUpdate(start.getPath, {
+        var dir = start
+        var found: Option[(File, String)] = None
+        var depth = 0
+        while dir != null && found.isEmpty && depth < 24 do
+          if PkgTool.manifestFile(dir).isFile then
+            found = try
+              val name = PkgTool.readManifest(dir).name
+              if name.nonEmpty then Some((dir, name)) else None
+            catch case _: Throwable => None
+          dir = dir.getParentFile
+          depth += 1
+        found
+      })
+
+  /** The unit an import spec resolves into, seen from `path`. */
+  private def unitOf(path: String, spec: String): Option[(File, String)] =
+    resolveModule(path, spec).flatMap(unitAbove)
+
+  private def isUnitImport(path: String, spec: String): Boolean =
+    // A sibling module of the file's own unit is not "another unit": it is already
+    // in scope, and treating it as one would hide its names from completion.
+    unitOf(path, spec).exists((dir, _) => !sameUnit(path, dir))
+
+  private def sameUnit(path: String, dir: File): Boolean =
+    unitAbove(new File(path)) match
+      case Some((own, _)) => own.getAbsolutePath == dir.getAbsolutePath
+      case None           => false
+
+  /**
+   * A unit's whole surface, not just the imported module's: a package is one
+   * namespace, so `httpd.` offers what any of its files declares.
+   */
+  private def unitSurface(dir: File): List[Member] =
+    val out = mutable.LinkedHashMap.empty[String, Member]
+    def walk(d: File, depth: Int): Unit =
+      if d == null || depth > 3 then return
+      for f <- Option(d.listFiles()).getOrElse(Array.empty[File]).sortBy(_.getName) do
+        if f.isDirectory && f.getName != "bin" && !f.getName.startsWith(".") then walk(f, depth + 1)
+        else if f.getName.endsWith(".sfl") then
+          val src = try FileUtil.read(f) catch case _: Throwable => ""
+          for m <- ModuleDefRe.findAllMatchIn(src) if !m.group(1).startsWith("_") do
+            out.getOrElseUpdate(m.group(1),
+              Member(m.group(1), 3, s"def ${m.group(1)}(${m.group(2)})", lineOfOffset(src, m.start)))
+          for m <- ModuleValRe.findAllMatchIn(src) if !m.group(1).startsWith("_") do
+            out.getOrElseUpdate(m.group(1),
+              Member(m.group(1), 6, s"val ${m.group(1)}", lineOfOffset(src, m.start)))
+    walk(dir, 0)
+    out.values.toList
+
+  /** The members `recv.` offers, whether `recv` is a builtin namespace or a module. */
+  private def namespaceMembers(path: String, text: String, recv: String): List[Member] =
+    docAliases(path, text).get(recv) match
+      case Some(spec) =>
+        unitOf(path, spec) match
+          case Some((dir, _)) => unitSurface(dir)
+          case None           => moduleSurface(path, text, spec)
+      case None => Nil
+
+  /** `std.` and one namespace per builtin group, always available. */
+  private def builtinNamespaceItems(recv: String): Seq[Value] =
+    if !Builtins.isNamespace(recv) then Nil
+    else
+      val members =
+        if recv == Builtins.StdNamespace then Builtins.all else Builtins.all.filter(_.group == recv)
+      members.map(b => completionItem(b.name, 3, s"${b.signature} — $recv", b.doc, "0"))
 
   private def memberItems(path: String, text: String, recv: String): Seq[Value] =
-    docAliases(text).get(recv) match
-      case Some(module) =>
-        moduleSurface(path, text, module).map { m =>
-          completionItem(m.name, m.kind, s"${m.detail} — $module", "", "0")
-        }
-      case None =>
+    val ns = namespaceMembers(path, text, recv)
+    if ns.nonEmpty then
+      val label = docAliases(path, text).getOrElse(recv, recv)
+      ns.map(m => completionItem(m.name, m.kind, s"${m.detail} — $label", "", "0"))
+    else
+      val builtin = builtinNamespaceItems(recv)
+      if builtin.nonEmpty then builtin
+      else
         val specific = receiverKeys(text, recv)
         val (keys, note) =
           if specific.nonEmpty then (specific, s"field of $recv")
@@ -508,13 +627,30 @@ final class Lsp:
             moduleCache(key) = (mtime, list)
             list
 
-  /** Public members of every plainly imported module, one transitive level deep. */
+  /** Where a unit declares `name`: the file and the line, searched unit-wide. */
+  private def unitDefinitionOf(dir: File, name: String): Option[(File, Int)] =
+    def walk(d: File, depth: Int): Option[(File, Int)] =
+      if d == null || depth > 3 then None
+      else
+        val entries = Option(d.listFiles()).getOrElse(Array.empty[File]).sortBy(_.getName)
+        entries.iterator.flatMap { f =>
+          if f.isDirectory && f.getName != "bin" && !f.getName.startsWith(".") then walk(f, depth + 1)
+          else if f.getName.endsWith(".sfl") then
+            val src = try FileUtil.read(f) catch case _: Throwable => ""
+            ModuleDefRe.findAllMatchIn(src).find(_.group(1) == name)
+              .orElse(ModuleValRe.findAllMatchIn(src).find(_.group(1) == name))
+              .map(m => (f, lineOfOffset(src, m.start)))
+          else None
+        }.nextOption()
+    walk(dir, 0)
+
+  /** Public members of every opened module, one transitive level deep. */
   private def plainSurfaces(path: String, text: String): Seq[(String, Member)] =
     val out = mutable.ArrayBuffer.empty[(String, Member)]
     val visited = mutable.HashSet.empty[String]
     def walk(fromPath: String, fromText: String, depth: Int): Unit =
       if depth > 2 then return
-      for im <- plainImports(fromText) do
+      for im <- plainImports(fromPath, fromText) do
         val mod = im.group(1)
         resolveModule(fromPath, mod) match
           case Some(file) if visited.add(file.getAbsolutePath) =>
@@ -650,11 +786,17 @@ final class Lsp:
       var rs = e
       while rs > 0 && isIdentChar(text.charAt(rs - 1)) do rs -= 1
       val recv = text.substring(rs, e)
-      for module <- docAliases(text).get(recv);
-          member <- moduleSurface(path, text, module).find(_.name == word);
-          file <- resolveModule(path, module) do
-        val src = try FileUtil.read(file) catch case _: Throwable => ""
-        return location(pathToUri(file.getAbsolutePath), src, member.line)
+      for spec <- docAliases(path, text).get(recv) do
+        unitOf(path, spec) match
+          case Some((dir, _)) =>
+            for (file, line) <- unitDefinitionOf(dir, word) do
+              val src = try FileUtil.read(file) catch case _: Throwable => ""
+              return location(pathToUri(file.getAbsolutePath), src, line)
+          case None =>
+            for member <- moduleSurface(path, text, spec).find(_.name == word);
+                file <- resolveModule(path, spec) do
+              val src = try FileUtil.read(file) catch case _: Throwable => ""
+              return location(pathToUri(file.getAbsolutePath), src, member.line)
       return VNull
 
     // This file first, plainly imported modules second.
@@ -662,7 +804,7 @@ final class Lsp:
       return location(uri, text, lineOfOffset(text, m.start))
     for m <- ValRe.findAllMatchIn(text) if m.group(1) == word do
       return location(uri, text, lineOfOffset(text, m.start))
-    for im <- plainImports(text) do
+    for im <- plainImports(path, text) do
       val module = im.group(1)
       moduleSurface(path, text, module).find(_.name == word) match
         case Some(member) =>
@@ -733,9 +875,13 @@ final class Lsp:
       var rs = e
       while rs > 0 && isIdentChar(text.charAt(rs - 1)) do rs -= 1
       val recv = text.substring(rs, e)
-      for module <- docAliases(text).get(recv);
-          member <- moduleSurface(path, text, module).find(_.name == word) do
-        return markdownHover(s"```sfl\n${member.detail}\n```\n\n*from module $module*")
+      for member <- namespaceMembers(path, text, recv).find(_.name == word) do
+        val label = docAliases(path, text).getOrElse(recv, recv)
+        return markdownHover(s"```sfl\n${member.detail}\n```\n\n*from $label*")
+      if Builtins.isNamespace(recv) then
+        for b <- Builtins.lookup(word) if recv == Builtins.StdNamespace || b.group == recv do
+          return markdownHover(
+            s"```sfl\n${b.signature}\n```\n\n${b.doc}\n\n*builtin, reached through `$recv`*")
 
     if isBuildFile(path) then
       buildDsl.find(_.name == word) match
@@ -752,7 +898,7 @@ final class Lsp:
         DefRe.findAllMatchIn(text).find(_.group(1) == word) match
           case Some(m) => markdownHover(s"```sfl\ndef $word(${m.group(2)})\n```")
           case None =>
-            plainImports(text).map(_.group(1)).toSeq.iterator
+            plainImports(path, text).map(_.group(1)).toSeq.iterator
               .flatMap(mod => moduleSurface(path, text, mod).find(_.name == word).map((mod, _)))
               .nextOption() match
               case Some((mod, member)) =>
@@ -795,9 +941,15 @@ final class Lsp:
     if dot > 0 then
       val recv = callee.substring(0, dot)
       val fn = callee.substring(dot + 1)
-      return docAliases(text).get(recv)
-        .flatMap(module => moduleSurface(path, text, module).find(m => m.name == fn && m.kind == 3))
-        .map(m => (m.detail.stripPrefix("def "), s"from module ${docAliases(text)(recv)}"))
+      val label = docAliases(path, text).getOrElse(recv, recv)
+      return namespaceMembers(path, text, recv).find(m => m.name == fn && m.kind == 3)
+        .map(m => (m.detail.stripPrefix("def "), s"from $label"))
+        .orElse {
+          if !Builtins.isNamespace(recv) then None
+          else Builtins.lookup(fn)
+            .filter(b => recv == Builtins.StdNamespace || b.group == recv)
+            .map(b => (b.signature, b.doc))
+        }
     val fromDsl =
       if isBuildFile(path) then
         buildDsl.find(m => m.name == callee && m.kind == 3)
@@ -808,7 +960,7 @@ final class Lsp:
       DefRe.findAllMatchIn(text).find(_.group(1) == callee)
         .map(m => (s"$callee(${m.group(2)})", "defined in this file"))
     }.orElse {
-      plainImports(text).map(_.group(1)).toSeq.iterator
+      plainImports(path, text).map(_.group(1)).toSeq.iterator
         .flatMap(mod => moduleSurface(path, text, mod)
           .find(m => m.name == callee && m.kind == 3).map(m => (m, mod)))
         .nextOption()

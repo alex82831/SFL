@@ -78,11 +78,11 @@ reg="file://$work/reg.json"
 # --------------------------------------------------------------------- checks
 
 want "a git URL installs the repository"        "installed solo 1.0.0" "$("$SFL" install "git+file://$solo" 2>&1)"
-prog="$work/u.sfl"; printf 'import "solo"\nprintln(hi())\n' > "$prog"
+prog="$work/u.sfl"; printf 'import "solo"\nprintln(solo.hi())\n' > "$prog"
 want "the installed package imports"            "solo v1"             "$("$SFL" "$prog" 2>&1)"
 
 want "a registry name resolves and installs"    "installed foo 2.1.0" "$(SFL_REGISTRY="$reg" "$SFL" install foo 2>&1)"
-printf 'import "foo"\nprintln(foo())\n' > "$prog"
+printf 'import "foo"\nprintln(foo.foo())\n' > "$prog"
 want "the registry package imports"             "42"                  "$("$SFL" "$prog" 2>&1)"
 
 want "a #fragment selects a subdirectory"       "installed bar 0.3.0" "$("$SFL" install "git+file://$mono#packages/bar" 2>&1)"

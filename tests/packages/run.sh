@@ -55,7 +55,7 @@ make_mathx() { # version, reported label
   local dir="$work/src/mathx-$1"
   mkdir -p "$dir"
   printf '{ "name": "mathx", "version": "%s", "main": "main" }\n' "$1" > "$dir/sfl.pkg"
-  printf 'def mathxVersion() = "%s"\ndef twice(x) = x * 2\n' "$2" > "$dir/main.sfl"
+  printf 'def version() = "%s"\ndef twice(x) = x * 2\n' "$2" > "$dir/main.sfl"
   printf 'def _unit() = 1\ndef area(w, h) = w * h * _unit()\n' > "$dir/geo.sfl"
 }
 make_mathx 1.0.0 1.0.0
@@ -86,10 +86,10 @@ expect "bad usage: install with no source" 2 "" "$SFL" pkg install
 echo
 echo "packages: import resolution"
 
-printf 'import "mathx"\nprint(mathxVersion())\n' > "$proj/bare.sfl"
+printf 'import "mathx"\nprint(mathx.version())\n' > "$proj/bare.sfl"
 expect "bare import picks the highest version" 0 "1.2.0" in_proj "$SFL" bare.sfl
 
-printf 'import "mathx/geo"\nprint(area(3, 4))\n' > "$proj/bymod.sfl"
+printf 'import "mathx/geo"\nprint(mathx.area(3, 4))\n' > "$proj/bymod.sfl"
 expect "import by module" 0 "12" in_proj "$SFL" bymod.sfl
 
 printf 'import "mathx/geo" as g\nprint(g.area(6, 7))\n' > "$proj/qual.sfl"
@@ -99,8 +99,8 @@ printf 'import "mathx/nosuch"\n' > "$proj/nomod.sfl"
 expect "missing module inside a package" 1 "has no module 'nosuch'" in_proj "$SFL" nomod.sfl
 
 # A local file named like a package must still win: full backward compatibility.
-printf 'def mathxVersion() = "the file"\n' > "$proj/mathx.sfl"
-printf 'import "mathx"\nprint(mathxVersion())\n' > "$proj/shadowed.sfl"
+printf 'def localVersion() = "the file"\n' > "$proj/mathx.sfl"
+printf 'import "mathx"\nprint(localVersion())\n' > "$proj/shadowed.sfl"
 expect "a plain file shadows a package" 0 "the file" in_proj "$SFL" shadowed.sfl
 rm "$proj/mathx.sfl" "$proj/shadowed.sfl"
 
@@ -139,16 +139,16 @@ echo "packages: transitive dependencies"
 # alpha declares mathx and imports a module of it; beta imports clrs undeclared.
 mkdir -p "$work/src/alpha" "$work/src/beta" "$work/src/clrs"
 printf '{ "name": "alpha", "version": "1.0.0", "deps": { "mathx": "^1.0.0" } }\n' > "$work/src/alpha/sfl.pkg"
-printf 'import "mathx/geo"\ndef alphaArea(w, h) = area(w, h)\n' > "$work/src/alpha/main.sfl"
+printf 'import "mathx/geo"\ndef alphaArea(w, h) = mathx.area(w, h)\n' > "$work/src/alpha/main.sfl"
 printf '{ "name": "clrs", "version": "1.0.0" }\n' > "$work/src/clrs/sfl.pkg"
 printf 'def red() = "red"\n' > "$work/src/clrs/main.sfl"
 printf '{ "name": "beta", "version": "1.0.0" }\n' > "$work/src/beta/sfl.pkg"
-printf 'import "clrs"\ndef betaRed() = red()\n' > "$work/src/beta/main.sfl"
+printf 'import "clrs"\ndef betaRed() = clrs.red()\n' > "$work/src/beta/main.sfl"
 "$SFL" pkg install "$work/src/alpha" > /dev/null 2>&1
 "$SFL" pkg install "$work/src/beta"  > /dev/null 2>&1
 "$SFL" pkg install "$work/src/clrs"  > /dev/null 2>&1
 
-printf 'import "alpha"\nprint(alphaArea(2, 3))\n' > "$proj/trans.sfl"
+printf 'import "alpha"\nprint(alpha.alphaArea(2, 3))\n' > "$proj/trans.sfl"
 expect "a package's declared dep resolves" 0 "6" in_proj "$SFL" trans.sfl
 
 printf 'import "beta"\n' > "$proj/undecl.sfl"
@@ -167,9 +167,9 @@ echo "packages: the flat model"
 # binds mathx to 1.2.0, so ptwo's range must be reported as unsatisfiable.
 mkdir -p "$work/src/pone" "$work/src/ptwo"
 printf '{ "name": "pone", "version": "1.0.0", "deps": { "mathx": "^1.0.0" } }\n' > "$work/src/pone/sfl.pkg"
-printf 'import "mathx"\ndef oneV() = mathxVersion()\n' > "$work/src/pone/main.sfl"
+printf 'import "mathx"\ndef oneV() = mathx.version()\n' > "$work/src/pone/main.sfl"
 printf '{ "name": "ptwo", "version": "1.0.0", "deps": { "mathx": "1.0.0" } }\n' > "$work/src/ptwo/sfl.pkg"
-printf 'import "mathx"\ndef twoV() = mathxVersion()\n' > "$work/src/ptwo/main.sfl"
+printf 'import "mathx"\ndef twoV() = mathx.version()\n' > "$work/src/ptwo/main.sfl"
 "$SFL" pkg install "$work/src/pone" > /dev/null 2>&1
 "$SFL" pkg install "$work/src/ptwo" > /dev/null 2>&1
 
@@ -184,7 +184,7 @@ else
 fi
 
 # Compatible ranges agree on one version, so the same pair with a workable pin runs.
-printf 'import "pone"\nimport "mathx"\nprint(mathxVersion())\n' > "$proj/agree.sfl"
+printf 'import "pone"\nimport "mathx"\nprint(mathx.version())\n' > "$proj/agree.sfl"
 expect "compatible requirers share one version" 0 "1.2.0" in_proj "$SFL" agree.sfl
 
 echo
@@ -199,7 +199,7 @@ expect "the local root shadows the global one" 0 "1.1.0-local" in_proj "$SFL" ba
 echo
 echo "packages: interpreted and compiled are byte-identical"
 
-printf 'import "mathx"\nimport "mathx/geo" as g\nprint(mathxVersion())\nprint(twice(21))\nprint(g.area(5, 8))\n' > "$proj/diff.sfl"
+printf 'import "mathx"\nimport "mathx/geo" as g\nprint(mathx.version())\nprint(mathx.twice(21))\nprint(g.area(5, 8))\n' > "$proj/diff.sfl"
 in_proj "$SFL" diff.sfl > "$work/interp.txt" 2>&1
 interp_code=$?
 if build=$(in_proj "$SFL" -c diff.sfl -o "$work/diff_bin" 2>&1); then

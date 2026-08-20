@@ -9,9 +9,9 @@ def check(what, got, want) {
   }
 }
 
-logSetLevel("off")                       // keep the test output clean
+log.setLevel("off")                       // keep the test output clean
 notesReset()
-val srv = httpServer({quiet: true, handler: api()})
+val srv = httpd.server({quiet: true, handler: api()})
 srv.start()
 val base = "http://127.0.0.1:${srv.port()}"
 

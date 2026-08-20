@@ -616,7 +616,7 @@ final class DapServer(
                 return
               i += 1
     try
-      val v = Sfl.run(expr, "<debug>")
+      val v = Sfl.run(expr, "<debug>", Sfl.callerTag)
       val (value, tpe) = render(v)
       respond(req, VObj.of(Seq(
         "result" -> VStr(value), "type" -> VStr(tpe),

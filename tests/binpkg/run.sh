@@ -71,11 +71,11 @@ SFL
 prog="$work/use.sfl"
 cat > "$prog" <<'SFL'
 import "calc"
-println(compute([1, 2, 3]))
-println(describe(compute([5])))
-val f = describe
+println(calc.compute([1, 2, 3]))
+println(calc.describe(calc.compute([5])))
+val f = calc.describe
 println(map([1, 2], f))
-println(scaled(7) + bump(0))
+println(calc.scaled(7) + calc.bump(0))
 SFL
 
 build_and_install() {

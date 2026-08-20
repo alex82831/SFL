@@ -5,9 +5,8 @@
 
 import "lib/assert"
 import "lib/wsc"
-import "gui"
-
-val app = guiDemoApp({quiet: true, graceMs: 100})
+import "gui" open
+val app = gui.demoApp({quiet: true, graceMs: 100})
 app.start()
 val port = app.port()
 val tok = guiToken(port)

@@ -55,13 +55,56 @@ final class Globals:
   @volatile private var chunks: Array[Array[Value]] = Array(new Array[Value](ChunkSize))
   private var names = new Array[String](ChunkSize)
   /**
-   * What to call a name in a message. A name private to a module, or reachable only
-   * through a qualified import, is stored under a key that includes its file so two
-   * modules cannot collide — but nobody wants to read that key in an error.
+   * What to call a name in a message. Every name but a builtin's is stored under a
+   * key that carries the namespace it belongs to, so two namespaces cannot collide —
+   * but nobody wants to read that key in an error.
    */
   private var displays = new Array[String](ChunkSize)
   private var consts = new Array[Boolean](ChunkSize)
   @volatile private var n = 0
+
+  // -------------------------------------------------------------------------
+  // Namespaces
+  //
+  // A namespace is a set of global names sharing one key prefix: `tag#name`. The
+  // tag is opaque (a canonical directory or file path, or one of the reserved
+  // builtin tags) and never reaches the reader; the label is what a person calls
+  // it. The registry below outlives every parser, which is what lets the REPL,
+  // `eval` and a re-import of an already-parsed module resolve names the same way
+  // the first parse did.
+  // -------------------------------------------------------------------------
+
+  private val nsLabels = mutable.HashMap.empty[String, String]
+  private val nsOpens = mutable.HashMap.empty[String, mutable.LinkedHashSet[String]]
+  private val declFiles = mutable.HashMap.empty[String, String]
+
+  /** Records what a namespace is called. The first label for a tag wins. */
+  def noteNamespace(tag: String, label: String): Unit = synchronized {
+    if tag.nonEmpty && !nsLabels.contains(tag) then nsLabels(tag) = label
+  }
+
+  def labelOf(tag: String): String = synchronized(nsLabels.getOrElse(tag, tag))
+
+  /** Records that `tag`'s surface is visible unqualified inside namespace `into`. */
+  def noteOpen(into: String, tag: String): Unit = synchronized {
+    if into != tag then nsOpens.getOrElseUpdate(into, mutable.LinkedHashSet.empty) += tag
+  }
+
+  /** The namespaces opened into `into`, in the order they were opened. */
+  def opensOf(into: String): Seq[String] =
+    synchronized(nsOpens.get(into).map(_.toSeq).getOrElse(Nil))
+
+  /**
+   * Records which file declared a key, and answers with the file that got there
+   * first when that was a different one — which is how one namespace's two files
+   * declaring the same public name is caught instead of silently overwriting.
+   */
+  def noteDecl(key: String, file: String): Option[String] = synchronized {
+    declFiles.get(key) match
+      case Some(first) if first != file => Some(first)
+      case Some(_)                      => None
+      case None                         => declFiles(key) = file; None
+  }
 
   def size: Int = n
   def nameOf(id: Int): String = names(id)
@@ -106,21 +149,53 @@ final class Globals:
     i
 
   /**
-   * Names that currently hold a value, for completion and `:vars`. Module-private and
-   * qualified names are left out: they are not writable at this scope, so offering
-   * them would only mislead.
+   * Names in the root namespace that currently hold a value, for completion and
+   * `:vars`. A namespaced name is left out — it is not reachable by this spelling
+   * from wherever the caller is, so offering it would only mislead; ask
+   * [[membersOf]] for one namespace's own.
    */
   def definedNames: Seq[String] =
     val upto = n
     (0 until upto).filter(i => rawGet(i) != null && names(i).indexOf('#') < 0)
       .map(i => names(i)).toSeq
 
-  /** Public names a module declares, for "did you mean" on a qualified reference. */
+  /** Public names a namespace declares, for completion and "did you mean". */
   def membersOf(tag: String): Seq[String] =
     val prefix = tag + "#"
     val upto = n
     (0 until upto).map(names).filter(k => k.startsWith(prefix))
       .map(_.substring(prefix.length)).filterNot(_.startsWith("_")).toSeq
+
+  /** The tag a key belongs to, or "" for a name in the root (builtin) namespace. */
+  def tagOf(key: String): String =
+    val i = key.lastIndexOf('#')
+    if i < 0 then "" else key.substring(0, i)
+
+  /**
+   * What a misspelling of `id` could have meant: the names its own namespace holds,
+   * the names opened into it, and the root namespace behind both. Scoping the
+   * suggestion this way is what keeps "did you mean" honest — it never proposes a
+   * name the failing code could not have reached.
+   */
+  def visibleFrom(id: Int): Seq[String] =
+    val tag = if id >= 0 && id < n then tagOf(names(id)) else ""
+    val reachable = (opensOf(tag) :+ tag).toSet
+    val out = mutable.LinkedHashSet.empty[String]
+    val upto = n
+    var i = 0
+    // Id order, which is the order the compiled runtime walks its own table in:
+    // builtins first, then everything the program declared as it was parsed. The
+    // two engines have to reach the same suggestion, and ties go to whoever comes
+    // first, so the order is part of the contract.
+    while i < upto do
+      val key = names(i)
+      val hash = key.lastIndexOf('#')
+      val bare = if hash < 0 then key else key.substring(hash + 1)
+      if !bare.startsWith("_") && rawGet(i) != null &&
+         (hash < 0 || reachable.contains(key.substring(0, hash))) then
+        out += bare
+      i += 1
+    out.toSeq
 
   def valueOf(name: String): Option[Value] =
     val i = find(name)
@@ -340,7 +415,7 @@ final class GlobalGet(val id: Int, val name: String, val line: Int) extends Node
     else
       Err.evalHint(
         s"undefined variable '$name'",
-        Err.didYouMean(name, rt.globals.definedNames),
+        Err.didYouMean(name, rt.globals.visibleFrom(id)),
         if name.startsWith("_") then
           "a name beginning with '_' is private to the file that declares it"
         else

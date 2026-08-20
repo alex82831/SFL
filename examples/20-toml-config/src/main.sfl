@@ -18,4 +18,4 @@ for (rule in cfg.rules) {
 // The config also writes back out as TOML — handy for `--print-config`.
 println("")
 println("--- effective config ---")
-print(tomlStringify(cfg))
+print(toml.stringify(cfg))

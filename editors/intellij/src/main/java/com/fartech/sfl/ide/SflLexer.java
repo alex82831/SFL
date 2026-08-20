@@ -15,6 +15,11 @@ import org.jetbrains.annotations.Nullable;
  * Word classification (keyword? builtin?) comes from {@link SflSyntaxTables},
  * which is generated from the compiler's own tables. This file knows the token
  * shapes; it deliberately knows no word lists.
+ *
+ * The one shape it does know is {@code ns.member}: a word immediately followed by
+ * a dot and another word is a namespace wherever it is not a keyword, which is
+ * how a package or module an import bound gets coloured without the plugin having
+ * to resolve the project's imports.
  */
 public final class SflLexer extends LexerBase {
     /** Between tokens, at the top level. */
@@ -157,6 +162,7 @@ public final class SflLexer extends LexerBase {
             String word = buffer.subSequence(i, j).toString();
             tokenEnd = j;
             if (SflSyntaxTables.KEYWORDS.contains(word)) tokenType = SflTokenTypes.KEYWORD;
+            else if (looksLikeNamespace(word, j)) tokenType = SflTokenTypes.NAMESPACE;
             else if (SflSyntaxTables.BUILTINS.contains(word)) tokenType = SflTokenTypes.BUILTIN;
             else tokenType = SflTokenTypes.IDENTIFIER;
             return;
@@ -239,6 +245,32 @@ public final class SflLexer extends LexerBase {
             }
         }
         return j;
+    }
+
+    /**
+     * True when the word ending at {@code end} is being read as a namespace.
+     *
+     * A name the generated table knows is one — {@code std}, {@code math} — counts
+     * as soon as a dot follows it. Anything else has to look like a call through a
+     * namespace ({@code csv.parse(}), because {@code user.name} reads identically
+     * and is far more common; colouring every field receiver would be noise.
+     */
+    private boolean looksLikeNamespace(String word, int end) {
+        boolean known = SflSyntaxTables.NAMESPACES.contains(word);
+        int k = skipBlanks(end);
+        if (k >= bufferEnd || buffer.charAt(k) != '.') return false;
+        k = skipBlanks(k + 1);
+        if (k >= bufferEnd || !isIdentStart(buffer.charAt(k))) return false;
+        if (known) return true;
+        while (k < bufferEnd && isIdentPart(buffer.charAt(k))) k++;
+        k = skipBlanks(k);
+        return k < bufferEnd && buffer.charAt(k) == '(';
+    }
+
+    private int skipBlanks(int from) {
+        int k = from;
+        while (k < bufferEnd && (buffer.charAt(k) == ' ' || buffer.charAt(k) == '\t')) k++;
+        return k;
     }
 
     private static boolean isIdentStart(char c) {

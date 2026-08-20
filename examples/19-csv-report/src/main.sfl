@@ -7,7 +7,7 @@ import "report"
 
 val sales = loadSales(readFile("data/sales.csv"))
 println("loaded ${length(sales)} sale(s) spanning " +
-  dtDiffDays(dtParse(last(sales).date), dtParse(sales[0].date)) + " days")
+  datetime.diffDays(datetime.parse(last(sales).date), datetime.parse(sales[0].date)) + " days")
 
 val summary = summarise(sales)
 println("")
@@ -20,6 +20,6 @@ val best = bestSeller(sales)
 println("")
 println("best seller: ${best.product} (${best.units} units)")
 
-writeFile("report.csv", csvStringifyObjects(summary,
+writeFile("report.csv", csv.stringifyObjects(summary,
   {columns: ["month", "region", "units", "revenue"]}))
 println("wrote report.csv")

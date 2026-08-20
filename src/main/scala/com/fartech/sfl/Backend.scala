@@ -172,8 +172,10 @@ object Backend:
     for (module, source) <- Stdlib.modules yield
       if verbose then Console.err.println(s"  compiling stdlib/$module.sfl")
       val name = s"stdlib/$module.sfl"
+      // The root namespace, exactly as the interpreter loads these: their public
+      // definitions *are* builtins, and the two engines have to agree on that.
       val (block, ref) =
-        try Sfl.compile(source, name)
+        try Sfl.compile(source, name, "")
         catch
           case e: IncompleteInput => throw Err.fromIncomplete(e, SourceRef(name, source))
       val compiler = new Compiler(Sfl.globals, ref)

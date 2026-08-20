@@ -2,7 +2,7 @@
 //
 //   import "redis"
 //
-//   val r = redisConnect("127.0.0.1", 6379)
+//   val r = redis.connect("127.0.0.1", 6379)
 //   r.set("greeting", "hello")
 //   r.get("greeting")                    // "hello"
 //   r.cmd("INCRBY", "counter", 5)        // any command, argument per argument
@@ -16,10 +16,10 @@
 
 import "resp"
 
-// Opens a connection: redisConnect(host?, port?, {timeoutMs?, password?, user?, db?}).
-def redisConnect(host = "127.0.0.1", port = 6379, opts = {}) {
+// Opens a connection: connect(host?, port?, {timeoutMs?, password?, user?, db?}).
+def connect(host = "127.0.0.1", port = 6379, opts = {}) {
   val timeoutMs = if (contains(opts, "timeoutMs")) then opts.timeoutMs else 10000
-  val sock = connect(host, port, timeoutMs)
+  val sock = std.connect(host, port, timeoutMs)
   val state = {sock: sock, timeoutMs: timeoutMs, lock: mutex()}
   var closed = false
 

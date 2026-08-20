@@ -7,19 +7,19 @@ import "../packages/jwt/main"
 // -------------------------------------------------------------- round trip
 
 val secret = "a shared secret"
-val token = jwtSign({sub: "user-1", role: "admin", n: 42}, secret)
+val token = jwt.sign({sub: "user-1", role: "admin", n: 42}, secret)
 check("a token has three parts", length(split(token, ".")), 3)
-val claims = jwtVerify(token, secret)
+val claims = jwt.verify(token, secret)
 check("subject survives", claims.sub, "user-1")
 check("numbers survive", claims.n, 42)
 check("byte-array secrets work",
-  jwtVerify(jwtSign({a: 1}, [1, 2, 3]), [1, 2, 3]).a, 1)
+  jwt.verify(jwt.sign({a: 1}, [1, 2, 3]), [1, 2, 3]).a, 1)
 
-val decoded = jwtDecode(token)
+val decoded = jwt.decode(token)
 check("decode shows the header", decoded.header, {alg: "HS256", typ: "JWT"})
 check("decode shows the payload without verifying", decoded.payload.role, "admin")
 
-val kid = jwtDecode(jwtSign({}, secret, {header: {kid: "key-7"}})).header
+val kid = jwt.decode(jwt.sign({}, secret, {header: {kid: "key-7"}})).header
 check("extra header fields ride along", kid.kid, "key-7")
 check("extra header fields keep the algorithm", kid.alg, "HS256")
 
@@ -29,20 +29,20 @@ check("extra header fields keep the algorithm", kid.alg, "HS256")
 val known = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." +
   "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." +
   "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
-val kc = jwtVerify(known, "your-256-bit-secret")
+val kc = jwt.verify(known, "your-256-bit-secret")
 check("the canonical vector verifies", kc.name, "John Doe")
 check("its iat survives", kc.iat, 1516239022)
 
 // -------------------------------------------------------------- rejections
 
-checkFails("a wrong secret fails", () -> jwtVerify(token, "other"), "does not verify")
+checkFails("a wrong secret fails", () -> jwt.verify(token, "other"), "does not verify")
 val parts = split(token, ".")
 checkFails("a tampered payload fails",
-  () -> jwtVerify(parts[0] + "." + parts[1] + "x." + parts[2], secret), "jwt:")
+  () -> jwt.verify(parts[0] + "." + parts[1] + "x." + parts[2], secret), "jwt:")
 checkFails("a tampered signature fails",
-  () -> jwtVerify(parts[0] + "." + parts[1] + "." + parts[2] + "A", secret), "jwt:")
-checkFails("two-part tokens fail", () -> jwtVerify("a.b", secret), "three dot-separated")
-checkFails("garbage fails", () -> jwtVerify("not a token at all", secret), "three dot-separated")
+  () -> jwt.verify(parts[0] + "." + parts[1] + "." + parts[2] + "A", secret), "jwt:")
+checkFails("two-part tokens fail", () -> jwt.verify("a.b", secret), "three dot-separated")
+checkFails("garbage fails", () -> jwt.verify("not a token at all", secret), "three dot-separated")
 
 // alg: none and other algorithms must be refused outright.
 def b64u(s) {
@@ -51,36 +51,36 @@ def b64u(s) {
   t
 }
 val noneToken = b64u("{\"alg\":\"none\"}") + "." + b64u("{\"sub\":\"evil\"}") + "." + b64u("x")
-checkFails("alg none is rejected", () -> jwtVerify(noneToken, secret), "refusing algorithm")
+checkFails("alg none is rejected", () -> jwt.verify(noneToken, secret), "refusing algorithm")
 checkFails("alg none with an empty signature is rejected",
-  () -> jwtVerify(b64u("{\"alg\":\"none\"}") + "." + b64u("{}") + ".", secret), "jwt:")
+  () -> jwt.verify(b64u("{\"alg\":\"none\"}") + "." + b64u("{}") + ".", secret), "jwt:")
 val rsToken = b64u("{\"alg\":\"RS256\"}") + "." + b64u("{}") + "." + b64u("sig")
-checkFails("other algorithms are rejected", () -> jwtVerify(rsToken, secret), "refusing algorithm")
+checkFails("other algorithms are rejected", () -> jwt.verify(rsToken, secret), "refusing algorithm")
 checkFails("signing unknown algorithms is refused",
-  () -> jwtSign({}, secret, {header: {alg: "HS512"}}), "HS256 only")
+  () -> jwt.sign({}, secret, {header: {alg: "HS512"}}), "HS256 only")
 
 // ------------------------------------------------------------- time claims
 
 val nowSec = 1700000000
-val expired = jwtSign({exp: nowSec - 10}, secret)
-checkFails("an expired token fails", () -> jwtVerify(expired, secret, {atSec: nowSec}), "expired")
+val expired = jwt.sign({exp: nowSec - 10}, secret)
+checkFails("an expired token fails", () -> jwt.verify(expired, secret, {atSec: nowSec}), "expired")
 check("leeway forgives a near expiry",
-  jwtVerify(expired, secret, {atSec: nowSec, leewaySec: 60}).exp, nowSec - 10)
-val early = jwtSign({nbf: nowSec + 100}, secret)
+  jwt.verify(expired, secret, {atSec: nowSec, leewaySec: 60}).exp, nowSec - 10)
+val early = jwt.sign({nbf: nowSec + 100}, secret)
 checkFails("a not-yet-valid token fails",
-  () -> jwtVerify(early, secret, {atSec: nowSec}), "not valid before")
+  () -> jwt.verify(early, secret, {atSec: nowSec}), "not valid before")
 check("a live window passes",
-  jwtVerify(jwtSign({exp: nowSec + 100, nbf: nowSec - 100, sub: "s"}, secret),
+  jwt.verify(jwt.sign({exp: nowSec + 100, nbf: nowSec - 100, sub: "s"}, secret),
     secret, {atSec: nowSec}).sub, "s")
 
 // -------------------------------------------------------- issuer, audience
 
-val iss = jwtSign({iss: "auth.example", aud: ["web", "mobile"]}, secret)
-check("issuer matches", jwtVerify(iss, secret, {issuer: "auth.example"}).iss, "auth.example")
-checkFails("a wrong issuer fails", () -> jwtVerify(iss, secret, {issuer: "other"}), "issuer")
-check("audience arrays match", jwtVerify(iss, secret, {audience: "web"}).aud, ["web", "mobile"])
-checkFails("a missing audience fails", () -> jwtVerify(iss, secret, {audience: "tv"}), "audience")
-val aud1 = jwtSign({aud: "web"}, secret)
-check("a string audience matches", jwtVerify(aud1, secret, {audience: "web"}).aud, "web")
+val iss = jwt.sign({iss: "auth.example", aud: ["web", "mobile"]}, secret)
+check("issuer matches", jwt.verify(iss, secret, {issuer: "auth.example"}).iss, "auth.example")
+checkFails("a wrong issuer fails", () -> jwt.verify(iss, secret, {issuer: "other"}), "issuer")
+check("audience arrays match", jwt.verify(iss, secret, {audience: "web"}).aud, ["web", "mobile"])
+checkFails("a missing audience fails", () -> jwt.verify(iss, secret, {audience: "tv"}), "audience")
+val aud1 = jwt.sign({aud: "web"}, secret)
+check("a string audience matches", jwt.verify(aud1, secret, {audience: "web"}).aud, "web")
 
 report("jwt")

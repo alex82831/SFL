@@ -2,13 +2,13 @@
 //
 //   import "uuid"
 //
-//   uuid4()               // "8f14e45f-ceea-467f-a0e6-6ffbc0eafd6a"
-//   uuid7()               // time-ordered, for database keys
-//   uuidValidate(s)       // true for any well-formed UUID
-//   uuidVersion(s)        // 4, 7, ...
+//   uuid.v4()               // "8f14e45f-ceea-467f-a0e6-6ffbc0eafd6a"
+//   uuid.v7()               // time-ordered, for database keys
+//   uuid.validate(s)       // true for any well-formed UUID
+//   uuid.version(s)        // 4, 7, ...
 
 // A random (version 4) UUID.
-def uuid4() {
+def v4() {
   val b = randomBytes(16)
   b[6] = bitOr(bitAnd(b[6], 0x0f), 0x40)
   b[8] = bitOr(bitAnd(b[8], 0x3f), 0x80)
@@ -17,7 +17,7 @@ def uuid4() {
 
 // A time-ordered (version 7) UUID: 48 bits of epoch milliseconds, then random.
 // Sorts by creation time, which keeps database indexes happy.
-def uuid7() {
+def v7() {
   val b = randomBytes(16)
   val t = timeMillis()
   b[0] = bitAnd(shiftRightU(t, 40), 0xff)
@@ -32,27 +32,27 @@ def uuid7() {
 }
 
 // The all-zero UUID.
-def uuidNil() = "00000000-0000-0000-0000-000000000000"
+def nil() = "00000000-0000-0000-0000-000000000000"
 
 // True when s is a well-formed 8-4-4-4-12 hex UUID (any version, any case).
-def uuidValidate(s) {
+def validate(s) {
   isString(s) && matches(toLower(s),
     "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 }
 
 // The version digit of a well-formed UUID, or an error for anything else.
-def uuidVersion(s) {
-  if (!uuidValidate(s)) then error("uuid: '" + toString(s) + "' is not a UUID")
+def version(s) {
+  if (!validate(s)) then error("uuid: '" + toString(s) + "' is not a UUID")
   parseInt(charAt(s, 14), 16)
 }
 
-// The 16 bytes of a UUID string; uuidFromBytes is its inverse.
-def uuidToBytes(s) {
-  if (!uuidValidate(s)) then error("uuid: '" + toString(s) + "' is not a UUID")
+// The 16 bytes of a UUID string; fromBytes is its inverse.
+def toBytes(s) {
+  if (!validate(s)) then error("uuid: '" + toString(s) + "' is not a UUID")
   hexDecodeBytes(replace(toLower(s), "-", ""))
 }
 
-def uuidFromBytes(b) {
+def fromBytes(b) {
   if (!isArray(b) || length(b) != 16) then error("uuid: expected 16 bytes")
   _format(b)
 }

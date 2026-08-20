@@ -1,0 +1,2 @@
+// Opened by ambiguous.sfl, alongside two.sfl, which exports `label` too.
+def label(x) = "one:" + toString(x)

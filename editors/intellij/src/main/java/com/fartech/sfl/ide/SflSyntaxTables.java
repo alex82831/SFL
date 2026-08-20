@@ -10,7 +10,7 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * The keyword and builtin tables, read from resources that
+ * The keyword, builtin and namespace tables, read from resources that
  * {@code tools/gen-editor-syntax.sfl} regenerates from {@code sfl syntax}.
  * Nothing in this plugin hand-maintains a word list: when the language grows a
  * keyword, regenerating the resources is the whole update.
@@ -18,6 +18,13 @@ import java.util.Set;
 public final class SflSyntaxTables {
     public static final Set<String> KEYWORDS = load("/syntax/sfl-keywords.txt");
     public static final Set<String> BUILTINS = load("/syntax/sfl-builtins.txt");
+    /**
+     * The namespaces that are there without an import: {@code std}, which holds
+     * every builtin, and one per builtin group. A program's own namespaces come
+     * from its imports and are recognised by shape instead — see
+     * {@link SflLexer}.
+     */
+    public static final Set<String> NAMESPACES = load("/syntax/sfl-namespaces.txt");
 
     private static Set<String> load(String resource) {
         Set<String> out = new HashSet<>();

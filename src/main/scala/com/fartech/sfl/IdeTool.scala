@@ -43,10 +43,32 @@ object IdeTool:
         "doc" -> VStr(b.doc),
         "minArity" -> VInt.of(b.minArity),
         "maxArity" -> VInt.of(b.maxArity)
-      ))))
+      )))),
+      // The namespaces that are there without an import, so an editor can colour
+      // `math.` as a namespace rather than as somebody's variable, and complete
+      // through it. A program's own namespaces come from its imports and are the
+      // language server's business, not this dump's.
+      "namespaces" -> VArr.of(builtinNamespaces)
     ))
     println(Json.stringify(obj, pretty = true))
     0
+
+  /**
+   * `std`, which holds every builtin, and one namespace per builtin group. Each
+   * lists its members, so an editor can offer them behind the dot without asking
+   * the language server.
+   */
+  private def builtinNamespaces: Seq[Value] =
+    val std = VObj.of(Seq(
+      "name" -> VStr(Builtins.StdNamespace),
+      "doc" -> VStr("every builtin, reachable even where a name of your own shadows it"),
+      "members" -> strArr(Builtins.all.map(_.name))
+    ))
+    std +: Builtins.groups.sorted.map(g => VObj.of(Seq(
+      "name" -> VStr(g),
+      "doc" -> VStr(s"the $g builtins"),
+      "members" -> strArr(Builtins.all.filter(_.group == g).map(_.name))
+    )))
 
   // -------------------------------------------------------------------------
   // sfl check — parse, report, never run
@@ -111,8 +133,12 @@ object IdeTool:
       catch case e: java.io.IOException => return List(Diag.Plain(path, e.getMessage))
     val ref = SourceRef(path, text)
     val importer = new Importer(if f.getParentFile != null then f.getParentFile else new File("."))
+    // The builtins go in so that `std.map` and `math.abs` resolve here exactly as
+    // they do at run time; nothing else about this scope is shared with anyone.
+    val globals = new Globals
+    Builtins.install(globals)
     try
-      new Parser(ref, new Globals, importer, false, mutable.HashMap.empty[String, String]).parseProgram()
+      new Parser(ref, globals, importer, null, mutable.HashMap.empty[String, String]).parseProgram()
       Nil
     catch
       case e: SflError          => List(Diag.Located(e))

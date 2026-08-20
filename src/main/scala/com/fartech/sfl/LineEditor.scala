@@ -331,14 +331,20 @@ object LineEditor:
     val trimmed = before.trim
     if trimmed.endsWith(".") then
       val receiver = trimmed.dropRight(1).reverse.takeWhile(c => c.isLetterOrDigit || c == '_' || c == '$').reverse
-      Sfl.globals.valueOf(receiver) match
-        case Some(o: VObj) => o.fields.keys.filter(_.startsWith(partial)).toSeq.sorted
-        case _             => Seq.empty
+      // A namespace first: `std.` and `csv.` are the two things a dot most often
+      // follows now, and neither is a value the session could look up.
+      Sfl.namespaceMembers(receiver) match
+        case Some(members) => members.filter(_.startsWith(partial)).sorted
+        case None =>
+          Sfl.sessionValueOf(receiver) match
+            case Some(o: VObj) => o.fields.keys.filter(_.startsWith(partial)).toSeq.sorted
+            case _             => Seq.empty
     else if trimmed.startsWith(":doc") || trimmed.startsWith(":builtins") then
       Builtins.publicNames.filter(_.startsWith(partial)).sorted
     else
       val names =
-        Tok.reserved.toSeq ++ Builtins.publicNames ++ Sfl.globals.definedNames ++ Repl.commandNames
+        Tok.reserved.toSeq ++ Builtins.publicNames ++ Builtins.namespaceNames ++
+          Sfl.globals.definedNames ++ Sfl.sessionNames ++ Repl.commandNames
       names.filter(_.startsWith(partial)).distinct.sorted
 
   /** Lays names out in aligned columns, the way a shell lists completions. */

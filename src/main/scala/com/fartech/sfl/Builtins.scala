@@ -51,6 +51,31 @@ object Builtins:
       throw new IllegalStateException(s"builtin '$name' is registered twice")
     registry(name) = new VNative(name, minArity, maxArity, group, signature, doc, impl)
 
+  // -------------------------------------------------------------------------
+  // Namespaces
+  //
+  // Every builtin answers to three names: the bare one, which is what an
+  // unqualified reference finds once nothing nearer has claimed it; `std.name`,
+  // which reaches it even where something nearer has; and `group.name`, which is
+  // the same table sliced the way the manual is — `math.abs`, `string.toUpper`.
+  //
+  // They are aliases, not copies: the three global slots hold the same value, so
+  // `std.map == map` and either may be passed where the other is expected.
+  // -------------------------------------------------------------------------
+
+  /** The namespace every builtin belongs to, whatever its group. */
+  final val StdNamespace = "std"
+
+  /**
+   * Namespace names that need no import; a program's own alias shadows one.
+   * Computed once: the parser asks [[isNamespace]] about every `a.b` it meets.
+   */
+  private lazy val namespaceSet: Set[String] =
+    registry.values.map(_.group).toSet.filter(_.nonEmpty) + StdNamespace
+
+  def namespaceNames: Seq[String] = StdNamespace +: groups.sorted
+  def isNamespace(name: String): Boolean = namespaceSet.contains(name)
+
   /** Registers every builtin into `g`. Safe to call on a fresh Globals. */
   def install(g: Globals): Unit =
     if registry.isEmpty then
@@ -64,15 +89,27 @@ object Builtins:
       BuiltinsIpc.register()
       BuiltinsInternal.register()
     for (name, fn) <- registry do
-      g.define(name, fn)
-      g.setConst(g.id(name), false)
+      define3(g, name, fn, fn.group)
     // Shared-source stdlib functions: the registry row above carries the listing,
     // signature and doc (the compiled table reads the doc from there), while the
     // global slot holds a sentinel the first read replaces with the definition
     // loaded from the very stdlib source compiled programs link.
     for f <- Stdlib.all if StdlibModules.isShared(f.module) do
-      g.define(f.name, new VLazyStdlib(f.module, f.name))
-      g.setConst(g.id(f.name), false)
+      define3(g, f.name, new VLazyStdlib(f.module, f.name),
+        lookup(f.name).map(_.group).getOrElse(""))
+    for ns <- namespaceNames do g.noteNamespace(ns, ns)
+
+  /** Defines one builtin under its bare name and under both of its namespaces. */
+  private def define3(g: Globals, name: String, v: Value, group: String): Unit =
+    alias(g, name, name, v)
+    if !isInternal(name) then
+      alias(g, s"$StdNamespace#$name", s"$StdNamespace.$name", v)
+      if group.nonEmpty then alias(g, s"$group#$name", s"$group.$name", v)
+
+  private def alias(g: Globals, key: String, display: String, v: Value): Unit =
+    val id = g.id(key, display)
+    g.set(id, v)
+    g.setConst(id, false)
 
   // -------------------------------------------------------------------------
   // Argument accessors. Each reports the builtin and position on a type mismatch,
@@ -224,10 +261,24 @@ object StdlibModules:
           throw e
   }
 
-  /** GlobalGet's slow path: loads the sentinel's module and re-reads the slot. */
+  /**
+   * GlobalGet's slow path: loads the sentinel's module and re-reads the slot.
+   *
+   * The module defines into the root namespace — its functions *are* builtins — so
+   * a read through `std.httpGet` or `net.httpGet` finds its definition under the
+   * bare name and backfills the alias, leaving one shared value behind either
+   * spelling.
+   */
   def force(v: VLazyStdlib, id: Int, rt: Interp): Value =
     load(v.module)
-    val defined = rt.globals.rawGet(id)
+    var defined = rt.globals.rawGet(id)
+    if defined == null || defined.isInstanceOf[VLazyStdlib] then
+      val root = rt.globals.find(v.name)
+      if root >= 0 then
+        val rooted = rt.globals.rawGet(root)
+        if rooted != null && !rooted.isInstanceOf[VLazyStdlib] then
+          rt.globals.set(id, rooted)
+          defined = rooted
     if defined == null || defined.isInstanceOf[VLazyStdlib] then
       Err.eval(s"internal error: stdlib module '${v.module}' did not define '${v.name}'")
     defined

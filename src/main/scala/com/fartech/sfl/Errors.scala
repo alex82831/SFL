@@ -185,7 +185,9 @@ object Err:
 
   /**
    * Suggests a replacement for an unknown identifier. Only names within a small edit
-   * distance qualify, so the hint stays quiet when there is no plausible match.
+   * distance qualify, so the hint stays quiet when there is no plausible match, and
+   * never the name itself — a reference that failed put its own spelling in the
+   * namespace it was looking in, and proposing it back would say nothing.
    */
   def suggest(name: String, candidates: Iterable[String]): Option[String] =
     if name.isEmpty then None
@@ -194,7 +196,7 @@ object Err:
       var best: String = null
       var bestD = Int.MaxValue
       for c <- candidates do
-        if math.abs(c.length - name.length) <= limit then
+        if c != name && math.abs(c.length - name.length) <= limit then
           val d = editDistance(name.toLowerCase, c.toLowerCase, limit)
           if d < bestD then
             bestD = d

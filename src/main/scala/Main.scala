@@ -148,6 +148,9 @@ object Main:
         1
 
   private def runOnce(opts: Options): Int =
+    // `-e` declares into the interactive namespace the REPL uses, so a one-liner
+    // and a prompt see the same thing; a script gets the namespace of its file.
+    val ns = if opts.eval.isDefined then Sfl.sessionTag else null
     val (text, name) = opts.eval match
       case Some(code) => (code, "<eval>")
       case None =>
@@ -162,7 +165,7 @@ object Main:
 
     try
       val parseStart = System.nanoTime()
-      val (block, ref) = Sfl.compile(text, name)
+      val (block, ref) = Sfl.compile(text, name, ns)
       val parsed = System.nanoTime()
       if opts.ast then
         println(Dump.render(block))

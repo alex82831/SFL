@@ -8,14 +8,14 @@
 import "httpd"
 
 // A little API to talk to.
-val srv = httpServer({
+val srv = httpd.server({
   quiet: true,
-  handler: routes([
-    GET("/hello", (req) -> respondText(200, "hello, client")),
-    GET("/users/:id", (req) -> respondJson(200, {id: parseInt(req.params.id), name: "user-" + req.params.id})),
-    POST("/echo", (req) -> respondJson(200, {youSent: jsonParse(req.body), method: req.method})),
-    GET("/headers", (req) -> respondJson(200, {agent: get(req.headers, "user-agent", "?")})),
-    GET("/teapot", (req) -> respondText(418, "short and stout"))
+  handler: httpd.routes([
+    httpd.GET("/hello", (req) -> httpd.respondText(200, "hello, client")),
+    httpd.GET("/users/:id", (req) -> httpd.respondJson(200, {id: parseInt(req.params.id), name: "user-" + req.params.id})),
+    httpd.POST("/echo", (req) -> httpd.respondJson(200, {youSent: jsonParse(req.body), method: req.method})),
+    httpd.GET("/headers", (req) -> httpd.respondJson(200, {agent: get(req.headers, "user-agent", "?")})),
+    httpd.GET("/teapot", (req) -> httpd.respondText(418, "short and stout"))
   ])
 })
 srv.start()

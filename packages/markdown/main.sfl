@@ -2,7 +2,7 @@
 //
 //   import "markdown"
 //
-//   mdToHtml("# Title\n\nSome *emphasis* and `code`.")
+//   markdown.toHtml("# Title\n\nSome *emphasis* and `code`.")
 //
 // Blocks: # headings (with slug ids for anchors), paragraphs, fenced code
 // (``` with a language class), > blockquotes (nesting), -/*/+ and 1. lists
@@ -18,7 +18,7 @@
 
 // ------------------------------------------------------------------ blocks
 
-def mdToHtml(text, opts = {}) {
+def toHtml(text, opts = {}) {
   val ctx = {allowHtml: get(opts, "allowHtml", false)}
   val out = []
   _mdBlocks(out, lines(text), ctx)
@@ -26,7 +26,7 @@ def mdToHtml(text, opts = {}) {
 }
 
 // Inline markdown alone (for titles and table cells rendered elsewhere).
-def mdInline(text, opts = {}) = _mdInline(text, {allowHtml: get(opts, "allowHtml", false)})
+def inline(text, opts = {}) = _mdInline(text, {allowHtml: get(opts, "allowHtml", false)})
 
 def _mdBlocks(out, ls, ctx) {
   var i = 0

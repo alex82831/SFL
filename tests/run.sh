@@ -21,7 +21,7 @@ fail() { printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 # ---------------------------------------------------------------- .sfl suites
 
 echo "script suites"
-for suite in language builtins closures functional concurrency ipc async http httpd diagnostics imports regression stdlib namespaces patterns tuples sugar mysql postgres smtp jwt template toml markdown smallpkgs; do
+for suite in language builtins closures functional concurrency ipc async http httpd diagnostics imports regression stdlib namespaces shadowing patterns tuples sugar mysql postgres smtp jwt template toml markdown smallpkgs; do
   if out=$("$SFL" "$suite.sfl" 2>&1); then
     printf '  %s\n' "$out"
   else
@@ -176,6 +176,18 @@ if command -v node >/dev/null 2>&1; then
   else
     printf '%s\n' "$out"
     fail "dap end-to-end, socket"
+  fi
+  # The TextMate grammar, tokenized by the real engine. Needs the extension's own
+  # dev dependencies, so it is skipped rather than installed on the fly.
+  if [[ -d ../editors/vscode/node_modules ]]; then
+    if out=$(cd ../editors/vscode && node test/grammar.js 2>&1); then
+      pass "vscode grammar ($(printf '%s\n' "$out" | grep -c '^ok') checks)"
+    else
+      printf '%s\n' "$out"
+      fail "vscode grammar"
+    fi
+  else
+    echo "  skip  vscode grammar (run 'npm install' in editors/vscode)"
   fi
 else
   echo "  skip  lsp/dap end-to-end (no node on PATH)"

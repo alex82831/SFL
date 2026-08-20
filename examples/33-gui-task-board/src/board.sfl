@@ -9,8 +9,7 @@
 //     runs once per window, so each window gets its own draft text and its
 //     own filter while looking at the same task list.
 
-import "gui"
-
+import "gui" open
 // ------------------------------------------------------------------ state
 
 val tasks = signal([])                  // [{id, title, priority, done}]

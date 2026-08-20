@@ -6,30 +6,30 @@ import "../packages/dotenv/main"
 
 // -------------------------------------------------------------------- ansi
 
-ansiSetEnabled(true)
+ansi.setEnabled(true)
 val esc = chr(27)
-check("red wraps in 31", ansiRed("x"), esc + "[31m" + "x" + esc + "[0m")
-check("styles combine in order", ansiStyle("x", "yellow", "bold", "underline"),
+check("red wraps in 31", ansi.red("x"), esc + "[31m" + "x" + esc + "[0m")
+check("styles combine in order", ansi.style("x", "yellow", "bold", "underline"),
   esc + "[33;1;4m" + "x" + esc + "[0m")
-check("256-colour form", ansi256("x", 208), esc + "[38;5;208mx" + esc + "[0m")
-check("rgb form", ansiRgb("x", 1, 2, 3), esc + "[38;2;1;2;3mx" + esc + "[0m")
-checkFails("unknown styles are named", () -> ansiStyle("x", "chartreuse"), "chartreuse")
+check("256-colour form", ansi.color256("x", 208), esc + "[38;5;208mx" + esc + "[0m")
+check("rgb form", ansi.rgb("x", 1, 2, 3), esc + "[38;2;1;2;3mx" + esc + "[0m")
+checkFails("unknown styles are named", () -> ansi.style("x", "chartreuse"), "chartreuse")
 
-check("strip removes what style added", ansiStrip(ansiStyle("plain", "red", "bold")), "plain")
+check("strip removes what style added", ansi.strip(ansi.style("plain", "red", "bold")), "plain")
 check("strip crosses several sequences",
-  ansiStrip(ansiGreen("a") + "-" + ansiBold("b")), "a-b")
-check("strip leaves clean text alone", ansiStrip("just text"), "just text")
-check("strip handles cursor sequences too", ansiStrip(esc + "[2Kline"), "line")
+  ansi.strip(ansi.green("a") + "-" + ansi.bold("b")), "a-b")
+check("strip leaves clean text alone", ansi.strip("just text"), "just text")
+check("strip handles cursor sequences too", ansi.strip(esc + "[2Kline"), "line")
 
-ansiSetEnabled(false)
-check("disabled styling is the identity", ansiRed("x"), "x")
-check("disabled rgb is the identity", ansiRgb("x", 9, 9, 9), "x")
-check("enabled state reads back", ansiEnabled(), false)
-ansiSetEnabled(true)
+ansi.setEnabled(false)
+check("disabled styling is the identity", ansi.red("x"), "x")
+check("disabled rgb is the identity", ansi.rgb("x", 9, 9, 9), "x")
+check("enabled state reads back", ansi.enabled(), false)
+ansi.setEnabled(true)
 
 // ------------------------------------------------------------------ dotenv
 
-val parsed = dotenvParse(join([
+val parsed = dotenv.parse(join([
   "# a comment",
   "DB_HOST=localhost",
   "DB_PORT=5432",
@@ -58,13 +58,13 @@ check("everything expected parsed", length(keys(parsed)), 9)
 val envFile = tempFile("sfl-dotenv-test")
 writeFile(envFile, "SFL_DOTENV_A=from-file\nSFL_DOTENV_B=file-b\n")
 setEnv("SFL_DOTENV_A", "from-env")
-val loaded = dotenvLoad(envFile)
+val loaded = dotenv.load(envFile)
 check("load returns what it parsed", loaded.SFL_DOTENV_B, "file-b")
 check("the environment wins by default", getEnv("SFL_DOTENV_A"), "from-env")
 check("unset variables are filled", getEnv("SFL_DOTENV_B"), "file-b")
-dotenvLoad(envFile, {override: true})
+dotenv.load(envFile, {override: true})
 check("override replaces the environment", getEnv("SFL_DOTENV_A"), "from-file")
 removeFile(envFile)
-check("a missing file is quietly empty", dotenvLoad("no-such-file.env"), {})
+check("a missing file is quietly empty", dotenv.load("no-such-file.env"), {})
 
 report("smallpkgs")

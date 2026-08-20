@@ -2,8 +2,8 @@
 //
 //   import "jwt"
 //
-//   val token = jwtSign({sub: "user-1", exp: timeMillis() / 1000 + 3600}, "secret")
-//   val claims = jwtVerify(token, "secret")     // raises if forged or expired
+//   val token = jwt.sign({sub: "user-1", exp: timeMillis() / 1000 + 3600}, "secret")
+//   val claims = jwt.verify(token, "secret")     // raises if forged or expired
 //   claims.sub                                   // "user-1"
 //
 // HS256 is the one algorithm offered (the runtime digests are md5/sha1/
@@ -15,7 +15,7 @@
 
 // Signs a payload object. opts: header (extra header fields, e.g. {kid: ...}).
 // The secret is a string or a byte array.
-def jwtSign(payload, secret, opts = {}) {
+def sign(payload, secret, opts = {}) {
   val header = merge({alg: "HS256", typ: "JWT"}, get(opts, "header", {}))
   if (header.alg != "HS256") {
     error("jwt: this package signs HS256 only (asked for " + toString(header.alg) + ")")
@@ -30,7 +30,7 @@ def jwtSign(payload, secret, opts = {}) {
 //   issuer                 required `iss` value
 //   audience               required `aud` value (aud may be a string or array)
 //   atSec                  "now" in Unix seconds (defaults to the clock)
-def jwtVerify(token, secret, opts = {}) {
+def verify(token, secret, opts = {}) {
   val parts = split(token, ".")
   if (length(parts) != 3) then error("jwt: a token has three dot-separated parts")
   val header = _json(parts[0], "header")
@@ -66,7 +66,7 @@ def jwtVerify(token, secret, opts = {}) {
 
 // Decodes without verifying — for inspecting a token's claims. Never make
 // decisions on an unverified payload.
-def jwtDecode(token) {
+def decode(token) {
   val parts = split(token, ".")
   if (length(parts) != 3) then error("jwt: a token has three dot-separated parts")
   {header: _json(parts[0], "header"), payload: _json(parts[1], "payload"), signature: parts[2]}

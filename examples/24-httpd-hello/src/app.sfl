@@ -4,24 +4,24 @@
 import "httpd"
 
 def app() {
-  routes([
-    GET("/", (req) -> redirect("/assets/index.html")),
+  httpd.routes([
+    httpd.GET("/", (req) -> httpd.redirect("/assets/index.html")),
     // :name captures one path segment into req.params.
-    GET("/hello/:name", (req) -> {
+    httpd.GET("/hello/:name", (req) -> {
       val times = parseInt(get(req.query, "times", "1"))
-      respondText(200, repeat("hello, ${req.params.name}!\n", times))
+      httpd.respondText(200, repeat("hello, ${req.params.name}!\n", times))
     }),
-    GET("/api/time", (req) -> respondJson(200, {
+    httpd.GET("/api/time", (req) -> httpd.respondJson(200, {
       epochMs: timeMillis(),
       utc: formatTime(timeMillis(), "%Y-%m-%dT%H:%M:%SZ", true)
     })),
-    POST("/api/sum", (req) -> {
+    httpd.POST("/api/sum", (req) -> {
       val ns = jsonParse(req.body)
-      respondJson(200, {sum: sum(ns), count: length(ns)})
+      httpd.respondJson(200, {sum: sum(ns), count: length(ns)})
     }),
     // *rest captures the remaining path — a tiny reflector.
-    GET("/echo/*rest", (req) -> respondJson(200, {path: req.params.rest, query: req.query})),
+    httpd.GET("/echo/*rest", (req) -> httpd.respondJson(200, {path: req.params.rest, query: req.query})),
     // Static files: content types, conditional requests and ranges included.
-    STATIC("/assets", "public")
+    httpd.STATIC("/assets", "public")
   ])
 }

@@ -3,7 +3,7 @@
 The **postgres** package (pure-SFL driver, protocol 3.0, SCRAM/MD5 auth)
 doing real work: `$1..$n` parameters go to the server out of band (nothing
 is ever spliced into SQL), `RETURNING`, array parameters through
-`pgArray` + `ANY($1::int[])`, the faithful type mapping (NUMERIC → string,
+`postgres.array` + `ANY($1::int[])`, the faithful type mapping (NUMERIC → string,
 BYTEA → bytes), `exec` for multi-statement scripts, `transaction()` with
 rollback, error messages with SQLSTATE and position, and LISTEN/NOTIFY
 between two connections.

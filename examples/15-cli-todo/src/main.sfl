@@ -26,15 +26,15 @@ val spec = {
   ]
 }
 
-// cliParse reads args(), prints help on -h/--help, and exits on bad usage.
-val got = cliParse(spec)
+// cli.parse reads args(), prints help on -h/--help, and exits on bad usage.
+val got = cli.parse(spec)
 val file = got.options.file
 val cmd = got.positionals?.command ?? "list"
 val rest = got.positionals?.rest ?? []
 
 def show(item) {
-  val mark = if (item.done) then ansiGreen("✔") else ansiYellow("·")
-  val text = if (item.done) then ansiDim(item.text) else item.text
+  val mark = if (item.done) then ansi.green("✔") else ansi.yellow("·")
+  val text = if (item.done) then ansi.dim(item.text) else item.text
   println(" ${mark} ${padStart(toString(item.id), 3)}  ${text}")
 }
 

@@ -19,10 +19,10 @@
 | --- | --- | --- |
 | `sfl syntax` 语法元数据 JSON | `IdeTool.scala` | tests/run.sh tooling 段 |
 | `sfl check [--json]` 解析诊断 | `IdeTool.scala` | 同上（好/坏文件、退出码、JSON 定位） |
-| `sfl lsp` LSP 服务器 | `Lsp.scala`（零依赖，复用 `Json`） | `tests/lsp.js` 18 项端到端断言 |
+| `sfl lsp` LSP 服务器 | `Lsp.scala`（零依赖，复用 `Json`） | `tests/lsp.js` 57 项端到端断言 |
 | `fileMtime` `exePath` `passthrough` 内置 | `BuiltinsSys.scala` | 构建工具全流程即验证 |
 | 语法资产生成器 | `tools/gen-editor-syntax.sfl`（SFL 写） | 生成物三处同源 |
-| TextMate 语法 + 语言配置 | `editors/vscode/`（生成物） | `editors/vscode/test/grammar.js` 22 项断言 |
+| TextMate 语法 + 语言配置 | `editors/vscode/`（生成物） | `editors/vscode/test/grammar.js` 28 项断言 |
 | VSCode 插件 | `editors/vscode/`，产出 `sfl-lang-0.1.0.vsix` | tsc 零警告 + vsce 打包 |
 | IntelliJ 插件 | `editors/intellij/`，产出 `sfl-intellij-0.1.0.zip` | gradle buildPlugin 成功（IC 2024.2.4） |
 | `sfl build` 构建工具 | `buildtool/main.sfl`（SFL 写，嵌入二进制） | tests/run.sh：init/编译/增量/run/test/describe |
@@ -79,6 +79,23 @@ RE2 注意：Scala Native 的正则是 RE2，**不支持前瞻/后顾断言**（
 运行时才炸）——写 `(?!…)` 会让 `sfl lsp` 启动即崩，用可选组后过滤替代（此坑由
 同工作区另一会话捕获并修复）。
 
+## 命名空间（0.8.0）
+
+语言把顶层名字划进命名空间之后，三处 IDE 资产都跟着改了：
+
+- **`sfl syntax`** 多一个 `namespaces` 数组：`std` 与每个内置分组，各带成员表。
+  编辑器据此把 `math.` 认成命名空间而不是某人的变量，且不必问语言服务器。
+- **`sfl lsp`**：`ns.` 后的补全按命名空间给成员——包按**整个单元**给（`httpd.`
+  能列出七个模块里的任何一个公开名），普通模块按文件给，`std.`/`math.` 给内置；
+  悬停、签名提示、跳转定义同样穿透命名空间（跳转会在单元内逐文件找定义）。
+  未定义变量诊断也跟着收紧：`ParseIntel` 现在记录每个声明落在哪个命名空间，
+  只有本文件所在命名空间与被 `open` 的那些才算在作用域内——所以
+  `import "csv"` 之后写裸 `parse(...)` 会被指出来。
+- **TextMate 语法 / IntelliJ 词法**：`ns.member` 是一条独立规则。内置命名空间
+  取 `support.class.namespace`（有词表兜底），其余按形状认（标识符 + `.` +
+  标识符 + `(`）取 `entity.name.namespace`，成员照常按调用着色。IntelliJ 侧新增
+  `SFL_NAMESPACE` token 与 `sfl-namespaces.txt` 词表，同一套生成器产出。
+
 ## DAP 调试器（已交付，解释器模式）
 
 评估 3.3 的方案已按计划落地：
@@ -113,9 +130,9 @@ RE2 注意：Scala Native 的正则是 RE2，**不支持前瞻/后顾断言**（
 
 ```bash
 ./tests/run.sh                             # tooling 段（lsp+dap 在内）+ 存量全部套件
-node tests/lsp.js                          # LSP 18 项
+node tests/lsp.js                          # LSP 57 项
 node tests/dap.js                          # DAP 25 项
-cd editors/vscode && node test/grammar.js  # 语法 22 项
+cd editors/vscode && node test/grammar.js  # 语法 28 项（含命名空间）
 cd editors/vscode && npx @vscode/vsce package
 cd editors/intellij && ./gradlew buildPlugin
 ```

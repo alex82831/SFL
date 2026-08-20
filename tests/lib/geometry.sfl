@@ -6,9 +6,8 @@ def circleArea(r) = PI() * r * r
 def circumference(r) = TAU * r
 
 // Records how many times this file has been executed, so the test can prove that
-// importing the same module twice runs it only once.
-if (isNull(get(globalCounters, "geometry", null))) {
-  geometryLoads = 1
-} else {
-  geometryLoads = geometryLoads + 1
-}
+// importing the same module twice runs it only once. The count belongs to this
+// module: a file declares into its own namespace, so it could not reach into the
+// namespace of whoever imported it even if it wanted to.
+var loads = 0
+loads += 1

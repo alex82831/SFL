@@ -4,6 +4,6 @@
 import "httpd"
 import "chat"
 
-val srv = httpServer({port: 8080, handler: chatApp()})
+val srv = httpd.server({port: 8080, handler: chatApp()})
 println("chat on http://127.0.0.1:8080 — open it twice, Ctrl-C stops it")
 srv.listen()

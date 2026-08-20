@@ -1,4 +1,0 @@
-// EXPECT: is imported two different ways
-import "ns/geo"
-import "ns/geo" as g
-println(dist({"x": 1, "y": 1}))

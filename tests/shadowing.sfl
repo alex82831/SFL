@@ -1,0 +1,41 @@
+// What a name of your own may and may not reach.
+//
+// Before namespaces, a top-level `def map` replaced the builtin for the whole
+// program — including inside the libraries the program had already imported, which
+// went on calling `map` and got the new one. Now a top-level name belongs to the
+// namespace of the file that declares it, so it shadows nothing anyone else can see.
+
+import "lib/assert"
+import "ns/shadow"
+
+// Same names as three builtins the imported module calls.
+def map(a, b) = "hijacked"
+def length(x) = -1
+def max(a, b) = "mine"
+
+check("a local definition wins here", map([1], (x) -> x), "hijacked")
+check("and takes precedence over the builtin", length([1, 2, 3]), -1)
+check("and does not follow into an imported module", shadow.doubleAll([1, 2, 3]), [2, 4, 6])
+check("a builtin the module calls is still the builtin", shadow.size([1, 2, 3]), 3)
+check("even one that takes the same arguments", shadow.biggest([4, 9]), 9)
+
+// The builtins are still reachable here too, through their own namespace.
+check("std reaches a shadowed builtin", std.map([1, 2], (x) -> x * 3), [3, 6])
+check("std reaches it by any name", std.length([1, 2, 3]), 3)
+check("a group namespace is the same table", string.length([1, 2, 3]), 3)
+check("and slices it the way the manual does", array.concat([1], [2]), [1, 2])
+check("math group", math.abs(-7), 7)
+check("string group", string.toUpper("ok"), "OK")
+check("io group is a value like any other", isFunction(io.println), true)
+check("a qualified builtin is the very same function", std.length == string.length, true)
+check("and may be passed like one", std.map([1, 2, 3], std.abs), [1, 2, 3])
+
+// A local `val` named after a namespace wins: the namespace is only consulted for
+// a name nothing nearer has claimed.
+def usesLocalNamed() {
+  val math = {abs: (x) -> "field"}
+  math.abs(-1)
+}
+check("a local shadows a namespace", usesLocalNamed(), "field")
+
+report("shadowing")

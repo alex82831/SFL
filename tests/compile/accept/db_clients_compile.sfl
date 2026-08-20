@@ -15,14 +15,14 @@ for (v in [0, 250, 251, 65535, 65536, 16777215, 16777216, 4294967296]) {
 
 // mysql: the documented auth vectors.
 val salt = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
-println("native " + hexEncodeBytes(mysqlNativeToken("sflpass", salt)))
-println("sha2   " + hexEncodeBytes(mysqlSha2Token("sflpass", salt)))
+println("native " + hexEncodeBytes(mysql.nativeToken("sflpass", salt)))
+println("sha2   " + hexEncodeBytes(mysql.sha2Token("sflpass", salt)))
 
 // mysql: escaping and binding.
-println(mysqlEscape("it's a \\ test\n"))
-println(mysqlEscape(mysqlBinary([222, 173])))
-println(mysqlEscape([1, "two", null, true]))
-println(mysqlBind("SELECT ?, '?', `a?` -- ?\n FROM t WHERE x IN ?", [42, [1, 2]]))
+println(mysql.escape("it's a \\ test\n"))
+println(mysql.escape(mysql.binary([222, 173])))
+println(mysql.escape([1, "two", null, true]))
+println(mysql.bind("SELECT ?, '?', `a?` -- ?\n FROM t WHERE x IN ?", [42, [1, 2]]))
 
 // postgres: big-endian coding and array literals.
 val be = []
@@ -32,4 +32,4 @@ pgpPushStr(be, "ok")
 println("be bytes " + jsonStringify(be))
 val cur = pgpCur(be)
 println("be reads " + pgpU32(cur) + " " + pgpU16(cur) + " " + pgpStrNul(cur))
-println(pgArray([1, "a b", null, ["x\"y"], true]))
+println(postgres.array([1, "a b", null, ["x\"y"], true]))

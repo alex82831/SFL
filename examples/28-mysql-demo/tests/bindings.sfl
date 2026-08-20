@@ -12,18 +12,18 @@ def check(what, got, want) {
   }
 }
 
-check("escape strings", mysqlEscape("o'hara"), "'o''hara'")
-check("escape null and bools", [mysqlEscape(null), mysqlEscape(true)], ["NULL", "TRUE"])
-check("escape in-lists", mysqlEscape([1, "a"]), "(1, 'a')")
-check("escape blobs", mysqlEscape(mysqlBinary([1, 255])), "x'01ff'")
+check("escape strings", mysql.escape("o'hara"), "'o''hara'")
+check("escape null and bools", [mysql.escape(null), mysql.escape(true)], ["NULL", "TRUE"])
+check("escape in-lists", mysql.escape([1, "a"]), "(1, 'a')")
+check("escape blobs", mysql.escape(mysql.binary([1, 255])), "x'01ff'")
 check("bind respects strings and comments",
-  mysqlBind("SELECT ? FROM t -- ?\n WHERE a = '?' AND b = ?", [1, 2]),
+  mysql.bind("SELECT ? FROM t -- ?\n WHERE a = '?' AND b = ?", [1, 2]),
   "SELECT 1 FROM t -- ?\n WHERE a = '?' AND b = 2")
 
-val probe = attempt(() -> mysqlConnect(mysqlSettings(), {timeoutMs: 1500}))
+val probe = attempt(() -> mysql.connect(mysqlSettings(), {timeoutMs: 1500}))
 if (probe?.error != null) {
   println("bindings: ok (live checks skipped — no MySQL server: " +
-    substring(probe.error.message, 0, 60) + "…)")
+    substring(probe.error.message, 0, min(60, length(probe.error.message))) + "…)")
 } else {
   val db = probe.value
   db.exec("CREATE TABLE IF NOT EXISTS sfl_demo_probe (n INT)")

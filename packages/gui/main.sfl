@@ -1,6 +1,6 @@
 // gui — a cross-platform, asynchronous GUI framework for SFL.
 //
-//   import "gui"
+//   import "gui" open
 //
 //   def counter(ctx) {
 //     val n = signal(0)
@@ -13,7 +13,7 @@
 //     ], {gap: 12})
 //   }
 //
-//   guiApp({title: "Counter", root: counter}).run()
+//   gui.app({title: "Counter", root: counter}).run()
 //
 // run() serves the UI from an embedded web runtime over httpd, opens a
 // native-feeling window (an app-mode Chromium window when one is installed,
@@ -25,13 +25,13 @@
 //   _core     signals, computed values, effects, batching (thread-safe)
 //   _widgets  the widget catalogue: layout, inputs, data display, overlays
 //   _render   mounting, fine-grained patches, keyed list reconciliation
-//   _app      guiApp(): sessions, the UI loop thread, timers, the launcher
+//   _app      app(): sessions, the UI loop thread, timers, the launcher
 //   _client   the embedded browser runtime (no external resources)
-//   _demo     guiDemo(), a kitchen-sink showcase
+//   _demo     demo(), a kitchen-sink showcase
 //
 // Everything is ordinary SFL — it runs interpreted and compiles with
 // `sfl -c` like any other package. Importing "gui" pulls in "httpd", whose
-// names (httpServer, routes, GET, …) become available as well.
+// names (httpd.server, routes, GET, …) become available as well.
 
 import "_core"
 import "_widgets"
@@ -40,4 +40,4 @@ import "_app"
 import "_client"
 import "_demo"
 
-def guiVersion() = "0.1.0"
+def version() = "0.1.0"

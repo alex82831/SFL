@@ -62,6 +62,18 @@ async function main() {
   check('operator ??', scopesAt('a ?? b', '??').includes('keyword.operator.sfl'));
   check('single-quote string does not interpolate', !scopesAt("val s = 'a${x}b'", '${').includes('punctuation.section.interpolation.begin.sfl'));
 
+  // Namespaces: a builtin one colours as a known namespace, a package or module
+  // one by shape, and the member after the dot is the call rather than a field.
+  check('builtin namespace', scopesAt('std.map(xs, f)', 'std').includes('support.class.namespace.sfl'));
+  check('builtin group namespace', scopesAt('math.abs(-1)', 'math').includes('support.class.namespace.sfl'));
+  check('member behind a builtin namespace',
+    scopesAt('std.map(xs, f)', 'map').includes('support.function.builtin.sfl'));
+  check('package namespace', scopesAt('csv.parse(text)', 'csv').includes('entity.name.namespace.sfl'));
+  check('member behind a package namespace',
+    scopesAt('csv.parse(text)', 'parse').includes('entity.name.function.call.sfl'));
+  check('a plain field access is not a namespace',
+    !scopesAt('val n = user.name', 'user').includes('entity.name.namespace.sfl'));
+
   console.log(failures === 0 ? 'grammar: all checks passed' : `grammar: ${failures} check(s) FAILED`);
   process.exit(failures === 0 ? 0 : 1);
 }

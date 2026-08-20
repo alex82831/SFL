@@ -8,9 +8,9 @@
 // BSON types SFL has no native shape for travel as single-key wrapper objects,
 // readable and constructible by hand:
 //
-//   {"$oid": "663d..."}                     ObjectId       (newObjectId() makes one)
+//   {"$oid": "663d..."}                     ObjectId       (mongodb.objectId() makes one)
 //   {"$date": 1723972000000}                UTC datetime, ms since epoch
-//   {"$binary": [1, 2, 3], "$subtype": 0}   binary          (mongoBinary() makes one)
+//   {"$binary": [1, 2, 3], "$subtype": 0}   binary          (mongodb.binary() makes one)
 //   {"$regex": "^a", "$options": "i"}       regular expression
 //   {"$timestamp": {"t": sec, "i": n}}      internal timestamp
 //   {"$decimal128": "<32 hex chars>"}       decimal128, raw bits
@@ -374,7 +374,7 @@ val _oidCounter = atomic(readI32le(bytesAppend(randomBytes(3), [0]), 0))
 
 // A fresh ObjectId wrapper: 4 bytes of seconds, 5 random-per-process bytes,
 // and a 3-byte counter, exactly the layout every driver writes.
-def newObjectId() {
+def objectId() {
   val sec = timeMillis() / 1000
   val n = bitAnd(atomicAdd(_oidCounter, 1), 0xffffff)
   val b = []
@@ -390,13 +390,13 @@ def newObjectId() {
 }
 
 // The creation time of an ObjectId wrapper, as epoch milliseconds.
-def oidTimestamp(oid) {
-  if (_extKind(oid) != "$oid") then error("mongodb: oidTimestamp expects an {\"$oid\": ...} wrapper")
+def objectIdTime(oid) {
+  if (_extKind(oid) != "$oid") then error("mongodb: objectIdTime expects an {\"$oid\": ...} wrapper")
   val b = hexDecodeBytes(oid["$oid"])
   (shiftLeft(b[0], 24) + shiftLeft(b[1], 16) + shiftLeft(b[2], 8) + b[3]) * 1000
 }
 
 // Convenience constructors for the wrapper types.
-def mongoDate(ms = null) = {"$date": ms ?? timeMillis()}
-def mongoBinary(bytes, subtype = 0) = {"$binary": bytes, "$subtype": subtype}
-def mongoRegex(pattern, options = "") = {"$regex": pattern, "$options": options}
+def date(ms = null) = {"$date": ms ?? timeMillis()}
+def binary(bytes, subtype = 0) = {"$binary": bytes, "$subtype": subtype}
+def regex(pattern, options = "") = {"$regex": pattern, "$options": options}

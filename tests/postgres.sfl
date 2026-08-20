@@ -6,8 +6,8 @@
 // 4096 rounds) were computed independently with Python's hashlib.
 
 import "lib/assert"
-import "../packages/postgres/main"
-import "../packages/postgres/proto"
+import "../packages/postgres/main" open
+import "../packages/postgres/proto" open
 
 val _STORED_KEY = "9ccdc662fa9c82996e490287b0fb247d750d15d690b92c29a2d6c5763584ebda"
 val _SERVER_KEY = "9554ff08ee5e5c036f65d6515689bd7f1bebc31c7aeb77436221f2f2fc84c59a"
@@ -160,10 +160,10 @@ val _b4 = []
 pgpPushStr(_b4, "ok")
 check("nul string", _b4, [111, 107, 0])
 
-check("pgArray plain", pgArray([1, 2, 3]), "{1,2,3}")
-check("pgArray strings and null", pgArray(["a b", null, "q\"x"]), "{\"a b\",NULL,\"q\\\"x\"}")
-check("pgArray nested", pgArray([[1], [2, 3]]), "{{1},{2,3}}")
-check("pgArray bools", pgArray([true, false]), "{t,f}")
+check("postgres.array plain", postgres.array([1, 2, 3]), "{1,2,3}")
+check("postgres.array strings and null", postgres.array(["a b", null, "q\"x"]), "{\"a b\",NULL,\"q\\\"x\"}")
+check("postgres.array nested", postgres.array([[1], [2, 3]]), "{{1},{2,3}}")
+check("postgres.array bools", postgres.array([true, false]), "{t,f}")
 
 // ----------------------------------------------- cleartext refusal + accept
 
@@ -173,7 +173,7 @@ val f1 = _fake((state) -> {
   null                                       // client hangs up in refusal
 })
 checkFails("cleartext over plain tcp is refused",
-  () -> pgConnect({host: "127.0.0.1", port: f1.port, user: "u1", password: "pw", timeoutMs: 5000}),
+  () -> postgres.connect({host: "127.0.0.1", port: f1.port, user: "u1", password: "pw", timeoutMs: 5000}),
   "cleartext password over plain TCP")
 await(f1.thread)
 
@@ -192,7 +192,7 @@ val f2 = _fake((state) -> {
   _finishAuth(state)
   _serve(state, (msg) -> null)
 })
-val db2 = pgConnect({host: "127.0.0.1", port: f2.port, user: "u1", password: "pw1",
+val db2 = postgres.connect({host: "127.0.0.1", port: f2.port, user: "u1", password: "pw1",
   db: "mydb", appName: "mytool", allowCleartext: true, timeoutMs: 5000})
 check("server params captured", db2.serverVersion(), "16.0-fake")
 check("backend pid captured", db2.backendPid(), 4242)
@@ -210,7 +210,7 @@ val f3 = _fake((state) -> {
   _finishAuth(state)
   _serve(state, (msg) -> null)
 })
-val db3 = pgConnect({host: "127.0.0.1", port: f3.port, user: "u2", password: "md5pass", timeoutMs: 5000})
+val db3 = postgres.connect({host: "127.0.0.1", port: f3.port, user: "u2", password: "md5pass", timeoutMs: 5000})
 db3.close()
 await(f3.thread)
 
@@ -266,7 +266,7 @@ val f4 = _fake((state) -> {
   _finishAuth(state)
   _serve(state, (msg) -> null)
 })
-val db4 = pgConnect({host: "127.0.0.1", port: f4.port, user: "u3", password: "sflpass", timeoutMs: 5000})
+val db4 = postgres.connect({host: "127.0.0.1", port: f4.port, user: "u3", password: "sflpass", timeoutMs: 5000})
 db4.close()
 await(f4.thread)
 
@@ -296,7 +296,7 @@ val f5 = _fake((state) -> {
   null
 })
 checkFails("a forged server signature is rejected",
-  () -> pgConnect({host: "127.0.0.1", port: f5.port, user: "u3", password: "sflpass", timeoutMs: 5000}),
+  () -> postgres.connect({host: "127.0.0.1", port: f5.port, user: "u3", password: "sflpass", timeoutMs: 5000}),
   "does not verify")
 await(f5.thread)
 
@@ -310,7 +310,7 @@ val f6 = _fake((state) -> {
   null
 })
 checkFails("plus-only servers are named in the refusal",
-  () -> pgConnect({host: "127.0.0.1", port: f6.port, user: "u3", password: "x", timeoutMs: 5000}),
+  () -> postgres.connect({host: "127.0.0.1", port: f6.port, user: "u3", password: "x", timeoutMs: 5000}),
   "SCRAM-SHA-256-PLUS")
 await(f6.thread)
 
@@ -401,12 +401,12 @@ val f7 = _fake((state) -> {
     }
   })
 })
-val db7 = pgConnect({host: "127.0.0.1", port: f7.port, user: "u", password: "", timeoutMs: 5000})
+val db7 = postgres.connect({host: "127.0.0.1", port: f7.port, user: "u", password: "", timeoutMs: 5000})
 
 val types = db7.exec("SELECT types")
 check("exec reports the last tag", types.tag, "SELECT 2")
 val full = db7.queryFull("params back",
-  [null, true, false, 42, -2.5, "text", pgBinary([1, 171]), pgArray([1, 2])])
+  [null, true, false, 42, -2.5, "text", postgres.binary([1, 171]), postgres.array([1, 2])])
 check("params travel in text form", full.rows[0][0],
   "[null, \"t\", \"f\", \"42\", \"-2.5\", \"text\", \"\\\\x01ab\", \"{1,2}\"]")
 val upd = db7.queryFull("no rows", [])
@@ -444,7 +444,7 @@ val f8 = _fake((state) -> {
     }
   })
 })
-val db8 = pgConnect({host: "127.0.0.1", port: f8.port, user: "u", timeoutMs: 5000})
+val db8 = postgres.connect({host: "127.0.0.1", port: f8.port, user: "u", timeoutMs: 5000})
 val trow = db8.query("whatever")[0]
 check("bool converts", trow.b, true)
 check("int converts", trow.i, -7)
@@ -454,8 +454,8 @@ check("numeric stays a string", trow.num, "12.30")
 check("bytea hex becomes bytes", trow.bin, [10, 255, 0])
 check("text stays text", trow.s, "plain")
 check("null is null", trow.nothing, null)
-checkFails("bare arrays must go through pgArray",
-  () -> db8.query("x", [[1, 2]]), "pgArray")
+checkFails("bare arrays must go through postgres.array",
+  () -> db8.query("x", [[1, 2]]), "postgres.array")
 db8.close()
 await(f8.thread)
 

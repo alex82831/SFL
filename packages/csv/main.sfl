@@ -2,10 +2,10 @@
 //
 //   import "csv"
 //
-//   csvParse("a,b\n1,2")                       // [["a", "b"], ["1", "2"]]
-//   csvParseObjects("a,b\n1,2")                // [{a: "1", b: "2"}]
-//   csvStringify([["x", "y,z"]])               // "x,\"y,z\"\n"
-//   csvStringifyObjects([{a: 1, b: 2}])        // "a,b\n1,2\n"
+//   csv.parse("a,b\n1,2")                       // [["a", "b"], ["1", "2"]]
+//   csv.parseObjects("a,b\n1,2")                // [{a: "1", b: "2"}]
+//   csv.stringify([["x", "y,z"]])               // "x,\"y,z\"\n"
+//   csv.stringifyObjects([{a: 1, b: 2}])        // "a,b\n1,2\n"
 //
 // Quoting follows the RFC: fields containing the separator, quotes or line
 // breaks are quoted, and a quote inside a quoted field doubles. Cells always
@@ -13,7 +13,7 @@
 
 // Parses CSV text into an array of rows (arrays of strings). Options:
 // {sep: ","} for another separator (";" and "\t" are the common ones).
-def csvParse(text, opts = {}) {
+def parse(text, opts = {}) {
   if (!isString(text)) then error("csv: expected a string, got " + typeOf(text))
   val sep = _sepOf(opts)
   val rows = []
@@ -74,8 +74,8 @@ def csvParse(text, opts = {}) {
 }
 
 // Parses CSV whose first row is a header into an array of objects keyed by it.
-def csvParseObjects(text, opts = {}) {
-  val rows = csvParse(text, opts)
+def parseObjects(text, opts = {}) {
+  val rows = parse(text, opts)
   if (length(rows) == 0) then return []
   val header = rows[0]
   val out = []
@@ -96,7 +96,7 @@ def csvParseObjects(text, opts = {}) {
 
 // Writes rows (arrays of values; non-strings are rendered with toString) as
 // CSV text, one "\n"-terminated line per row. Options: {sep: ","}.
-def csvStringify(rows, opts = {}) {
+def stringify(rows, opts = {}) {
   if (!isArray(rows)) then error("csv: expected an array of rows, got " + typeOf(rows))
   val sep = _sepOf(opts)
   var out = ""
@@ -115,7 +115,7 @@ def csvStringify(rows, opts = {}) {
 
 // Writes objects under a header row. The column set is the first object's keys
 // unless {columns: [...]} says otherwise; missing keys become empty cells.
-def csvStringifyObjects(objs, opts = {}) {
+def stringifyObjects(objs, opts = {}) {
   if (!isArray(objs)) then error("csv: expected an array of objects, got " + typeOf(objs))
   if (length(objs) == 0) then return ""
   val sep = _sepOf(opts)
@@ -131,7 +131,7 @@ def csvStringifyObjects(objs, opts = {}) {
     }
     push(rows, row)
   }
-  csvStringify(rows, opts)
+  stringify(rows, opts)
 }
 
 def _sepOf(opts) {

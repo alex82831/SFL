@@ -1,11 +1,12 @@
-// Modules: names beginning with `_` belong to the file that declares them, and
-// `import "m" as x` puts a module's surface behind `x` instead of in the global scope.
+// Namespaces: every file declares into one, `_` keeps a name inside the file that
+// wrote it, and `ns.name` reaches across at no run-time cost.
 
 import "lib/assert"
 import "ns/geo" as g
 import "ns/label" as t
 import "ns/wraps" as w
 import "ns/plain"
+import "ns/counter" as counter
 
 // Two modules, the same public name, no collision.
 check("geo.dist", g.dist({"x": 3, "y": 4}), 5.0)
@@ -54,5 +55,21 @@ check("a local may begin with an underscore", usesLocal(), 14)
 check("a plain import exports its surface", visible(2), 6)
 checkFails("a plain import keeps private names to itself",
   () -> _hidden(2), "undefined variable '_hidden'")
+
+// ---------------------------------------------------------------------------
+// A plain file import binds its own name as well as opening it
+// ---------------------------------------------------------------------------
+
+check("the module's name is bound", plain.visible(2), 6)
+check("and the open form is the same binding", visible(2), plain.visible(2))
+
+// ---------------------------------------------------------------------------
+// State belongs to the namespace that declares it
+// ---------------------------------------------------------------------------
+
+check("module state starts where the module put it", counter.value(), 0)
+counter.bump()
+counter.bump()
+check("and is shared by every reader", counter.value(), 2)
 
 report("namespaces")

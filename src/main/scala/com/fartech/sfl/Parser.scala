@@ -60,14 +60,28 @@ final class ParseIntel:
   final case class GlobalRef(name: String, file: String, line: Int)
   val refs = mutable.ArrayBuffer.empty[GlobalRef]
   val importErrors = mutable.ArrayBuffer.empty[SflError]
-  private val defined = mutable.HashSet.empty[String]
+  private val defined = mutable.HashMap.empty[String, mutable.HashSet[String]]
 
-  def declare(name: String): Unit = defined += name
+  /**
+   * The namespace of the file being analysed, and the ones opened into it. A name
+   * declared anywhere else — a package the file imported without opening, another
+   * project's module — is reachable only as `ns.name`, so an unqualified reference
+   * to it is still undefined and still worth a diagnostic.
+   */
+  var rootTag: String = ""
+  private val visible = mutable.LinkedHashSet.empty[String]
+
+  def openInto(into: String, tag: String): Unit = if into == rootTag then visible += tag
+
+  def declare(name: String, tag: String): Unit =
+    defined.getOrElseUpdate(name, mutable.HashSet.empty) += tag
   def ref(name: String, file: String, line: Int): Unit =
     if !name.startsWith("__") && !name.contains('.') && !name.contains('#') then
       refs += GlobalRef(name, file, line)
-  def isDefined(name: String): Boolean = defined.contains(name)
-  def definedNames: Iterable[String] = defined
+
+  private def inScope(tag: String): Boolean = tag == rootTag || visible.contains(tag)
+  def isDefined(name: String): Boolean = defined.get(name).exists(_.exists(inScope))
+  def definedNames: Iterable[String] = defined.collect { case (n, ts) if ts.exists(inScope) => n }
 
 /**
  * Recursive-descent parser that emits already-resolved AST nodes.
@@ -80,12 +94,17 @@ final class Parser(
     val src: SourceRef,
     val globals: Globals,
     val importer: Importer,
-    /** True when this file was reached by `import "m" as x`; see [[globalKey]]. */
-    val qualified: Boolean = false,
     /**
-     * alias -> module, shared with the caller when there is a session to share it with.
-     * The REPL parses each entry separately, so an alias bound by one entry has to
-     * still be there for the next.
+     * The namespace this file's top-level names belong to, when the caller knows it.
+     * `null` asks the importer where the file lives; `""` is the root namespace,
+     * which only the standard library is parsed into — its definitions *are* the
+     * builtin surface. See [[nsTag]].
+     */
+    nsOverride: String = null,
+    /**
+     * alias -> namespace tag, shared with the caller when there is a session to share
+     * it with. The REPL parses each entry separately, so an alias bound by one entry
+     * has to still be there for the next.
      */
     val namespaces: mutable.Map[String, String] = mutable.HashMap.empty,
     /**
@@ -102,23 +121,55 @@ final class Parser(
   private val globalConsts = mutable.HashSet.empty[String]
 
   // -------------------------------------------------------------------------
-  // Modules
+  // Namespaces
   //
-  // A top-level name normally goes straight into the one global table, which is what
-  // makes `import` as simple as inlining. Two kinds of name do not: one beginning
-  // with `_`, which belongs to this file alone, and every name of a file reached
-  // through `import "m" as x`, which is reachable only as `x.name`. Both are stored
-  // under a key that carries the file, so two modules can use the same name without
-  // ever meeting. The key never reaches the reader — errors show the display name.
+  // A top-level name belongs to the namespace of the file that declares it, and is
+  // stored under a key that carries that namespace: `tag#name`. Nothing a program
+  // writes lands in the root table, so a `def map` is the writer's own `map` and
+  // the builtin one keeps working everywhere else — including inside the very
+  // library the writer is calling.
+  //
+  // Two kinds of key exist beside the namespace's own. A name beginning with `_`
+  // belongs to its file alone, so it is keyed by the file rather than the unit the
+  // file is part of; and the builtins sit in the root namespace, whose keys are
+  // bare, so an unqualified name that nothing nearer defines still finds them.
+  //
+  // The key never reaches the reader — errors show the display name.
   // -------------------------------------------------------------------------
 
-  /** Unique per file: the path the importer resolved. */
-  private val moduleTag: String = src.name
+  /** The namespace this file's public top-level names belong to; "" is the root. */
+  private val nsTag: String =
+    if nsOverride != null then nsOverride else importer.namespaceOf(src.name)._1
 
-  /** What a reader calls this module. */
-  private val moduleLabel: String =
-    val base = new File(src.name).getName
-    if base.endsWith(".sfl") then base.dropRight(4) else base
+  /** What a reader calls this namespace. */
+  private val nsLabel: String =
+    if nsOverride != null then
+      if nsOverride.isEmpty then "std" else globals.labelOf(nsOverride)
+    else importer.namespaceOf(src.name)._2
+
+  /** True when other files share this namespace, so a name may be declared later. */
+  private val sharedNs: Boolean = nsTag.nonEmpty && nsTag != src.name
+
+  /**
+   * Whether a second declaration of one public name in this namespace is a mistake
+   * worth refusing. It is, between two files of a package or a project. It is not
+   * from a synthetic source — a REPL line, `eval`, a debugger watch — where
+   * redefining a name is the point.
+   */
+  private val guardsDuplicates: Boolean = sharedNs && !src.name.startsWith("<")
+
+  /** Keys a `_`-private name: privacy is a property of the file, never of the unit. */
+  private val fileTag: String = src.name
+
+  globals.noteNamespace(nsTag, nsLabel)
+
+  /**
+   * Namespaces whose surface is visible here unqualified, in the order they were
+   * opened. A plain `import "m"` of a file adds one; a package import does not,
+   * because a package is a named unit and reaching into it should say so.
+   */
+  private val opened = mutable.LinkedHashSet.empty[String]
+  opened ++= globals.opensOf(nsTag)
 
   private def isPrivate(name: String): Boolean = name.startsWith("_")
 
@@ -133,14 +184,24 @@ final class Parser(
   private lazy val topLevelNames: Set[String] =
     val out = mutable.HashSet.empty[String]
     var depth = 0
+    var nest = 0 // parens and brackets, for the bare-assignment rule below
     var i = 0
     while i < toks.length do
       val k = toks(i).kind
       if k == Tok.LBRACE then depth += 1
       else if k == Tok.RBRACE then depth -= 1
+      else if k == Tok.LPAREN || k == Tok.LBRACKET then nest += 1
+      else if k == Tok.RPAREN || k == Tok.RBRACKET then nest -= 1
+      if k == Tok.LBRACE || k == Tok.RBRACE then ()
       else if depth == 0 && (k == Tok.VAL || k == Tok.VAR || k == Tok.DEF) &&
               i + 1 < toks.length && toks(i + 1).kind == Tok.IDENT then
         out += toks(i + 1).text
+      else if depth == 0 && nest == 0 && k == Tok.IDENT &&
+              i + 1 < toks.length && toks(i + 1).kind == Tok.ASSIGN &&
+              (i == 0 || (toks(i - 1).kind != Tok.DOT && toks(i - 1).kind != Tok.RBRACKET)) then
+        // `name = value` at the top level declares as surely as `var name = value`
+        // does, so the namespace has to know about it before the first reference.
+        out += toks(i).text
       else if depth == 0 && (k == Tok.VAL || k == Tok.VAR) && i + 1 < toks.length then
         // A destructuring declaration. Its binder names are the identifiers that are
         // neither called (followed by '(') nor object keys (followed by ':'), so a
@@ -164,13 +225,60 @@ final class Parser(
       i += 1
     out.toSet
 
-  /** The key a top-level name is stored under. */
-  private def globalKey(name: String): String =
-    if topLevelNames.contains(name) && (isPrivate(name) || qualified) then s"$moduleTag#$name"
-    else name
+  /** The key a top-level declaration in this file is stored under. */
+  private def declKey(name: String): String =
+    if isPrivate(name) then s"$fileTag#$name"
+    else if nsTag.isEmpty then name
+    else s"$nsTag#$name"
 
-  private def globalDisplay(name: String): String =
-    if globalKey(name) == name then name else s"$moduleLabel.$name"
+  /**
+   * The key an unqualified reference resolves to, tried nearest first:
+   *
+   *   1. a name this file declares — including a private one, which no import can
+   *      ever supply;
+   *   2. a name a sibling file of this namespace has already declared;
+   *   3. a name opened into this file by a plain `import`, where exactly one of the
+   *      opened namespaces has it — two is an ambiguity, and [[resolve]] refuses it
+   *      before this ever runs;
+   *   4. a builtin;
+   *   5. otherwise this namespace, so a package module may call a sibling's function
+   *      that has not been parsed yet — and so that a name nothing defines fails
+   *      against the namespace it was written in, whose members are what "did you
+   *      mean" should be searching.
+   */
+  private def refKey(name: String): String =
+    if topLevelNames.contains(name) then declKey(name)
+    else if isPrivate(name) then name // never reachable from outside its file
+    else if nsTag.nonEmpty && globals.find(s"$nsTag#$name") >= 0 then s"$nsTag#$name"
+    else
+      val from = openersOf(name)
+      if from.length == 1 then s"${from.head}#$name"
+      else if globals.find(name) >= 0 then name
+      else if nsTag.nonEmpty then s"$nsTag#$name"
+      else name
+
+  /** The opened namespaces that export `name`. */
+  private def openersOf(name: String): Seq[String] =
+    opened.iterator.filter(tag => globals.find(s"$tag#$name") >= 0).toSeq
+
+  /** Reports a name two opened namespaces both export, instead of picking one. */
+  private def checkAmbiguous(name: String, t: Token): Unit =
+    val from = openersOf(name)
+    if from.length > 1 then
+      val labels = from.map(globals.labelOf)
+      failWithHint(
+        s"'$name' is ambiguous: ${labels.mkString(" and ")} both export it", t,
+        s"qualify it — ${labels.map(l => s"$l.$name").mkString(" or ")} — " +
+          "or import one of them under an alias"
+      )
+
+  /**
+   * How a key is spelled in a message. A namespace's own files write their names
+   * bare and so does everyone reading an error from inside them; only a reference
+   * that had to reach across says so, and those build their own display text (see
+   * [[qualifiedGet]]).
+   */
+  private def globalDisplay(name: String): String = name
 
   /**
    * Counts function literals built so far. A loop body that raises this count captures
@@ -253,10 +361,10 @@ final class Parser(
 
   private def failAt(msg: String, t: Token): Nothing = Err.parse(msg, t.pos, src)
 
-  /** Reports at a token, underlining its text and attaching a hint when there is one. */
-  private def failWithHint(msg: String, t: Token, hint: String): Nothing =
+  /** Reports at a token, underlining its text and attaching the hints there are. */
+  private def failWithHint(msg: String, t: Token, hints: String*): Nothing =
     if t.kind == Tok.EOF then throw new IncompleteInput(msg)
-    Err.parseHint(msg, t.pos, src, math.max(1, t.text.length), hint)
+    Err.parseHint(msg, t.pos, src, math.max(1, t.text.length), hints*)
 
   /** Optional statement separators; newlines already terminate statements implicitly. */
   private def skipSeparators(): Unit = while at(Tok.SEMI) do p += 1
@@ -279,11 +387,20 @@ final class Parser(
       failWithHint(s"'$name' is a reserved word and cannot be a variable", t,
         s"pick another name, such as '${name}Value'")
     if fn == null then
-      val key = globalKey(name)
+      val key = declKey(name)
+      // Two files of one namespace declaring the same public name is the overwrite
+      // namespaces exist to stop, so it is reported rather than resolved by order.
+      if guardsDuplicates && !isPrivate(name) then
+        for first <- globals.noteDecl(key, src.name) do
+          failWithHint(
+            s"'$name' is already defined in '$nsLabel'", t,
+            s"${new File(first).getName} declares it too, and both files share one namespace",
+            "rename one of them, or make it private by starting the name with '_'"
+          )
       val id = globals.id(key, globalDisplay(name))
       if const then globalConsts += key else globalConsts -= key
       globals.setConst(id, const)
-      if intel != null then intel.declare(name)
+      if intel != null then intel.declare(name, nsOf(key))
       TGlobal(id)
     else
       // Redeclaring in the same block is a mistake worth reporting.
@@ -292,7 +409,13 @@ final class Parser(
         failAt(s"variable '$name' is already declared in this scope", t)
       TLocal(fn.alloc(name, const))
 
-  private def resolve(name: String): Target =
+  /**
+   * Where a name refers to, given the token that spelled it: locals first, then
+   * [[refKey]]'s namespace order. The ambiguity check lives here rather than at the
+   * call sites, so every path that reads a name gets it.
+   */
+  private def resolve(name: String, at: Token): Target =
+    if fn == null || !isLocallyBound(name) then checkAmbiguous(name, at)
     var ctx = fn
     var depth = 0
     while ctx != null do
@@ -300,7 +423,7 @@ final class Parser(
       if lv != null then return if depth == 0 then TLocal(lv.slot) else TOuter(depth, lv.slot)
       ctx = ctx.parent
       depth += 1
-    TGlobal(globals.id(globalKey(name), globalDisplay(name)))
+    TGlobal(globals.id(refKey(name), globalDisplay(name)))
 
   private def isLocallyBound(name: String): Boolean =
     var ctx = fn
@@ -309,22 +432,45 @@ final class Parser(
       ctx = ctx.parent
     false
 
-  /** One name of a module reached through `import "m" as alias`. */
+  /**
+   * The namespace an identifier names, or null. Aliases bound by `import` come
+   * first, so a program may rebind one; the builtin namespaces — `std` and one per
+   * builtin group — are there without an import, because the library they slice up
+   * is.
+   */
+  private def namespaceTag(name: String): String =
+    namespaces.get(name) match
+      case Some(tag)                   => tag
+      case None if Builtins.isNamespace(name) => name
+      case None                        => null
+
+  /**
+   * True when the identifier at `t` is a namespace being read as `ns.member`. A
+   * name the file itself binds always wins: a local, and a top-level definition
+   * here, so `val log = {...}` keeps `log.level` meaning that object's field even
+   * where a package or builtin group answers to the same name.
+   */
+  private def isNamespaceRef(t: Token): Boolean =
+    namespaceTag(t.text) != null && !isLocallyBound(t.text) &&
+      !topLevelNames.contains(t.text) &&
+      peek(1).kind == Tok.DOT && peek(2).kind == Tok.IDENT
+
+  /** One name of a namespace reached as `alias.member`. */
   private def qualifiedGet(tag: String, aliasTok: Token, member: Token): Node =
     if isCompoundAssign(cur.kind) || at(Tok.ASSIGN) then
       failWithHint(
         s"cannot assign to '${aliasTok.text}.${member.text}'", member,
-        "a module's names are read-only from outside it; export a function that changes it"
+        "a namespace's names are read-only from outside it; export a function that changes it"
       )
     if isPrivate(member.text) then
       failWithHint(
-        s"'${member.text}' is private to module '${aliasTok.text}'", member,
+        s"'${member.text}' is private to '${aliasTok.text}'", member,
         "names beginning with '_' are visible only inside the file that declares them"
       )
     val id = globals.find(s"$tag#${member.text}")
     if id < 0 then
       failWithHint(
-        s"module '${aliasTok.text}' has no '${member.text}'", member,
+        s"'${aliasTok.text}' has no '${member.text}'", member,
         Err.didYouMean(member.text, globals.membersOf(tag))
       )
     from(member, new GlobalGet(id, s"${aliasTok.text}.${member.text}", member.line))
@@ -335,14 +481,14 @@ final class Parser(
       val lv = ctx.find(name)
       if lv != null then return lv.const
       ctx = ctx.parent
-    globalConsts.contains(globalKey(name))
+    globalConsts.contains(refKey(name))
 
   private def isDeclared(name: String): Boolean =
     var ctx = fn
     while ctx != null do
       if ctx.find(name) != null then return true
       ctx = ctx.parent
-    globals.find(globalKey(name)) >= 0
+    globals.find(refKey(name)) >= 0
 
   private def getNode(t: Target, name: String, line: Int): Node = t match
     case TLocal(slot)        => new LocalGet(slot, name, line)
@@ -357,7 +503,7 @@ final class Parser(
     case TLocal(slot)        => new LocalSet(slot, value, line)
     case TOuter(depth, slot) => new OuterSet(depth, slot, value, line)
     case TGlobal(id)         =>
-      if intel != null && name.nonEmpty then intel.declare(name)
+      if intel != null && name.nonEmpty then intel.declare(name, nsOf(declKey(name)))
       new GlobalSet(id, value, line)
 
   // -------------------------------------------------------------------------
@@ -455,10 +601,17 @@ final class Parser(
     // Declare before parsing the body so the function can call itself.
     val target =
       if fn == null then
-        val key = globalKey(nameTok.text)
+        val key = declKey(nameTok.text)
+        if guardsDuplicates && !isPrivate(nameTok.text) then
+          for first <- globals.noteDecl(key, src.name) do
+            failWithHint(
+              s"'${nameTok.text}' is already defined in '$nsLabel'", nameTok,
+              s"${new File(first).getName} declares it too, and both files share one namespace",
+              "rename one of them, or make it private by starting the name with '_'"
+            )
         val id = globals.id(key, globalDisplay(nameTok.text))
         globalConsts -= key
-        if intel != null then intel.declare(nameTok.text)
+        if intel != null then intel.declare(nameTok.text, nsOf(key))
         TGlobal(id)
       else
         val existing = fn.find(nameTok.text)
@@ -551,20 +704,21 @@ final class Parser(
   private def importStatement(): Node =
     val kw = advance()
     val fileTok = expect(Tok.STR, "after 'import'")
-    // `as` is contextual rather than reserved, so a program that already uses it as a
-    // name keeps working.
+    // `as` and `open` are contextual rather than reserved, so a program that already
+    // uses either as a name keeps working.
     val alias =
       if at(Tok.IDENT) && cur.text == "as" && peek(1).kind == Tok.IDENT then
         advance()
         Some(advance())
       else None
+    val openTok = if at(Tok.IDENT) && cur.text == "open" then Some(advance()) else None
 
-    if intel == null then importResolved(kw, fileTok, alias)
+    if intel == null then importResolved(kw, fileTok, alias, openTok)
     else
       // Language-server mode: one bad import becomes one diagnostic, and the
       // rest of the file still parses — an editor is mostly looking at files
       // whose imports are broken precisely while the user is typing them.
-      try importResolved(kw, fileTok, alias)
+      try importResolved(kw, fileTok, alias, openTok)
       catch
         case e: SflError =>
           intel.importErrors += e
@@ -573,34 +727,77 @@ final class Parser(
           intel.importErrors += new ParseError(e.reason, fileTok.pos, src)
           new Nop(kw.line)
 
-  /** The importing work itself; raises located errors exactly as before. */
-  private def importResolved(kw: Token, fileTok: Token, alias: Option[Token]): Node =
+  /**
+   * The importing work itself; raises located errors exactly as before.
+   *
+   * An import does two separable things. It binds a namespace — `csv`, or whatever
+   * `as` renames it to — which is always available and always costs nothing at run
+   * time, because `csv.parse` resolves to a global right here. And it may *open* the
+   * namespace, putting its surface in this file's scope unqualified.
+   *
+   * Opening is the default for a plain file, where the module is part of the program
+   * being written; it is not the default for a unit with a manifest — a package or
+   * another project — whose surface should say where it came from. `open` asks for
+   * it either way.
+   */
+  private def importResolved(
+      kw: Token, fileTok: Token, alias: Option[Token], openTok: Option[Token]
+  ): Node =
     val path = importer.pathOf(fileTok.text, src, fileTok.pos)
-    importer.checkQualification(path, fileTok.text, alias.isDefined, fileTok.pos, src)
+    val (tag, label) = importer.namespaceOf(path)
+    globals.noteNamespace(tag, label)
+
     for a <- alias do
-      if namespaces.contains(a.text) then
-        failAt(s"'${a.text}' is already the name of an imported module", a)
-      namespaces(a.text) = path
+      namespaces.get(a.text) match
+        case Some(bound) if bound != tag =>
+          failWithHint(
+            s"'${a.text}' already names another namespace", a,
+            s"it is bound to '${globals.labelOf(bound)}'; pick a different alias")
+        case _ => namespaces(a.text) = tag
+    if alias.isEmpty && tag != nsTag then
+      // The default alias is what the unit calls itself. A second import of the
+      // same unit rebinds it to the same tag, so this is idempotent; a clash with
+      // a different unit is worth reporting where it happens.
+      namespaces.get(label) match
+        case Some(bound) if bound != tag =>
+          failWithHint(
+            s"'$label' already names another namespace", fileTok,
+            s"it is bound to '${globals.labelOf(bound)}'",
+            s"import this one under an alias: import \"${fileTok.text}\" as …")
+        case _ => namespaces(label) = tag
+
+    val opens = openTok.isDefined || (alias.isEmpty && !importer.isUnit(tag))
+    if opens && tag != nsTag then
+      opened += tag
+      globals.noteOpen(nsTag, tag)
+      if intel != null then intel.openInto(nsTag, tag)
 
     importer.begin(path) match
       case None => new Nop(kw.line)
       case Some(text) =>
-        // Imported code is parsed into the current global scope so its definitions
-        // are visible, and inlined so it runs exactly once at the point of import.
-        // A qualified import parses the module with its own keys instead.
+        // Imported code is parsed into its own namespace and inlined here, so it
+        // runs exactly once at the point of import.
+        val sub = new Parser(SourceRef(path, text), globals, importer, tag, intel = intel)
         val block =
-          try new Parser(SourceRef(path, text), globals, importer, alias.isDefined, intel = intel)
-            .parseProgram()
+          try sub.parseProgram()
           finally importer.finish(path)
-        // A plain import of a package module is tagged with its origin, so the
-        // ahead-of-time compiler may link a prebuilt archive instead of emitting
-        // the module's code again. The tag changes nothing for the interpreter —
-        // a ModuleBlock evaluates exactly as the Block it extends — and a qualified
-        // import keeps the plain Block, compiling from source as before.
+        importer.recordSurface(tag, sub.exportedNames)
+        // A package module is tagged with its origin, so the ahead-of-time compiler
+        // may link a prebuilt archive instead of emitting the module's code again.
+        // The tag changes nothing for the interpreter — a ModuleBlock evaluates
+        // exactly as the Block it extends.
         importer.packageProvenance(path) match
-          case Some((pkg, moduleRel, versionDir)) if !alias.isDefined =>
+          case Some((pkg, moduleRel, versionDir)) =>
             new ModuleBlock(block.stmts, block.line, pkg, moduleRel, versionDir, path, text)
-          case _ => block
+          case None => block
+
+  /** The public top-level names this file declares. */
+  def exportedNames: Set[String] = topLevelNames.filterNot(isPrivate)
+
+  /** The namespace a key belongs to; a bare key is the root namespace. */
+  private def nsOf(key: String): String =
+    val i = key.lastIndexOf('#')
+    if i < 0 then "" else key.substring(0, i)
 
   private def whileStatement(): Node =
     val kw = advance()
@@ -808,7 +1005,7 @@ final class Parser(
         if isDeclared(start.text) then
           if isConstTarget(start.text) then
             failAt(s"cannot assign to '${start.text}' because it is declared with 'val'", start)
-          return setNode(resolve(start.text), value, start.line, start.text)
+          return setNode(resolve(start.text, start), value, start.line, start.text)
         else
           return setNode(declare(start.text, const = false, start), value, start.line)
       if isCompoundAssign(nxt) then
@@ -819,7 +1016,7 @@ final class Parser(
           failAt(s"cannot update '${start.text}' before it is declared", start)
         if isConstTarget(start.text) then
           failAt(s"cannot assign to '${start.text}' because it is declared with 'val'", start)
-        val t = resolve(start.text)
+        val t = resolve(start.text, start)
         val combined = new Arith(compoundOp(opTok.kind), getNode(t, start.text, start.line), value, start.line)
         return setNode(t, combined, start.line)
 
@@ -1087,16 +1284,15 @@ final class Parser(
         val proto = lambdaBody(params, nameTok.line)
         makeFun(proto, nameTok.line)
       case Tok.IDENT =>
-        // `alias.name` is resolved here, at parse time: a qualified module's names are
-        // ordinary globals stored under a key that carries their file, so reaching one
-        // costs exactly what reaching any other global costs.
-        if namespaces.contains(t.text) && !isLocallyBound(t.text) &&
-           peek(1).kind == Tok.DOT && peek(2).kind == Tok.IDENT then
+        // `alias.name` is resolved here, at parse time: a namespace's names are
+        // ordinary globals stored under a key that carries the namespace, so reaching
+        // one costs exactly what reaching any other global costs.
+        if isNamespaceRef(t) then
           advance(); advance()
-          qualifiedGet(namespaces(t.text), t, advance())
+          qualifiedGet(namespaceTag(t.text), t, advance())
         else
           advance()
-          getNode(resolve(t.text), t.text, t.line)
+          getNode(resolve(t.text, t), t.text, t.line)
       case Tok.LPAREN =>
         if looksLikeLambdaParams(p) then lambda()
         else
@@ -1439,7 +1635,7 @@ final class Parser(
           val name = t.text.substring(1)
           if dryRun then new PatOut(null, null, binds = false)
           else
-            val read = getNode(resolve(name), name, t.line)
+            val read = getNode(resolve(name, t), name, t.line)
             new PatOut(new Cmp(CmpOp.Eq, subj(), read, t.line), null, binds = false)
         else if peek(1).kind == Tok.LPAREN || dottedExtractorAhead() then
           extractorPattern(subj, inAlt, dryRun, names)
@@ -1635,13 +1831,13 @@ final class Parser(
     val line = nameTok.line
     if at(Tok.DOT) then
       var callee: Node = null
-      if namespaces.contains(nameTok.text) && !isLocallyBound(nameTok.text) &&
-         peek(1).kind == Tok.IDENT then
+      if namespaceTag(nameTok.text) != null && !isLocallyBound(nameTok.text) &&
+         !topLevelNames.contains(nameTok.text) && peek(1).kind == Tok.IDENT then
         advance() // '.'
         val member = advance()
-        if !dryRun then callee = qualifiedGet(namespaces(nameTok.text), nameTok, member)
+        if !dryRun then callee = qualifiedGet(namespaceTag(nameTok.text), nameTok, member)
       else if !dryRun then
-        callee = getNode(resolve(nameTok.text), nameTok.text, line)
+        callee = getNode(resolve(nameTok.text, nameTok), nameTok.text, line)
       while at(Tok.DOT) do
         val dotTok = advance()
         val member = cur
@@ -1662,7 +1858,7 @@ final class Parser(
         case None =>
           // The extractor resolves lexically: a local function works, exactly as any
           // other call site would see it.
-          val callee = if dryRun then null else getNode(resolve(nameTok.text), nameTok.text, line)
+          val callee = if dryRun then null else getNode(resolve(nameTok.text, nameTok), nameTok.text, line)
           extractorApply(callee, subjF, inAlt, dryRun, names, line)
 
   /** The call-and-test half every non-type extractor shares, entered after its '('. */
@@ -1749,14 +1945,99 @@ final class Parser(
 final class Importer(val baseDir: File):
   private val loaded = mutable.HashSet.empty[String]
   private val inFlight = mutable.LinkedHashSet.empty[String]
-  /**
-   * How each module was first imported. A module is parsed once, and whether its
-   * names went into the global scope or under its own key was decided then, so
-   * importing it the other way later would silently reach the wrong table.
-   */
-  private val qualification = mutable.HashMap.empty[String, (Boolean, String)]
 
   private def libDir: String = sys.env.getOrElse("SFL_HOME", ".") + File.separator + "libs"
+
+  // -------------------------------------------------------------------------
+  // Namespaces
+  //
+  // Every file belongs to exactly one namespace, decided by where the file is and
+  // not by how it was imported — which is what lets the same module be imported
+  // plainly here and behind an alias there without its names moving.
+  //
+  // A file under an `sfl.pkg` manifest shares that unit's namespace with its
+  // siblings: a package's seven modules are one `httpd`, and a project's `src/`
+  // files are one project, so neither has to import itself to see its own names.
+  // A file with no manifest above it is a namespace of its own.
+  //
+  // The tag is the manifest directory (or the file), so two units can carry the
+  // same name without ever meeting; the label is what a person calls it.
+  // -------------------------------------------------------------------------
+
+  private val nsCache = mutable.HashMap.empty[String, (String, String)]
+  private val manifestCache = mutable.HashMap.empty[String, Option[(String, String)]]
+  private val unitTags = mutable.HashSet.empty[String]
+
+  /**
+   * True when a namespace names a unit — a package or a project, something with an
+   * `sfl.pkg` that says what it is called. A plain import of one binds its name and
+   * stops there; only a bare file, which is just a piece of the program being
+   * written, puts its surface in the importer's scope.
+   */
+  def isUnit(tag: String): Boolean = unitTags.contains(tag)
+
+  /** The (tag, label) of the namespace `path` belongs to. */
+  def namespaceOf(path: String): (String, String) =
+    nsCache.getOrElseUpdate(path, {
+      val f = new File(path)
+      // A synthetic source — `<repl>`, `<sfl-build>`, a debugger watch — is a
+      // namespace of its own wherever the process happens to be running.
+      if !f.isFile then (path, path)
+      else
+        val dir = if f.getParentFile != null then f.getParentFile else baseDir
+        unitAbove(dir) match
+          case Some(unit) => unitTags += unit._1; unit
+          case None =>
+            val base = f.getName
+            (path, if base.endsWith(".sfl") then base.dropRight(4) else base)
+    })
+
+  /**
+   * The nearest `sfl.pkg` at or above `dir`, as the namespace it names.
+   *
+   * Walked as a loop rather than by recursion: every level shares one cache, and
+   * a nested `getOrElseUpdate` on a mutable map is not defined to work.
+   */
+  private def unitAbove(dir: File): Option[(String, String)] =
+    val chain = mutable.ArrayBuffer.empty[String]
+    // Canonical first: `new File("tests").getParentFile` is null, and walking up
+    // from a relative path would stop before it ever reached the project root.
+    var d = if dir == null then null else
+      try dir.getCanonicalFile catch case _: java.io.IOException => dir.getAbsoluteFile
+    var found: Option[(String, String)] = None
+    var depth = 0
+    while d != null && found.isEmpty && depth < 64 do
+      val key = try d.getCanonicalPath catch case _: java.io.IOException => d.getPath
+      manifestCache.get(key) match
+        case Some(cached) => found = cached
+        case None =>
+          val manifest = PkgTool.manifestFile(d)
+          if manifest.isFile then
+            found =
+              try
+                val name = PkgTool.readManifest(d).name
+                if name.nonEmpty then Some((key, name)) else None
+              catch case _: Throwable => None
+            if found.isDefined then manifestCache(key) = found
+          if found.isEmpty then chain += key
+      d = d.getParentFile
+      depth += 1
+    // Every directory passed on the way up answers the same way this one did.
+    for key <- chain do manifestCache(key) = found
+    found
+
+  /**
+   * The public names a namespace exports, filled as each of its files is parsed.
+   * A module is parsed once, so a second import — and `eval`, and the language
+   * server asking after the fact — reads the surface from here.
+   */
+  private val surfaces = mutable.HashMap.empty[String, mutable.LinkedHashSet[String]]
+
+  def recordSurface(tag: String, names: Iterable[String]): Unit =
+    val set = surfaces.getOrElseUpdate(tag, mutable.LinkedHashSet.empty)
+    for n <- names if !n.startsWith("_") do set += n
+
+  def surfaceOf(tag: String): Set[String] = surfaces.get(tag).map(_.toSet).getOrElse(Set.empty)
 
   // -------------------------------------------------------------------------
   // Packages
@@ -1949,22 +2230,6 @@ final class Importer(val baseDir: File):
               s"packages are searched in ./sfl_packages and ${PkgTool.globalRoot.getPath}; " +
                 "'sfl pkg install' puts them there"
             )
-
-  /** Rejects importing one module both plainly and under an alias. */
-  def checkQualification(
-      path: String, name: String, qualified: Boolean, pos: Pos, fromSource: SourceRef
-  ): Unit =
-    qualification.get(path) match
-      case None => qualification(path) = (qualified, fromSource.name)
-      case Some((first, where)) if first != qualified =>
-        val (a, b) = if first then ("import \"" + name + "\" as …", "import \"" + name + "\"")
-                     else ("import \"" + name + "\"", "import \"" + name + "\" as …")
-        Err.parseHint(
-          s"module '$name' is imported two different ways", pos, fromSource, name.length + 2,
-          s"$where already used `$a`, and this is `$b`",
-          "a module is parsed once, so it has to be imported the same way everywhere"
-        )
-      case _ => ()
 
   /**
    * Returns the module's contents, or `None` when it has already been imported. The

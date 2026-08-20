@@ -361,7 +361,10 @@ async function main() {
     'def greet(who) = "hi, " + who\n');
   fs.mkdirSync(pathmod.join(proj, 'src'));
   const projMain = pathmod.join(proj, 'src', 'main.sfl');
-  fs.writeFileSync(projMain, 'import "toolkit"\nprintln(greet("sfl"))\n');
+  // A package binds its namespace rather than opening it, so the call says where
+  // `greet` comes from; the unqualified spelling is checked below and must be a
+  // diagnostic.
+  fs.writeFileSync(projMain, 'import "toolkit"\nprintln(toolkit.greet("sfl"))\n');
 
   const proc2 = spawn(sfl, ['lsp'], { stdio: ['pipe', 'pipe', 'inherit'], cwd: proj });
   const got = await new Promise((resolve, reject) => {
@@ -400,6 +403,52 @@ async function main() {
   check('project-local packages resolve with cwd at project root', got.length === 0,
     JSON.stringify(got));
   proc2.kill();
+
+  // -- namespaces -------------------------------------------------------------------
+  // A package import binds `csv`, `toolkit`, whatever the unit calls itself; the
+  // names behind it are not in scope unqualified, and the server says so.
+  const nsUri = 'file://' + pathmod.join(dir, 'ns.sfl');
+  const nsText = 'import "geo"\nprintln(geo.area(2))\nprintln(std.map([1], (x) -> x))\n';
+  diagsP3 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didOpen', {
+    textDocument: { uri: nsUri, languageId: 'sfl', version: 1, text: nsText },
+  });
+  const nsDiags = (await diagsP3).params.diagnostics;
+  check('a namespaced call is not undefined', nsDiags.length === 0, JSON.stringify(nsDiags));
+
+  const nsComp = await request('textDocument/completion', {
+    textDocument: { uri: nsUri }, position: { line: 1, character: 12 },
+  });
+  check('completion behind a module namespace offers its members',
+    nsComp.result.some((i) => i.label === 'area'), JSON.stringify(nsComp.result).slice(0, 200));
+
+  const stdComp = await request('textDocument/completion', {
+    textDocument: { uri: nsUri }, position: { line: 2, character: 12 },
+  });
+  check('completion behind std offers the builtins',
+    stdComp.result.some((i) => i.label === 'map'), JSON.stringify(stdComp.result).slice(0, 200));
+
+  const stdSig = await request('textDocument/signatureHelp', {
+    textDocument: { uri: nsUri }, position: { line: 2, character: 20 },
+  });
+  check('signature help works through std',
+    !!stdSig.result && /map\(/.test(stdSig.result.signatures[0].label),
+    JSON.stringify(stdSig.result));
+
+  const stdHover = await request('textDocument/hover', {
+    textDocument: { uri: nsUri }, position: { line: 2, character: 14 },
+  });
+  check('hover works through std',
+    !!stdHover.result && /builtin/.test(stdHover.result.contents.value),
+    JSON.stringify(stdHover.result));
+
+  const nsGlobals = await request('textDocument/completion', {
+    textDocument: { uri: nsUri }, position: { line: 2, character: 0 },
+  });
+  check('the namespaces themselves are offered',
+    nsGlobals.result.some((i) => i.label === 'std') &&
+    nsGlobals.result.some((i) => i.label === 'geo'),
+    JSON.stringify(nsGlobals.result.filter((i) => /namespace/.test(i.detail || '')).slice(0, 8)));
 
   // -- shutdown ---------------------------------------------------------------------
   const bye = await request('shutdown', null);

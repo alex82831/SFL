@@ -3,7 +3,8 @@
 // timers, and the platform launcher that opens a native-feeling window on
 // macOS, Linux and Windows.
 //
-//   val app = guiApp({title: "Demo", root: (ctx) -> column([...])})
+//   import "gui" open
+//   val app = gui.app({title: "Demo", root: (ctx) -> column([...])})
 //   app.run()          // serve + open a window + block until it closes
 //
 // Threading model: every handler, builder, timer and binding runs on the
@@ -38,12 +39,12 @@ val _defaults = {
   onDisconnect: null
 }
 
-def guiApp(opts = {}) {
-  if (!isObject(opts)) { error("gui: guiApp takes an options object") }
+def app(opts = {}) {
+  if (!isObject(opts)) { error("gui: app takes an options object") }
   val cfg = {}
   for (k in keys(_defaults)) { cfg[k] = get(opts, k, _defaults[k]) }
   for (k in keys(opts)) {
-    if (!contains(_defaults, k)) { error("gui: unknown guiApp option '${k}'") }
+    if (!contains(_defaults, k)) { error("gui: unknown app option '${k}'") }
   }
 
   val pages = {}
@@ -51,7 +52,7 @@ def guiApp(opts = {}) {
     for (p in keys(cfg.pages)) { pages[p] = cfg.pages[p] }
   }
   if (cfg.root != null) { pages["/"] = cfg.root }
-  if (length(pages) == 0) { error("gui: guiApp needs a root builder or a pages map") }
+  if (length(pages) == 0) { error("gui: app needs a root builder or a pages map") }
 
   val token = hexEncodeBytes(randomBytes(16))
   val ch = channel()
@@ -422,25 +423,25 @@ def guiApp(opts = {}) {
     val table = []
     val page = giClientPage(cfg, token)
     for (p in keys(pages)) {
-      if (p != "*") { push(table, GET(p, (req) -> respondHtml(200, page))) }
+      if (p != "*") { push(table, httpd.GET(p, (req) -> httpd.respondHtml(200, page))) }
     }
     if (contains(pages, "*")) {
-      push(table, GET("/*rest", (req) -> respondHtml(200, page)))
+      push(table, httpd.GET("/*rest", (req) -> httpd.respondHtml(200, page)))
     }
     if (cfg.assets != null) {
       for (prefix in keys(cfg.assets)) {
-        push(table, STATIC(prefix, cfg.assets[prefix]))
+        push(table, httpd.STATIC(prefix, cfg.assets[prefix]))
       }
     }
-    push(table, WS("/__gui_ws", wsHooks(),
+    push(table, httpd.WS("/__gui_ws", wsHooks(),
       {maxMessageBytes: cfg.maxUploadBytes + 1048576, idleMs: 90000}))
-    routes(table)
+    httpd.routes(table)
   }
 
   def start() {
     if (state.running) { error("gui: the app is already running") }
     if (atomicGet(stopFlag) != 0) { error("gui: the app was stopped") }
-    state.srv = httpServer({
+    state.srv = httpd.server({
       port: cfg.port,
       handler: buildRoutes(),
       quiet: cfg.quiet,

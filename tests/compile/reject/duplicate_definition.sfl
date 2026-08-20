@@ -1,0 +1,3 @@
+// EXPECT: 'shared' is already defined in 'dup'
+import "dup/main"
+println(dup.shared())

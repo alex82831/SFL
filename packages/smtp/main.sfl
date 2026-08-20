@@ -2,7 +2,7 @@
 //
 //   import "smtp"
 //
-//   val m = smtpConnect("smtp.example.com", 587, {
+//   val m = smtp.connect("smtp.example.com", 587, {
 //     tls: "starttls", user: "app@example.com", password: "secret"
 //   })
 //   m.send({
@@ -21,20 +21,20 @@
 // whichever the server offers) is refused over plaintext unless
 // {allowInsecureAuth: true} — passwords do not belong on the wire in the
 // clear. The message builder handles multipart/alternative (text + html),
-// attachments (base64), UTF-8 headers and dot-stuffing; smtpBuildMime
+// attachments (base64), UTF-8 headers and dot-stuffing; buildMime
 // exposes it for tests and previews.
 
 // ---------------------------------------------------------------- connect
 
 // opts: tls ("starttls" | "implicit"), caFile, user, password,
 // timeoutMs (10000), heloName ("sfl.invalid"), allowInsecureAuth (false).
-def smtpConnect(host, port = 25, opts = {}) {
+def connect(host, port = 25, opts = {}) {
   val timeoutMs = get(opts, "timeoutMs", 10000)
   val tls = get(opts, "tls", null)
   val helo = get(opts, "heloName", "sfl.invalid")
   val caFile = get(opts, "caFile", null)
 
-  val sock = connect(host, port, timeoutMs)
+  val sock = std.connect(host, port, timeoutMs)
   val state = {sock: sock, timeoutMs: timeoutMs, caps: []}
   var isTls = false
   if (tls == "implicit") {
@@ -72,12 +72,12 @@ def smtpConnect(host, port = 25, opts = {}) {
   }
 
   {
-    // Sends one message; `mail` is documented on smtpBuildMime. Returns the
+    // Sends one message; `mail` is documented on buildMime. Returns the
     // server's acceptance line (queue id on most servers).
     send: (mail) -> {
       guard()
-      val fromAddr = smtpAddress(_need(mail, "from"))
-      val rcpts = map(_smtpRecipients(mail), smtpAddress)
+      val fromAddr = address(_need(mail, "from"))
+      val rcpts = map(_smtpRecipients(mail), address)
       if (isEmpty(rcpts)) then error("smtp: the mail names no recipients (to/cc/bcc)")
       _smtpCommand(state, "MAIL FROM:<" + fromAddr + ">", 250)
       for (r in rcpts) {
@@ -87,7 +87,7 @@ def smtpConnect(host, port = 25, opts = {}) {
         }
       }
       _smtpCommand(state, "DATA", 354)
-      val body = smtpBuildMime(mail)
+      val body = buildMime(mail)
       socketWriteBytes(state.sock, utf8Encode(_smtpDotStuff(body)))
       val done = _smtpCommand(state, ".", 250)
       join(done.lines, " ")
@@ -121,7 +121,7 @@ def smtpConnect(host, port = 25, opts = {}) {
 // CR and LF are refused anywhere in the input — an address is the one string
 // a caller might pass straight from a form, and newlines in it are how
 // header injection happens.
-def smtpAddress(s) {
+def address(s) {
   if (contains(s, "\n") || contains(s, "\r")) then error("smtp: malformed address '" + s + "'")
   val lt = indexOf(s, "<")
   val addr = if (lt >= 0) {
@@ -262,7 +262,7 @@ def _smtpAuth(state, user, password) {
 //   text, html      bodies; both make multipart/alternative
 //   headers         {name: value} extras
 //   attachments     [{name, bytes | text, contentType?}]
-def smtpBuildMime(mail) {
+def buildMime(mail) {
   val out = []
   val headers = get(mail, "headers", {})
   push(out, "From: " + _smtpHeaderAddr(_need(mail, "from")))
@@ -271,7 +271,7 @@ def smtpBuildMime(mail) {
   if (contains(mail, "replyTo")) then push(out, "Reply-To: " + _smtpHeaderAddr(mail.replyTo))
   push(out, "Subject: " + _smtpHeaderText(get(mail, "subject", "")))
   push(out, "Date: " + formatTime(timeMillis(), "%a, %d %b %Y %H:%M:%S +0000", true))
-  push(out, "Message-ID: <" + uuid() + "@" + smtpAddressDomain(_need(mail, "from")) + ">")
+  push(out, "Message-ID: <" + uuid() + "@" + addressDomain(_need(mail, "from")) + ">")
   push(out, "MIME-Version: 1.0")
   for (k in keys(headers)) {
     push(out, k + ": " + headers[k])
@@ -329,8 +329,8 @@ def smtpBuildMime(mail) {
 }
 
 // The domain after the @, for Message-ID.
-def smtpAddressDomain(s) {
-  val addr = smtpAddress(s)
+def addressDomain(s) {
+  val addr = address(s)
   substring(addr, indexOf(addr, "@") + 1, length(addr))
 }
 
@@ -377,9 +377,9 @@ def _smtpB64Lines(bytes) {
 // "Name <a@b>": the name gets encoded-word treatment when it needs it.
 def _smtpHeaderAddr(s) {
   val lt = indexOf(s, "<")
-  if (lt < 0) then return smtpAddress(s)
+  if (lt < 0) then return address(s)
   val name = trim(substring(s, 0, lt))
-  val addr = smtpAddress(s)
+  val addr = address(s)
   if (name == "") then return addr
   _smtpHeaderText(name) + " <" + addr + ">"
 }

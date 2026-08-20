@@ -1,18 +1,20 @@
 import "lib/assert"
-
-// Establish the counter the module inspects before importing it.
-globalCounters = {}
-geometryLoads = 0
-
 import "lib/geometry"
 
 check("imported constant", round(TAU, 4), 6.2832)
 check("imported function", round(circleArea(2.0), 2), 12.57)
-check("module ran once", geometryLoads, 1)
+check("module ran once", loads, 1)
 
 // Importing the same module again must be a no-op rather than re-running it.
 import "lib/geometry"
-check("second import is a no-op", geometryLoads, 1)
+check("second import is a no-op", loads, 1)
+
+// A plain file import binds the module's name as well as opening it, so the same
+// definitions are reachable either way and they are the same definitions.
+check("reachable through the module's own name", geometry.loads, 1)
+check("qualified and plain are one binding", geometry.circumference(1.0), TAU)
+check("qualified function is a value", map([1.0, 2.0], geometry.circleArea),
+  [circleArea(1.0), circleArea(2.0)])
 
 // Imports are resolved relative to the importing file, so this works from any cwd.
 check("assert module is loaded", isFunction(check), true)

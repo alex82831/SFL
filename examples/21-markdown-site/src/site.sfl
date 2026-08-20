@@ -12,7 +12,7 @@ def frontMatter(text) {
   val end = strFind(text, "\n+++", 3)
   if (end < 0) then return {meta: {}, body: text}
   {
-    meta: tomlParse(substring(text, 4, end)),
+    meta: toml.parse(substring(text, 4, end)),
     body: trimStart(substring(text, end + 4, length(text)))
   }
 }
@@ -33,15 +33,15 @@ def loadPosts(dir) {
       title: fm.meta?.title ?? slugOf(f),
       date: fm.meta?.date ?? "",
       tags: fm.meta?.tags ?? [],
-      html: mdToHtml(fm.body)
+      html: markdown.toHtml(fm.body)
     })
   }
   reverse(posts)                     // filename-dated: newest first
 }
 
 def buildSite(postsDir, templatesDir, outDir, siteName) {
-  val page = tplCompile(readFile(joinPath(templatesDir, "page.html")))
-  val index = tplCompile(readFile(joinPath(templatesDir, "index.html")))
+  val page = template.compile(readFile(joinPath(templatesDir, "page.html")))
+  val index = template.compile(readFile(joinPath(templatesDir, "index.html")))
   mkdirs(outDir)
   val posts = loadPosts(postsDir)
   for (p in posts) {

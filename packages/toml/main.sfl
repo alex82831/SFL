@@ -2,9 +2,9 @@
 //
 //   import "toml"
 //
-//   val cfg = tomlParse(readFile("app.toml"))
+//   val cfg = toml.parse(readFile("app.toml"))
 //   cfg.server.port
-//   writeFile("out.toml", tomlStringify({server: {port: 8080}}))
+//   writeFile("out.toml", toml.stringify({server: {port: 8080}}))
 //
 // What it speaks, of TOML 1.0: bare/quoted/dotted keys, basic and literal
 // strings in single- and multi-line forms with the full escape set, integers
@@ -13,12 +13,12 @@
 // tables, [tables], [[arrays of tables]], and # comments. Dates and times
 // (1979-05-27T07:32:00Z and friends) come back as their literal strings —
 // SFL has no date kind, and the string round-trips into the datetime
-// package's dtParse. Duplicate keys and table redefinitions are errors, as
-// the spec demands. TOML has no null: tomlStringify refuses one.
+// package's datetime.parse. Duplicate keys and table redefinitions are errors, as
+// the spec demands. TOML has no null: stringify refuses one.
 
 // ------------------------------------------------------------------ parse
 
-def tomlParse(text) {
+def parse(text) {
   val c = {s: text, at: 0, line: 1, root: {}, tables: []}
   var current = c.root
   while (true) {
@@ -453,7 +453,7 @@ def _tArrayTable(c, path) {
 
 // Renders an object as a TOML document: scalar keys first, then [tables]
 // and [[table arrays]], depth first — the order TOML requires.
-def tomlStringify(obj) {
+def stringify(obj) {
   if (!isObject(obj)) then error("toml: only an object can be a TOML document")
   val out = []
   _tsTable(out, obj, [])

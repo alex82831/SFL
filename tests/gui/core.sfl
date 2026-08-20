@@ -2,8 +2,7 @@
 // no server, no browser, no threads except where a test spawns one.
 
 import "lib/assert"
-import "gui"
-
+import "gui" open
 // ------------------------------------------------------------- signals
 
 val a = signal(1)
