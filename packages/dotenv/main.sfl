@@ -1,0 +1,94 @@
+// dotenv — .env files: KEY=VALUE lines into the process environment.
+//
+//   import "dotenv"
+//
+//   dotenvLoad()                    // reads ./.env if present, fills the env
+//   getEnv("DATABASE_URL")
+//
+// The format is the common ground of the dotenv family: one KEY=VALUE per
+// line, `#` comments (whole-line, or after an unquoted value), an optional
+// `export ` prefix, single quotes literal, double quotes with \n \r \t \\ \"
+// escapes, unquoted values trimmed. Real environment variables win over the
+// file unless {override: true} — so a deployment can override what a
+// developer checked in.
+
+// Parses .env text into an object, without touching the environment.
+def dotenvParse(text) {
+  val out = {}
+  for (rawLine in lines(text)) {
+    val line = trim(rawLine)
+    if (line == "" || startsWith(line, "#")) then continue
+    var body = line
+    if (startsWith(body, "export ") || startsWith(body, "export\t")) {
+      body = trim(substring(body, 7, length(body)))
+    }
+    val eq = indexOf(body, "=")
+    if (eq <= 0) then continue                  // not a KEY=VALUE line
+    val key = trim(substring(body, 0, eq))
+    if (!_dotenvKeyOk(key)) then continue
+    out[key] = _dotenvValue(trim(substring(body, eq + 1, length(body))))
+  }
+  out
+}
+
+// Reads a file (default ./.env), parses it, and sets each variable with
+// setEnv. Returns what was parsed. A missing file is not an error — it
+// returns {} — so code can call this unconditionally. opts:
+//   override (false)  replace variables the environment already has
+def dotenvLoad(path = ".env", opts = {}) {
+  if (!isFile(path)) then return {}
+  val vars = dotenvParse(readFile(path))
+  val override = get(opts, "override", false)
+  for (k in keys(vars)) {
+    if (override || getEnv(k) == null) then setEnv(k, vars[k])
+  }
+  vars
+}
+
+def _dotenvKeyOk(key) {
+  if (key == "") then return false
+  for (ch in key) {
+    val c = ord(ch)
+    val ok = (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) ||
+      ch == "_" || ch == "."
+    if (!ok) then return false
+  }
+  true
+}
+
+def _dotenvValue(raw) {
+  if (raw == "") then return ""
+  val first = charAt(raw, 0)
+  if (first == "'") {
+    val close = indexOf(substring(raw, 1, length(raw)), "'")
+    if (close >= 0) then return substring(raw, 1, close + 1)
+    return substring(raw, 1, length(raw))
+  }
+  if (first == "\"") {
+    var out = ""
+    var i = 1
+    val n = length(raw)
+    while (i < n) {
+      val ch = charAt(raw, i)
+      if (ch == "\"") then break
+      if (ch == "\\" && i + 1 < n) {
+        val e = charAt(raw, i + 1)
+        out += select (e) {
+          case "n": "\n"
+          case "r": "\r"
+          case "t": "\t"
+          default: e
+        }
+        i += 2
+      } else {
+        out += ch
+        i += 1
+      }
+    }
+    return out
+  }
+  // Unquoted: cut an inline comment, trim what remains.
+  val hash = indexOf(raw, " #")
+  val cut = if (hash >= 0) then substring(raw, 0, hash) else raw
+  trim(cut)
+}

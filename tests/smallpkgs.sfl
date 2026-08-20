@@ -1,0 +1,70 @@
+// The small utility packages — ansi and dotenv — in one suite.
+
+import "lib/assert"
+import "../packages/ansi/main"
+import "../packages/dotenv/main"
+
+// -------------------------------------------------------------------- ansi
+
+ansiSetEnabled(true)
+val esc = chr(27)
+check("red wraps in 31", ansiRed("x"), esc + "[31m" + "x" + esc + "[0m")
+check("styles combine in order", ansiStyle("x", "yellow", "bold", "underline"),
+  esc + "[33;1;4m" + "x" + esc + "[0m")
+check("256-colour form", ansi256("x", 208), esc + "[38;5;208mx" + esc + "[0m")
+check("rgb form", ansiRgb("x", 1, 2, 3), esc + "[38;2;1;2;3mx" + esc + "[0m")
+checkFails("unknown styles are named", () -> ansiStyle("x", "chartreuse"), "chartreuse")
+
+check("strip removes what style added", ansiStrip(ansiStyle("plain", "red", "bold")), "plain")
+check("strip crosses several sequences",
+  ansiStrip(ansiGreen("a") + "-" + ansiBold("b")), "a-b")
+check("strip leaves clean text alone", ansiStrip("just text"), "just text")
+check("strip handles cursor sequences too", ansiStrip(esc + "[2Kline"), "line")
+
+ansiSetEnabled(false)
+check("disabled styling is the identity", ansiRed("x"), "x")
+check("disabled rgb is the identity", ansiRgb("x", 9, 9, 9), "x")
+check("enabled state reads back", ansiEnabled(), false)
+ansiSetEnabled(true)
+
+// ------------------------------------------------------------------ dotenv
+
+val parsed = dotenvParse(join([
+  "# a comment",
+  "DB_HOST=localhost",
+  "DB_PORT=5432",
+  "export API_KEY=abc123",
+  "QUOTED=\"line1\\nline2 with \\\"quotes\\\"\"",
+  "SINGLE='kept $literal \\n'",
+  "SPACED =  trimmed value",
+  "INLINE=value # a trailing comment",
+  "EMPTY=",
+  "WEIRD KEY=skipped",
+  "noequals",
+  "1BAD=fine"
+], "\n"))
+check("plain values parse", parsed.DB_HOST, "localhost")
+check("numbers stay strings", parsed.DB_PORT, "5432")
+check("export prefix is peeled", parsed.API_KEY, "abc123")
+check("double quotes unescape", parsed.QUOTED, "line1\nline2 with \"quotes\"")
+check("single quotes stay literal", parsed.SINGLE, "kept $literal \\n")
+check("unquoted values trim", parsed.SPACED, "trimmed value")
+check("inline comments are cut", parsed.INLINE, "value")
+check("empty values are empty", parsed.EMPTY, "")
+check("keys with spaces are skipped", contains(parsed, "WEIRD KEY"), false)
+check("digit-led keys are fine", parsed["1BAD"], "fine")
+check("everything expected parsed", length(keys(parsed)), 9)
+
+val envFile = tempFile("sfl-dotenv-test")
+writeFile(envFile, "SFL_DOTENV_A=from-file\nSFL_DOTENV_B=file-b\n")
+setEnv("SFL_DOTENV_A", "from-env")
+val loaded = dotenvLoad(envFile)
+check("load returns what it parsed", loaded.SFL_DOTENV_B, "file-b")
+check("the environment wins by default", getEnv("SFL_DOTENV_A"), "from-env")
+check("unset variables are filled", getEnv("SFL_DOTENV_B"), "file-b")
+dotenvLoad(envFile, {override: true})
+check("override replaces the environment", getEnv("SFL_DOTENV_A"), "from-file")
+removeFile(envFile)
+check("a missing file is quietly empty", dotenvLoad("no-such-file.env"), {})
+
+report("smallpkgs")

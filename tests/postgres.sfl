@@ -1,0 +1,464 @@
+// The postgres package held against a fake server: every test speaks real
+// protocol 3.0 over a real socket — startup, each auth method, the simple
+// and extended query flows — so framing, SCRAM math, conversions and errors
+// are all checked without a postgres anywhere near. The auth vectors (MD5
+// response, SCRAM stored/server keys for password "sflpass", salt 1..16,
+// 4096 rounds) were computed independently with Python's hashlib.
+
+import "lib/assert"
+import "../packages/postgres/main"
+import "../packages/postgres/proto"
+
+val _STORED_KEY = "9ccdc662fa9c82996e490287b0fb247d750d15d690b92c29a2d6c5763584ebda"
+val _SERVER_KEY = "9554ff08ee5e5c036f65d6515689bd7f1bebc31c7aeb77436221f2f2fc84c59a"
+val _SCRAM_SALT = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+// ------------------------------------------------------ fake-server pieces
+
+// Reads the untyped startup message; returns its {major, minor, params}.
+def _startup(state) {
+  val head = socketReadBytes(state.sock, 4, state.timeoutMs)
+  val hc = pgpCur(head)
+  val len = pgpU32(hc)
+  var body = []
+  while (length(body) < len - 4) {
+    val chunk = socketReadBytes(state.sock, len - 4 - length(body), state.timeoutMs)
+    pgpAppend(body, chunk)
+  }
+  val c = pgpCur(body)
+  val major = pgpU16(c)
+  val minor = pgpU16(c)
+  val params = {}
+  while (pgpRemaining(c) > 1) {
+    val k = pgpStrNul(c)
+    if (k == "") then break
+    params[k] = pgpStrNul(c)
+  }
+  {major: major, minor: minor, params: params}
+}
+
+def _auth(state, code, extra = []) {
+  val p = []
+  pgpPushU32(p, code)
+  pgpAppend(p, extra)
+  pgpSend(state, "R", p)
+}
+
+def _paramStatus(state, k, v) {
+  val p = []
+  pgpPushStr(p, k)
+  pgpPushStr(p, v)
+  pgpSend(state, "S", p)
+}
+
+def _ready(state, tx = "I") {
+  pgpSend(state, "Z", [ord(tx)])
+}
+
+def _finishAuth(state) {
+  _auth(state, 0)
+  _paramStatus(state, "server_version", "16.0-fake")
+  _paramStatus(state, "standard_conforming_strings", "on")
+  val k = []
+  pgpPushU32(k, 4242)
+  pgpPushU32(k, 99)
+  pgpSend(state, "K", k)
+  _ready(state)
+}
+
+def _rowDesc(state, cols) {   // cols: [[name, typeOid], ...]
+  val p = []
+  pgpPushU16(p, length(cols))
+  for (col in cols) {
+    pgpPushStr(p, col[0])
+    pgpPushU32(p, 0)
+    pgpPushU16(p, 0)
+    pgpPushU32(p, col[1])
+    pgpPushU16(p, 0xffff)
+    pgpPushU32(p, 0xffffffff)
+    pgpPushU16(p, 0)
+  }
+  pgpSend(state, "T", p)
+}
+
+def _dataRow(state, values) { // strings, byte arrays, or null
+  val p = []
+  pgpPushU16(p, length(values))
+  for (v in values) {
+    if (v == null) {
+      pgpPushU32(p, 0xffffffff)
+    } else {
+      val b = if (isArray(v)) then v else utf8Encode(toString(v))
+      pgpPushU32(p, length(b))
+      pgpAppend(p, b)
+    }
+  }
+  pgpSend(state, "D", p)
+}
+
+def _complete(state, tag) {
+  val p = []
+  pgpPushStr(p, tag)
+  pgpSend(state, "C", p)
+}
+
+def _errorMsg(state, code, message, extras = {}) {
+  val p = []
+  push(p, ord("S"))
+  pgpPushStr(p, "ERROR")
+  push(p, ord("C"))
+  pgpPushStr(p, code)
+  push(p, ord("M"))
+  pgpPushStr(p, message)
+  for (k in keys(extras)) {
+    push(p, ord(k))
+    pgpPushStr(p, extras[k])
+  }
+  push(p, 0)
+  pgpSend(state, "E", p)
+}
+
+// Reads typed messages until Terminate; hands each to the handler.
+def _serve(state, handler) {
+  while (true) {
+    val got = attempt(() -> pgpRead(state))
+    if (got?.error != null) then break
+    val m = got.value
+    if (m.kind == "X") then break
+    handler(m)
+  }
+  null
+}
+
+def _fake(handler) {
+  val srv = serverSocket(0)
+  val port = serverPort(srv)
+  val t = spawn(() -> {
+    val c = accept(srv, 5000)
+    val r = attempt(() -> handler({sock: c, timeoutMs: 5000, seq: 0}))
+    attempt(() -> closeSocket(c))
+    closeServer(srv)
+    if (r?.error != null) then error("fake server: " + r.error.message)
+    null
+  })
+  {port: port, thread: t}
+}
+
+// ---------------------------------------------------------- byte helpers
+
+val _b1 = []
+pgpPushU32(_b1, 0xdeadbeef)
+check("u32 big-endian bytes", _b1, [0xde, 0xad, 0xbe, 0xef])
+check("u32 reads back", pgpU32(pgpCur(_b1)), 0xdeadbeef)
+val _b2 = []
+pgpPushU32(_b2, 0xffffffff)
+check("i32 minus one", pgpI32(pgpCur(_b2)), -1)
+val _b3 = []
+pgpPushU16(_b3, 0x0102)
+check("u16 big-endian", _b3, [1, 2])
+val _b4 = []
+pgpPushStr(_b4, "ok")
+check("nul string", _b4, [111, 107, 0])
+
+check("pgArray plain", pgArray([1, 2, 3]), "{1,2,3}")
+check("pgArray strings and null", pgArray(["a b", null, "q\"x"]), "{\"a b\",NULL,\"q\\\"x\"}")
+check("pgArray nested", pgArray([[1], [2, 3]]), "{{1},{2,3}}")
+check("pgArray bools", pgArray([true, false]), "{t,f}")
+
+// ----------------------------------------------- cleartext refusal + accept
+
+val f1 = _fake((state) -> {
+  _startup(state)
+  _auth(state, 3)
+  null                                       // client hangs up in refusal
+})
+checkFails("cleartext over plain tcp is refused",
+  () -> pgConnect({host: "127.0.0.1", port: f1.port, user: "u1", password: "pw", timeoutMs: 5000}),
+  "cleartext password over plain TCP")
+await(f1.thread)
+
+val f2 = _fake((state) -> {
+  val su = _startup(state)
+  check("startup carries the protocol", su.major, 3)
+  check("startup carries the user", su.params.user, "u1")
+  check("startup carries the database", su.params.database, "mydb")
+  check("startup carries the encoding", su.params.client_encoding, "UTF8")
+  check("startup carries the app name", su.params.application_name, "mytool")
+  _auth(state, 3)
+  val m = pgpRead(state)
+  check("cleartext password message", m.kind, "p")
+  val c = pgpCur(m.payload)
+  check("cleartext password arrives", pgpStrNul(c), "pw1")
+  _finishAuth(state)
+  _serve(state, (msg) -> null)
+})
+val db2 = pgConnect({host: "127.0.0.1", port: f2.port, user: "u1", password: "pw1",
+  db: "mydb", appName: "mytool", allowCleartext: true, timeoutMs: 5000})
+check("server params captured", db2.serverVersion(), "16.0-fake")
+check("backend pid captured", db2.backendPid(), 4242)
+db2.close()
+await(f2.thread)
+
+// ------------------------------------------------------------------- md5
+
+val f3 = _fake((state) -> {
+  _startup(state)
+  _auth(state, 5, [9, 8, 7, 6])
+  val m = pgpRead(state)
+  val c = pgpCur(m.payload)
+  check("md5 response matches the vector", pgpStrNul(c), "md58cd118aab8aceb29003ab40ca7cf1525")
+  _finishAuth(state)
+  _serve(state, (msg) -> null)
+})
+val db3 = pgConnect({host: "127.0.0.1", port: f3.port, user: "u2", password: "md5pass", timeoutMs: 5000})
+db3.close()
+await(f3.thread)
+
+// ----------------------------------------------------------------- scram
+
+val f4 = _fake((state) -> {
+  _startup(state)
+  val mechs = []
+  pgpPushStr(mechs, "SCRAM-SHA-256")
+  push(mechs, 0)
+  _auth(state, 10, mechs)
+
+  val init = pgpRead(state)
+  check("sasl initial response", init.kind, "p")
+  val c = pgpCur(init.payload)
+  check("mechanism chosen", pgpStrNul(c), "SCRAM-SHA-256")
+  val n = pgpU32(c)
+  val clientFirst = pgpStrN(c, n)
+  check("gs2 header has no channel binding", startsWith(clientFirst, "n,,"), true)
+  val bare = substring(clientFirst, 3, length(clientFirst))
+  val clientNonce = split(bare, "r=")[1]
+
+  val fullNonce = clientNonce + "SRVEXT"
+  val serverFirst = "r=" + fullNonce + ",s=" + base64EncodeBytes(_SCRAM_SALT) + ",i=4096"
+  val cont = []
+  pgpPushU32(cont, 11)
+  pgpAppend(cont, utf8Encode(serverFirst))
+  pgpSend(state, "R", cont)
+
+  val fin = pgpRead(state)
+  val fc = pgpCur(fin.payload)
+  val clientFinal = pgpStrN(fc, pgpRemaining(fc))
+  val parts = split(clientFinal, ",p=")
+  check("client-final shape", parts[0], "c=biws,r=" + fullNonce)
+  val proof = base64DecodeBytes(parts[1])
+  val authMessage = bare + "," + serverFirst + "," + parts[0]
+  val stored = hexDecodeBytes(_STORED_KEY)
+  val sig = hmacBytes("sha256", stored, utf8Encode(authMessage))
+  val recovered = []
+  var i = 0
+  while (i < length(proof)) {
+    push(recovered, bitXor(proof[i], sig[i]))
+    i += 1
+  }
+  check("client proof recovers the stored key",
+    hexEncodeBytes(digestBytes("sha256", recovered)), _STORED_KEY)
+
+  val v = base64EncodeBytes(hmacBytes("sha256", hexDecodeBytes(_SERVER_KEY), utf8Encode(authMessage)))
+  val fine = []
+  pgpPushU32(fine, 12)
+  pgpAppend(fine, utf8Encode("v=" + v))
+  pgpSend(state, "R", fine)
+  _finishAuth(state)
+  _serve(state, (msg) -> null)
+})
+val db4 = pgConnect({host: "127.0.0.1", port: f4.port, user: "u3", password: "sflpass", timeoutMs: 5000})
+db4.close()
+await(f4.thread)
+
+// A server whose final signature is wrong must be rejected.
+val f5 = _fake((state) -> {
+  _startup(state)
+  val mechs = []
+  pgpPushStr(mechs, "SCRAM-SHA-256")
+  push(mechs, 0)
+  _auth(state, 10, mechs)
+  val init = pgpRead(state)
+  val c = pgpCur(init.payload)
+  pgpStrNul(c)
+  val n = pgpU32(c)
+  val clientFirst = pgpStrN(c, n)
+  val clientNonce = split(clientFirst, "r=")[1]
+  val serverFirst = "r=" + clientNonce + "X,s=" + base64EncodeBytes(_SCRAM_SALT) + ",i=4096"
+  val cont = []
+  pgpPushU32(cont, 11)
+  pgpAppend(cont, utf8Encode(serverFirst))
+  pgpSend(state, "R", cont)
+  pgpRead(state)
+  val fine = []
+  pgpPushU32(fine, 12)
+  pgpAppend(fine, utf8Encode("v=Zm9yZ2VyeQ=="))
+  pgpSend(state, "R", fine)
+  null
+})
+checkFails("a forged server signature is rejected",
+  () -> pgConnect({host: "127.0.0.1", port: f5.port, user: "u3", password: "sflpass", timeoutMs: 5000}),
+  "does not verify")
+await(f5.thread)
+
+// SCRAM-PLUS-only servers are refused with a clear message.
+val f6 = _fake((state) -> {
+  _startup(state)
+  val mechs = []
+  pgpPushStr(mechs, "SCRAM-SHA-256-PLUS")
+  push(mechs, 0)
+  _auth(state, 10, mechs)
+  null
+})
+checkFails("plus-only servers are named in the refusal",
+  () -> pgConnect({host: "127.0.0.1", port: f6.port, user: "u3", password: "x", timeoutMs: 5000}),
+  "SCRAM-SHA-256-PLUS")
+await(f6.thread)
+
+// -------------------------------------------------- queries, both protocols
+
+def _authTrust(state) {
+  _startup(state)
+  _finishAuth(state)
+  null
+}
+
+val f7 = _fake((state) -> {
+  _authTrust(state)
+  _serve(state, (m) -> {
+    if (m.kind == "Q") {
+      val c = pgpCur(m.payload)
+      val sql = pgpStrNul(c)
+      if (sql == "SELECT types") {
+        _rowDesc(state, [["b", 16], ["i", 23], ["big", 20], ["f", 701], ["num", 1700],
+          ["bin", 17], ["s", 25], ["u", 2950], ["nothing", 23]])
+        _dataRow(state, ["t", "-7", "9007199254740993", "2.5", "12.30",
+          "\\x0aff00", "plain", "0f0e0d0c-0b0a-0908-0706-050403020100", null])
+        _dataRow(state, ["f", null, "1", "-1e2", "-0.5", null, "x", "u", "3"])
+        _complete(state, "SELECT 2")
+        _ready(state)
+      } elsif (sql == "two; statements") {
+        _complete(state, "CREATE TABLE")
+        _rowDesc(state, [["n", 23]])
+        _dataRow(state, ["5"])
+        _complete(state, "SELECT 1")
+        _ready(state)
+      } elsif (sql == "notice me") {
+        _errorMsg(state, "01000", "just a notice")   // sent as N below instead
+        _ready(state)
+      } elsif (sql == "boom") {
+        _errorMsg(state, "42P01", "relation \"missing\" does not exist", {P: "18"})
+        _ready(state)
+      } elsif (sql == "notify me") {
+        val a = []
+        pgpPushU32(a, 77)
+        pgpPushStr(a, "chan")
+        pgpPushStr(a, "payload!")
+        pgpSend(state, "A", a)
+        _complete(state, "LISTEN")
+        _ready(state)
+      } elsif (sql == "copy in") {
+        pgpSend(state, "G", [0, 0, 0])
+        val fail = pgpRead(state)
+        check("copy is refused with CopyFail", fail.kind, "f")
+        _errorMsg(state, "57014", "COPY from stdin failed")
+        _ready(state)
+      } else {
+        _complete(state, "OK")
+        _ready(state)
+      }
+    } elsif (m.kind == "P") {
+      // extended flow: read B, D, E, S then answer echoing the params back
+      val pc = pgpCur(m.payload)
+      pgpStrNul(pc)
+      val sql = pgpStrNul(pc)
+      val bind = pgpRead(state)
+      val bc = pgpCur(bind.payload)
+      pgpStrNul(bc)
+      pgpStrNul(bc)
+      val nFormats = pgpU16(bc)
+      check("bind uses default text formats", nFormats, 0)
+      val nParams = pgpU16(bc)
+      val got = []
+      var i = 0
+      while (i < nParams) {
+        val len = pgpI32(bc)
+        push(got, if (len < 0) then null else pgpStrN(bc, len))
+        i += 1
+      }
+      pgpRead(state)                          // Describe
+      pgpRead(state)                          // Execute
+      pgpRead(state)                          // Sync
+      pgpSend(state, "1", [])
+      pgpSend(state, "2", [])
+      if (sql == "params back") {
+        _rowDesc(state, [["got", 25]])
+        _dataRow(state, [jsonStringify(got)])
+        _complete(state, "SELECT 1")
+      } else {
+        _complete(state, "UPDATE 3")
+      }
+      _ready(state)
+    }
+  })
+})
+val db7 = pgConnect({host: "127.0.0.1", port: f7.port, user: "u", password: "", timeoutMs: 5000})
+
+val types = db7.exec("SELECT types")
+check("exec reports the last tag", types.tag, "SELECT 2")
+val full = db7.queryFull("params back",
+  [null, true, false, 42, -2.5, "text", pgBinary([1, 171]), pgArray([1, 2])])
+check("params travel in text form", full.rows[0][0],
+  "[null, \"t\", \"f\", \"42\", \"-2.5\", \"text\", \"\\\\x01ab\", \"{1,2}\"]")
+val upd = db7.queryFull("no rows", [])
+check("extended with no rows reports the tag", upd.tag, "UPDATE 3")
+check("extended with no rows counts", upd.affectedRows, 3)
+
+// simple-protocol multi-statement through exec, then conversions via query
+val f7types = db7.exec("two; statements")
+check("multi-statement exec keeps the last tag", f7types.tag, "SELECT 1")
+checkFails("errors carry code and position", () -> db7.exec("boom"), "(42P01) at character 18")
+check("the connection survives an error", db7.exec("anything").tag, "OK")
+db7.exec("notify me")
+val notes = db7.notifications()
+check("notifications are gathered", notes, [{pid: 77, channel: "chan", payload: "payload!"}])
+checkFails("copy from stdin is refused", () -> db7.exec("copy in"), "COPY from stdin failed")
+db7.close()
+await(f7.thread)
+
+// Conversion checks ride the simple protocol too.
+val f8 = _fake((state) -> {
+  _authTrust(state)
+  _serve(state, (m) -> {
+    if (m.kind == "P") {
+      pgpRead(state)                        // Bind
+      pgpRead(state)                        // Describe
+      pgpRead(state)                        // Execute
+      pgpRead(state)                        // Sync
+      pgpSend(state, "1", [])
+      pgpSend(state, "2", [])
+      _rowDesc(state, [["b", 16], ["i", 23], ["big", 20], ["f", 701], ["num", 1700],
+        ["bin", 17], ["s", 25], ["nothing", 23]])
+      _dataRow(state, ["t", "-7", "9007199254740993", "2.5", "12.30", "\\x0aff00", "plain", null])
+      _complete(state, "SELECT 1")
+      _ready(state)
+    }
+  })
+})
+val db8 = pgConnect({host: "127.0.0.1", port: f8.port, user: "u", timeoutMs: 5000})
+val trow = db8.query("whatever")[0]
+check("bool converts", trow.b, true)
+check("int converts", trow.i, -7)
+check("int8 converts past 2^53", trow.big, 9007199254740993)
+check("float converts", trow.f, 2.5)
+check("numeric stays a string", trow.num, "12.30")
+check("bytea hex becomes bytes", trow.bin, [10, 255, 0])
+check("text stays text", trow.s, "plain")
+check("null is null", trow.nothing, null)
+checkFails("bare arrays must go through pgArray",
+  () -> db8.query("x", [[1, 2]]), "pgArray")
+db8.close()
+await(f8.thread)
+
+checkFails("a closed client refuses queries", () -> db8.query("SELECT 1"), "closed")
+
+report("postgres")

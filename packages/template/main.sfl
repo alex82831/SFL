@@ -1,0 +1,243 @@
+// template — logic-less {{mustache}} templates.
+//
+//   import "template"
+//
+//   tplRender("Hello, {{name}}!", {name: "ada"})          // "Hello, ada!"
+//   tplRender("{{#items}}{{n}} {{/items}}", {items: [{n: 1}, {n: 2}]})
+//
+// What it speaks, of the mustache spec: {{name}} interpolation with HTML
+// escaping, {{{name}}} and {{& name}} raw, dotted paths {{a.b.c}} and {{.}}
+// for the item itself, sections {{#x}}...{{/x}} (arrays iterate, other truthy
+// values render once with the value pushed on the context, functions are
+// called first), inverted sections {{^x}}, comments {{! ...}}, and partials
+// {{> name}} from opts.partials. Tags standing alone on a line take the line
+// with them, so block markup stays clean. Custom delimiters ({{=...=}}) are
+// not offered.
+//
+// Lookup walks the context stack: an inner section sees its item first, then
+// everything around it. A missing name renders as nothing, never an error —
+// that is what makes templates safe to hand to data that is still settling.
+
+// Renders a template in one go.
+def tplRender(template, data, opts = {}) = tplCompile(template)(data, opts)
+
+// Compiles once, returning a function (data, opts?) -> string; worth it when
+// one template meets many data sets.
+def tplCompile(template) {
+  val tree = _tplParse(_tplTokens(template))
+  (data, opts = {}) -> {
+    val out = []
+    _tplRenderNodes(out, tree, [data], get(opts, "partials", {}), 0)
+    join(out, "")
+  }
+}
+
+// HTML-escapes the five characters with meaning in markup.
+def tplEscape(s) {
+  var out = ""
+  for (ch in toString(s)) {
+    out += select (ch) {
+      case "&": "&amp;"
+      case "<": "&lt;"
+      case ">": "&gt;"
+      case "\"": "&quot;"
+      case "'": "&#39;"
+      default: ch
+    }
+  }
+  out
+}
+
+// ---------------------------------------------------------------- tokens
+
+// Splits the template into {kind, ...} tokens. Kinds: text, var, raw,
+// secStart, invStart, secEnd, comment, partial.
+def _tplTokens(template) {
+  val tokens = []
+  var at = 0
+  val n = length(template)
+  while (at < n) {
+    val open = strFind(template, "{{", at)
+    if (open < 0) {
+      push(tokens, {kind: "text", text: substring(template, at, n)})
+      break
+    }
+    if (open > at) {
+      push(tokens, {kind: "text", text: substring(template, at, open)})
+    }
+    // {{{raw}}} closes with three braces.
+    if (open + 2 < n && charAt(template, open + 2) == "{") {
+      val close = strFind(template, "}}}", open + 3)
+      if (close < 0) then error("template: '{{{' never closes (at " + open + ")")
+      push(tokens, {kind: "raw", name: trim(substring(template, open + 3, close))})
+      at = close + 3
+      continue
+    }
+    val close = strFind(template, "}}", open + 2)
+    if (close < 0) then error("template: '{{' never closes (at " + open + ")")
+    val body = trim(substring(template, open + 2, close))
+    if (body == "") then error("template: an empty {{}} tag (at " + open + ")")
+    val sigil = charAt(body, 0)
+    val rest = trim(substring(body, 1, length(body)))
+    push(tokens, select (sigil) {
+      case "#": {kind: "secStart", name: rest}
+      case "^": {kind: "invStart", name: rest}
+      case "/": {kind: "secEnd", name: rest}
+      case "!": {kind: "comment"}
+      case ">": {kind: "partial", name: rest}
+      case "&": {kind: "raw", name: rest}
+      case "=": error("template: custom delimiters ({{=...=}}) are not supported")
+      default: {kind: "var", name: body}
+    })
+    at = close + 2
+  }
+  _tplTrimStandalone(tokens)
+}
+
+// A block tag alone on its line eats the line: the newline before survives,
+// the indentation and the trailing newline go with the tag.
+def _tplTrimStandalone(tokens) {
+  val block = ["secStart", "invStart", "secEnd", "comment", "partial"]
+  var i = 0
+  while (i < length(tokens)) {
+    val t = tokens[i]
+    if (contains(block, t.kind)) {
+      val prev = if (i > 0) then tokens[i - 1] else null
+      val next = if (i + 1 < length(tokens)) then tokens[i + 1] else null
+      val prevOk = prev == null ||
+        (prev.kind == "text" && _tplBlankTail(prev.text, i == 1))
+      val nextOk = next == null ||
+        (next.kind == "text" && (startsWith(next.text, "\n") || startsWith(next.text, "\r\n")))
+      if (prevOk && nextOk) {
+        if (prev != null) then prev.text = _tplCutTail(prev.text)
+        if (next != null) {
+          next.text = substring(next.text,
+            if (startsWith(next.text, "\r\n")) then 2 else 1, length(next.text))
+        }
+      }
+    }
+    i += 1
+  }
+  tokens
+}
+
+// True when text ends in a newline followed only by spaces and tabs; a text
+// that is nothing but indentation counts only at the template's very start.
+def _tplBlankTail(text, atStart) {
+  var i = length(text) - 1
+  while (i >= 0) {
+    val ch = charAt(text, i)
+    if (ch == "\n") then return true
+    if (ch != " " && ch != "\t") then return false
+    i -= 1
+  }
+  atStart
+}
+
+def _tplCutTail(text) {
+  var i = length(text)
+  while (i > 0 && (charAt(text, i - 1) == " " || charAt(text, i - 1) == "\t")) { i -= 1 }
+  substring(text, 0, i)
+}
+
+// ------------------------------------------------------------------ tree
+
+def _tplParse(tokens) {
+  val root = []
+  val stack = [{nodes: root, name: null, kind: null}]
+  for (t in tokens) {
+    val top = last(stack)
+    if (t.kind == "secStart" || t.kind == "invStart") {
+      val node = {kind: t.kind, name: t.name, children: []}
+      push(top.nodes, node)
+      push(stack, {nodes: node.children, name: t.name, kind: t.kind})
+    } elsif (t.kind == "secEnd") {
+      if (top.name != t.name) {
+        error("template: {{/" + t.name + "}} closes nothing (open: " +
+          toString(top.name ?? "the top level") + ")")
+      }
+      pop(stack)
+    } elsif (t.kind == "comment") {
+      null
+    } else {
+      push(top.nodes, t)
+    }
+  }
+  if (length(stack) > 1) {
+    error("template: {{#" + last(stack).name + "}} never closes")
+  }
+  root
+}
+
+// ---------------------------------------------------------------- render
+
+def _tplRenderNodes(out, nodes, stack, partials, depth) {
+  if (depth > 100) then error("template: partials nest more than 100 deep — a cycle?")
+  for (node in nodes) {
+    if (node.kind == "text") {
+      push(out, node.text)
+    } elsif (node.kind == "var") {
+      val v = _tplLookup(stack, node.name)
+      if (v != null) then push(out, tplEscape(_tplShow(v)))
+    } elsif (node.kind == "raw") {
+      val v = _tplLookup(stack, node.name)
+      if (v != null) then push(out, _tplShow(v))
+    } elsif (node.kind == "secStart") {
+      var v = _tplLookup(stack, node.name)
+      if (isFunction(v)) then v = v()
+      if (!_tplFalsy(v)) {
+        if (isArray(v)) {
+          for (item in v) {
+            _tplRenderNodes(out, node.children, concat(stack, [item]), partials, depth)
+          }
+        } else {
+          _tplRenderNodes(out, node.children, concat(stack, [v]), partials, depth)
+        }
+      }
+    } elsif (node.kind == "invStart") {
+      var v = _tplLookup(stack, node.name)
+      if (isFunction(v)) then v = v()
+      if (_tplFalsy(v)) {
+        _tplRenderNodes(out, node.children, stack, partials, depth)
+      }
+    } elsif (node.kind == "partial") {
+      if (!contains(partials, node.name)) {
+        error("template: no partial named '" + node.name + "' in opts.partials")
+      }
+      _tplRenderNodes(out, _tplParse(_tplTokens(partials[node.name])), stack, partials, depth + 1)
+    }
+  }
+  null
+}
+
+def _tplFalsy(v) =
+  v == null || v == false || (isArray(v) && isEmpty(v)) || v == "" || v == 0
+
+def _tplShow(v) {
+  if (isString(v)) then v
+  elsif (isBool(v)) then (if (v) then "true" else "false")
+  else toString(v)
+}
+
+// Walks the stack from the innermost frame out; dots descend inside the
+// first frame that has the head key.
+def _tplLookup(stack, name) {
+  if (name == ".") then return last(stack)
+  val parts = split(name, ".")
+  var i = length(stack) - 1
+  while (i >= 0) {
+    val frame = stack[i]
+    if (isObject(frame) && contains(frame, parts[0])) {
+      var v = frame[parts[0]]
+      var j = 1
+      while (j < length(parts)) {
+        if (!isObject(v) || !contains(v, parts[j])) then return null
+        v = v[parts[j]]
+        j += 1
+      }
+      return v
+    }
+    i -= 1
+  }
+  null
+}

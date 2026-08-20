@@ -1,0 +1,95 @@
+// ansi — terminal colours and styles as plain string functions.
+//
+//   import "ansi"
+//
+//   println(ansiGreen("ok") + " " + ansiBold("42ms"))
+//   println(ansiStyle("warning", "yellow", "bold", "underline"))
+//   println(ansiRgb("#ff8800 vibes", 255, 136, 0))
+//
+// Styling is a process-wide switch: it starts on unless the NO_COLOR
+// environment variable is set or TERM is "dumb" (the conventions terminals
+// agreed on), and ansiSetEnabled(false) turns every function here into the
+// identity — so library code can colour unconditionally and let the caller
+// decide once. ansiStrip removes any ANSI codes from a string, styled here
+// or elsewhere.
+
+val _codes = {
+  reset: 0, bold: 1, dim: 2, italic: 3, underline: 4, blink: 5, inverse: 7,
+  strikethrough: 9,
+  black: 30, red: 31, green: 32, yellow: 33, blue: 34, magenta: 35, cyan: 36,
+  white: 37, gray: 90, brightRed: 91, brightGreen: 92, brightYellow: 93,
+  brightBlue: 94, brightMagenta: 95, brightCyan: 96, brightWhite: 97,
+  bgBlack: 40, bgRed: 41, bgGreen: 42, bgYellow: 43, bgBlue: 44, bgMagenta: 45,
+  bgCyan: 46, bgWhite: 47
+}
+
+val _ESC = chr(27)
+
+var _enabled = getEnv("NO_COLOR") == null && getEnv("TERM") != "dumb"
+
+def ansiEnabled() = _enabled
+
+def ansiSetEnabled(on) {
+  _enabled = on
+  null
+}
+
+// Applies any number of style names: ansiStyle("hi", "red", "bold").
+def ansiStyle(text, ...names) {
+  if (!_enabled || isEmpty(names)) then return text
+  val on = map(names, (n) -> {
+    if (!contains(_codes, n)) {
+      error("ansi: unknown style '" + n + "' (see keys(ansiCodes()))")
+    }
+    toString(_codes[n])
+  })
+  "[" + join(on, ";") + "m" + text + "[0m"
+}
+
+// The name -> SGR code table, for building custom sequences.
+def ansiCodes() = copy(_codes)
+
+def ansiBold(text) = ansiStyle(text, "bold")
+def ansiDim(text) = ansiStyle(text, "dim")
+def ansiUnderline(text) = ansiStyle(text, "underline")
+def ansiRed(text) = ansiStyle(text, "red")
+def ansiGreen(text) = ansiStyle(text, "green")
+def ansiYellow(text) = ansiStyle(text, "yellow")
+def ansiBlue(text) = ansiStyle(text, "blue")
+def ansiMagenta(text) = ansiStyle(text, "magenta")
+def ansiCyan(text) = ansiStyle(text, "cyan")
+def ansiGray(text) = ansiStyle(text, "gray")
+
+// 256-colour foreground (0..255).
+def ansi256(text, n) {
+  if (!_enabled) then return text
+  "[38;5;" + n + "m" + text + "[0m"
+}
+
+// 24-bit foreground.
+def ansiRgb(text, r, g, b) {
+  if (!_enabled) then return text
+  "[38;2;" + r + ";" + g + ";" + b + "m" + text + "[0m"
+}
+
+// Removes ANSI escape sequences (CSI ... final-byte), whoever put them there.
+def ansiStrip(text) {
+  var out = ""
+  var i = 0
+  val n = length(text)
+  while (i < n) {
+    val ch = charAt(text, i)
+    if (ord(ch) == 27 && i + 1 < n && charAt(text, i + 1) == "[") {
+      i += 2
+      while (i < n) {
+        val c = ord(charAt(text, i))
+        i += 1
+        if (c >= 0x40 && c <= 0x7e) then break   // the final byte ends the sequence
+      }
+    } else {
+      out += ch
+      i += 1
+    }
+  }
+  out
+}

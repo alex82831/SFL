@@ -1,0 +1,303 @@
+// The smtp package against a fake server: the whole conversation is spoken
+// over a real socket — greeting, EHLO capabilities, AUTH, the envelope, DATA
+// with dot-stuffing — and the MIME builder is checked structurally. The
+// STARTTLS block runs a real TLS handshake via tlsAccept and needs the
+// openssl command for its certificate; without it that block is skipped.
+
+import "lib/assert"
+import "../packages/smtp/main"
+
+// ------------------------------------------------------------ mime building
+
+val mime = smtpBuildMime({
+  from: "App Sender <app@example.com>",
+  to: ["Ada <ada@example.org>", "bo@example.org"],
+  cc: "carol@example.org",
+  bcc: "hidden@example.org",
+  replyTo: "replies@example.com",
+  subject: "Greetings 你好",
+  text: "plain body",
+  html: "<p>rich body</p>",
+  headers: {"X-Mailer": "sfl-test"},
+  attachments: [{name: "data.bin", contentType: "application/x-thing", bytes: [0, 255, 10, 13, 128]}]
+})
+checkTrue("From carries the display name", contains(mime, "From: App Sender <app@example.com>"))
+checkTrue("To lists every address", contains(mime, "To: Ada <ada@example.org>, bo@example.org"))
+checkTrue("Cc appears", contains(mime, "Cc: carol@example.org"))
+check("Bcc never appears in the message", contains(mime, "hidden@example.org"), false)
+checkTrue("Reply-To appears", contains(mime, "Reply-To: replies@example.com"))
+checkTrue("a non-ascii subject becomes an encoded word",
+  contains(mime, "Subject: =?UTF-8?B?" + base64Encode("Greetings 你好") + "?="))
+checkTrue("custom headers ride along", contains(mime, "X-Mailer: sfl-test"))
+checkTrue("Message-ID uses the sender's domain", contains(mime, "@example.com>"))
+checkTrue("mixed wraps alternative", contains(mime, "multipart/mixed"))
+checkTrue("text and html make an alternative", contains(mime, "multipart/alternative"))
+checkTrue("the attachment declares its type",
+  contains(mime, "Content-Type: application/x-thing; name=\"data.bin\""))
+checkTrue("the attachment is base64", contains(mime, base64EncodeBytes([0, 255, 10, 13, 128])))
+checkTrue("lines end with crlf", contains(mime, "\r\n"))
+
+val plainOnly = smtpBuildMime({from: "a@b.c", to: "d@e.f", subject: "S", text: "just text"})
+checkTrue("text-only mail is text/plain", contains(plainOnly, "Content-Type: text/plain; charset=utf-8"))
+check("text-only mail has no boundary", contains(plainOnly, "boundary"), false)
+checkTrue("ascii bodies stay 7bit", contains(plainOnly, "Content-Transfer-Encoding: 7bit"))
+val utfBody = smtpBuildMime({from: "a@b.c", to: "d@e.f", text: "café"})
+checkTrue("non-ascii bodies go base64", contains(utfBody, "Content-Transfer-Encoding: base64"))
+checkTrue("and carry the encoded text", contains(utfBody, base64Encode("café")))
+
+check("addresses strip display names", smtpAddress("Ada <ada@x.y>"), "ada@x.y")
+check("plain addresses pass", smtpAddress("  a@b.c "), "a@b.c")
+check("the domain extracts", smtpAddressDomain("Ada <ada@x.y>"), "x.y")
+checkFails("addresses need an @", () -> smtpAddress("nope"), "malformed")
+checkFails("crlf cannot ride in an address", () -> smtpAddress("a@b\nRCPT TO:<x@y>"), "malformed")
+
+// --------------------------------------------------------- fake smtp server
+
+def _send(c, line) = socketWriteBytes(c, utf8Encode(line + "\r\n"))
+
+// Byte-wise, so the fake server's socket can still tlsAccept after reading.
+def _line(c) {
+  val out = []
+  while (true) {
+    val b = socketReadBytes(c, 1, 5000)
+    if (b == null || length(b) == 0) {
+      if (isEmpty(out)) then return null
+      break
+    }
+    if (b[0] == 10) then break
+    if (b[0] != 13) then push(out, b[0])
+  }
+  utf8Decode(out)
+}
+
+// A scripted server: `script` drives one connection, `record` collects what
+// the client said.
+def _fakeSmtp(script) {
+  val srv = serverSocket(0)
+  val port = serverPort(srv)
+  val record = []
+  val t = spawn(() -> {
+    val c = accept(srv, 5000)
+    val r = attempt(() -> script(c, record))
+    attempt(() -> closeSocket(c))
+    closeServer(srv)
+    if (r?.error != null) then error("fake smtp: " + r.error.message)
+    null
+  })
+  {port: port, thread: t, record: record}
+}
+
+// Answers one EHLO with the capability list.
+def _ehloReply(c, record, caps) {
+  push(record, _line(c))                       // EHLO ...
+  if (isEmpty(caps)) {
+    _send(c, "250 fake.example greets you")
+  } else {
+    _send(c, "250-fake.example greets you")
+    var i = 0
+    for (cap in caps) {
+      i += 1
+      _send(c, (if (i == length(caps)) then "250 " else "250-") + cap)
+    }
+  }
+  null
+}
+
+// The common opening: greet, answer EHLO with `caps`.
+def _greet(c, record, caps) {
+  _send(c, "220 fake.example ESMTP")
+  _ehloReply(c, record, caps)
+}
+
+// Reads MAIL FROM / RCPT TO / DATA / body; returns the body lines.
+def _acceptMail(c, record) {
+  while (true) {
+    val line = _line(c)
+    push(record, line)
+    if (startsWith(line, "MAIL FROM:") || startsWith(line, "RCPT TO:")) {
+      _send(c, "250 ok")
+    } elsif (line == "DATA") {
+      _send(c, "354 go ahead")
+      break
+    } else {
+      _send(c, "500 unexpected " + line)
+      error("unexpected command " + line)
+    }
+  }
+  val body = []
+  while (true) {
+    val line = _line(c)
+    if (line == ".") then break
+    push(body, line)
+  }
+  _send(c, "250 queued as 42")
+  body
+}
+
+def _finish(c, record) {
+  val line = _line(c)
+  push(record, line)
+  if (line == "QUIT") then _send(c, "221 bye")
+  null
+}
+
+// ------------------------------------------------- plain send with a body
+
+val f1 = _fakeSmtp((c, record) -> {
+  _greet(c, record, ["SIZE 1000000", "8BITMIME"])
+  val body = _acceptMail(c, record)
+  push(record, "BODY:" + join(body, "|"))
+  _finish(c, record)
+})
+val m1 = smtpConnect("127.0.0.1", f1.port, {heloName: "tester.local", timeoutMs: 5000})
+check("capabilities are captured", m1.capabilities(), ["SIZE 1000000", "8BITMIME"])
+val receipt = m1.send({
+  from: "app@example.com",
+  to: ["ada@example.org"],
+  bcc: "quiet@example.org",
+  subject: "Hi",
+  text: "line one\n.starts with a dot\n..two dots"
+})
+check("the queue line comes back", receipt, "queued as 42")
+m1.quit()
+await(f1.thread)
+check("EHLO carried the helo name", f1.record[0], "EHLO tester.local")
+checkTrue("MAIL FROM used the bare address", contains(f1.record, "MAIL FROM:<app@example.com>"))
+checkTrue("RCPT covered to", contains(f1.record, "RCPT TO:<ada@example.org>"))
+checkTrue("RCPT covered bcc", contains(f1.record, "RCPT TO:<quiet@example.org>"))
+check("QUIT ended it", last(f1.record), "QUIT")
+val body1 = first(filter(f1.record, (r) -> startsWith(r, "BODY:")))
+checkTrue("dot lines were stuffed", contains(body1, "|..starts with a dot|"))
+checkTrue("double dots gained one more", contains(body1, "|...two dots"))
+checkTrue("normal lines were not", contains(body1, "|line one|"))
+
+// ------------------------------------------------------------------- auth
+
+checkFails("AUTH over plaintext is refused by default",
+  () -> {
+    val f = _fakeSmtp((c, record) -> {
+      _send(c, "220 fake")
+      _line(c)
+      _send(c, "250 AUTH PLAIN")
+      attempt(() -> _line(c))                // hold the socket until the client leaves
+      null
+    })
+    smtpConnect("127.0.0.1", f.port, {user: "u", password: "p", timeoutMs: 5000})
+  }, "refusing AUTH over plaintext")
+
+val f2 = _fakeSmtp((c, record) -> {
+  _greet(c, record, ["AUTH PLAIN LOGIN"])
+  val auth = _line(c)
+  push(record, auth)
+  _send(c, "235 accepted")
+  _finish(c, record)
+})
+val m2 = smtpConnect("127.0.0.1", f2.port,
+  {user: "user@x", password: "pä55", allowInsecureAuth: true, timeoutMs: 5000})
+m2.quit()
+await(f2.thread)
+val expectPlain = "AUTH PLAIN " + base64EncodeBytes(
+  concat(concat([0], utf8Encode("user@x")), concat([0], utf8Encode("pä55"))))
+checkTrue("AUTH PLAIN encodes user and password", contains(f2.record, expectPlain))
+
+val f3 = _fakeSmtp((c, record) -> {
+  _greet(c, record, ["AUTH LOGIN"])
+  push(record, _line(c))
+  _send(c, "334 VXNlcm5hbWU6")
+  push(record, _line(c))
+  _send(c, "334 UGFzc3dvcmQ6")
+  push(record, _line(c))
+  _send(c, "235 accepted")
+  _finish(c, record)
+})
+val m3 = smtpConnect("127.0.0.1", f3.port,
+  {user: "u1", password: "p1", allowInsecureAuth: true, timeoutMs: 5000})
+m3.quit()
+await(f3.thread)
+checkTrue("LOGIN offers the mechanism", contains(f3.record, "AUTH LOGIN"))
+checkTrue("LOGIN sends the user base64", contains(f3.record, base64Encode("u1")))
+checkTrue("LOGIN sends the password base64", contains(f3.record, base64Encode("p1")))
+
+val f4 = _fakeSmtp((c, record) -> {
+  _greet(c, record, ["AUTH PLAIN"])
+  _line(c)
+  _send(c, "535 bad credentials")
+  attempt(() -> _line(c))
+  null
+})
+checkFails("rejected credentials surface without leaking them",
+  () -> smtpConnect("127.0.0.1", f4.port,
+    {user: "u", password: "secret", allowInsecureAuth: true, timeoutMs: 5000}),
+  "'AUTH ...' got 535")
+
+// ------------------------------------------------------------ refusals
+
+val f5 = _fakeSmtp((c, record) -> {
+  _greet(c, record, [])
+  _line(c)                                     // MAIL FROM
+  _send(c, "250 ok")
+  _line(c)                                     // RCPT
+  _send(c, "550 no such user")
+  attempt(() -> _line(c))
+  null
+})
+val m5 = smtpConnect("127.0.0.1", f5.port, {timeoutMs: 5000})
+checkFails("a refused recipient is named",
+  () -> m5.send({from: "a@b.c", to: "ghost@e.f", text: "x"}),
+  "<ghost@e.f> was refused: 550")
+m5.close()
+await(f5.thread)
+
+val f5b = _fakeSmtp((c, record) -> {
+  _greet(c, record, [])
+  _finish(c, record)
+})
+val m5b = smtpConnect("127.0.0.1", f5b.port, {timeoutMs: 5000})
+checkFails("mail needs recipients",
+  () -> m5b.send({from: "a@b.c", text: "x"}), "no recipients")
+checkFails("mail needs a from",
+  () -> m5b.send({to: "d@e.f", text: "x"}), "no 'from'")
+m5b.quit()
+await(f5b.thread)
+
+// ------------------------------------------------------------- starttls
+
+val hasOpenssl = execute("which openssl").code == 0
+if (!hasOpenssl) {
+  println("skip: the STARTTLS test needs the openssl command")
+} else {
+  val key = tempFile(".key")
+  val cert = tempFile(".pem")
+  val gen = execute("openssl req -x509 -newkey rsa:2048 -keyout '${key}' -out '${cert}'" +
+    " -days 2 -nodes -subj '/CN=localhost'" +
+    " -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' 2>/dev/null")
+  if (gen.code != 0) {
+    println("skip: could not generate a test certificate")
+  } else {
+    val f6 = _fakeSmtp((c, record) -> {
+      _greet(c, record, ["STARTTLS"])
+      push(record, _line(c))                   // STARTTLS
+      _send(c, "220 go ahead")
+      tlsAccept(c, cert, key, null, 5000)
+      _ehloReply(c, record, ["AUTH PLAIN"])    // the post-TLS EHLO, no new greeting
+      push(record, _line(c))                   // AUTH
+      _send(c, "235 accepted")
+      val body = _acceptMail(c, record)
+      push(record, "BODY:" + join(body, "|"))
+      _finish(c, record)
+    })
+    val m6 = smtpConnect("127.0.0.1", f6.port, {
+      tls: "starttls", caFile: cert, user: "u", password: "p",
+      heloName: "tester.local", timeoutMs: 5000
+    })
+    check("capabilities refresh after the upgrade", m6.capabilities(), ["AUTH PLAIN"])
+    m6.send({from: "a@b.c", to: "d@e.f", subject: "tls", text: "over tls"})
+    m6.quit()
+    await(f6.thread)
+    checkTrue("STARTTLS was requested", contains(f6.record, "STARTTLS"))
+    val tlsBody = first(filter(f6.record, (r) -> startsWith(r, "BODY:")))
+    checkTrue("the body crossed the encrypted link", contains(tlsBody, "over tls"))
+  }
+}
+
+report("smtp")
