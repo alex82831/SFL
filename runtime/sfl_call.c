@@ -628,7 +628,10 @@ char **sfl_argv;
  * does the work: the fault lands on an alternate stack and is turned into the same
  * error the interpreter raises.
  */
-static char alt_stack[SIGSTKSZ < 32768 ? 32768 : SIGSTKSZ];
+/* Not SIGSTKSZ: modern glibc makes that a sysconf() call, not a constant, so it
+   cannot size a static array. 64 KB is comfortably above it on every platform
+   this runs on. */
+static char alt_stack[64 * 1024];
 static char *stack_low;
 
 /*

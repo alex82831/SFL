@@ -115,12 +115,17 @@ object Backend:
       for (name, text) <- RuntimeSources.files do
         FileUtil.write(new File(srcDir, name).getPath, text)
 
+      // Strict -std=c11 makes glibc hide its POSIX surface (siginfo_t, sockets,
+      // pthread extensions), which Apple's headers expose regardless; the feature
+      // macros restore it on Linux without changing what macOS compiles.
+      val featureFlags =
+        if isMac then Nil else Seq("-D_DEFAULT_SOURCE", "-D_XOPEN_SOURCE=700")
       val objs = for (name, _) <- RuntimeSources.files if name.endsWith(".c") yield
         val obj = new File(srcDir, name.stripSuffix(".c") + ".o")
         if verbose then Console.err.println(s"  compiling runtime/$name")
         val cmd = Seq(clang, "-std=c11", "-O2", "-fPIC",
           "-ffunction-sections", "-fdata-sections", "-Wall",
-          "-Wno-unused-parameter", "-Wno-unused-function") ++ sdkFlags ++
+          "-Wno-unused-parameter", "-Wno-unused-function") ++ featureFlags ++ sdkFlags ++
           Seq("-c", new File(srcDir, name).getPath, "-o", obj.getPath)
         val (code, out) = run(cmd)
         if code != 0 then

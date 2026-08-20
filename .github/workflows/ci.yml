@@ -18,6 +18,11 @@ jobs:
         os: [macos-15, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    # Job-wide, so `sbt test` links its test binary the same way nativeLink does:
+    # thin LTO trips over the runner's newer Xcode linker (missing ___unw_* symbols).
+    env:
+      SFL_LTO: none
+      SFL_BUILD_MODE: releaseFast
     steps:
       - uses: actions/checkout@v4
 
@@ -41,9 +46,6 @@ jobs:
 
       # The build and smoke test gate CI, because they are what a release needs.
       - name: Build the native binary
-        env:
-          SFL_LTO: none
-          SFL_BUILD_MODE: releaseFast
         run: sbt nativeLink
 
       - name: Smoke test
