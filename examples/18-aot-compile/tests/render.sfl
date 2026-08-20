@@ -1,0 +1,15 @@
+import "../src/main"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+check("points inside never escape", escape(0.0, 0.0, 50), 50)
+check("points far outside escape on the first step", escape(2.0, 2.0, 50), 1)
+val tiny = render(12, 6, 30)
+check("the frame has the asked-for shape", [length(tiny), length(tiny[0])], [6, 12])
+check("rendering is deterministic", tiny, render(12, 6, 30))
+println("render: ok")

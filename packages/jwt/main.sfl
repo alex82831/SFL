@@ -1,0 +1,112 @@
+// jwt — JSON Web Tokens (RFC 7519), signed with HMAC-SHA-256.
+//
+//   import "jwt"
+//
+//   val token = jwtSign({sub: "user-1", exp: timeMillis() / 1000 + 3600}, "secret")
+//   val claims = jwtVerify(token, "secret")     // raises if forged or expired
+//   claims.sub                                   // "user-1"
+//
+// HS256 is the one algorithm offered (the runtime digests are md5/sha1/
+// sha256, and the asymmetric families need RSA/EC math this package does not
+// carry). Verification checks the signature in full before trusting a byte
+// of the payload, then the time claims: exp (expiry) and nbf (not before),
+// both in Unix seconds, with an optional leeway. `alg: "none"` is rejected
+// outright.
+
+// Signs a payload object. opts: header (extra header fields, e.g. {kid: ...}).
+// The secret is a string or a byte array.
+def jwtSign(payload, secret, opts = {}) {
+  val header = merge({alg: "HS256", typ: "JWT"}, get(opts, "header", {}))
+  if (header.alg != "HS256") {
+    error("jwt: this package signs HS256 only (asked for " + toString(header.alg) + ")")
+  }
+  val signingInput = _b64u(utf8Encode(jsonStringify(header))) + "." +
+    _b64u(utf8Encode(jsonStringify(payload)))
+  signingInput + "." + _b64u(hmacBytes("sha256", _secretBytes(secret), utf8Encode(signingInput)))
+}
+
+// Verifies signature and time claims, returning the payload. opts:
+//   leewaySec (default 0)  slack for exp/nbf clock skew
+//   issuer                 required `iss` value
+//   audience               required `aud` value (aud may be a string or array)
+//   atSec                  "now" in Unix seconds (defaults to the clock)
+def jwtVerify(token, secret, opts = {}) {
+  val parts = split(token, ".")
+  if (length(parts) != 3) then error("jwt: a token has three dot-separated parts")
+  val header = _json(parts[0], "header")
+  if (header?.alg != "HS256") {
+    error("jwt: refusing algorithm " + toString(header?.alg) + " (only HS256 verifies)")
+  }
+  val signingInput = parts[0] + "." + parts[1]
+  val expected = hmacBytes("sha256", _secretBytes(secret), utf8Encode(signingInput))
+  if (!_sameBytes(expected, _unb64u(parts[2], "signature"))) {
+    error("jwt: the signature does not verify")
+  }
+
+  val payload = _json(parts[1], "payload")
+  val leeway = get(opts, "leewaySec", 0)
+  val now = get(opts, "atSec", timeMillis() / 1000)
+  if (contains(payload, "exp") && now > payload.exp + leeway) {
+    error("jwt: the token expired at " + payload.exp + " (now " + now + ")")
+  }
+  if (contains(payload, "nbf") && now < payload.nbf - leeway) {
+    error("jwt: the token is not valid before " + payload.nbf + " (now " + now + ")")
+  }
+  if (contains(opts, "issuer") && payload?.iss != opts.issuer) {
+    error("jwt: the issuer is " + toString(payload?.iss) + ", wanted " + opts.issuer)
+  }
+  if (contains(opts, "audience")) {
+    val aud = payload?.aud
+    val hit = if (isArray(aud)) then contains(aud, opts.audience) else aud == opts.audience
+    if (!hit) then error("jwt: the audience " + jsonStringify(aud ?? null) +
+      " does not include " + opts.audience)
+  }
+  payload
+}
+
+// Decodes without verifying — for inspecting a token's claims. Never make
+// decisions on an unverified payload.
+def jwtDecode(token) {
+  val parts = split(token, ".")
+  if (length(parts) != 3) then error("jwt: a token has three dot-separated parts")
+  {header: _json(parts[0], "header"), payload: _json(parts[1], "payload"), signature: parts[2]}
+}
+
+def _secretBytes(secret) = if (isString(secret)) then utf8Encode(secret) else secret
+
+def _json(part, what) {
+  val r = attempt(() -> jsonParse(utf8Decode(_unb64u(part, what))))
+  if (r?.error != null) then error("jwt: the " + what + " is not valid base64url JSON")
+  r.value
+}
+
+// base64url without padding (RFC 7515 appendix C).
+def _b64u(bytes) {
+  var s = replace(replace(base64EncodeBytes(bytes), "+", "-"), "/", "_")
+  while (endsWith(s, "=")) { s = substring(s, 0, length(s) - 1) }
+  s
+}
+
+def _unb64u(s, what) {
+  var t = replace(replace(s, "-", "+"), "_", "/")
+  val pad = length(t) % 4
+  if (pad == 2) then t += "=="
+  elsif (pad == 3) then t += "="
+  elsif (pad == 1) then error("jwt: the " + what + " is not valid base64url")
+  val r = attempt(() -> base64DecodeBytes(t))
+  if (r?.error != null) then error("jwt: the " + what + " is not valid base64url")
+  r.value
+}
+
+// Every byte is compared whatever the earlier bytes said, so the comparison
+// takes the same path for near-misses and wild misses.
+def _sameBytes(a, b) {
+  if (length(a) != length(b)) then return false
+  var diff = 0
+  var i = 0
+  while (i < length(a)) {
+    diff = bitOr(diff, bitXor(a[i], b[i]))
+    i += 1
+  }
+  diff == 0
+}

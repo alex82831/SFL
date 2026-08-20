@@ -1,0 +1,24 @@
+import "jwt"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got ${got}, want ${want}")
+    exit(1)
+  }
+}
+
+val secret = "test-secret"
+val t = jwtSign({sub: "u1", exp: 2000000000}, secret)
+check("round trip", jwtVerify(t, secret).sub, "u1")
+check("decode without verify", jwtDecode(t).payload.sub, "u1")
+
+val forged = attempt(() -> jwtVerify(t + "x", secret))
+check("forgery fails", forged.error != null, true)
+val wrongKey = attempt(() -> jwtVerify(t, "other"))
+check("wrong secret fails", wrongKey.error != null, true)
+
+val stale = jwtSign({exp: 1000}, secret)
+check("expiry fails at a later atSec", attempt(() -> jwtVerify(stale, secret, {atSec: 2000})).error != null, true)
+check("leeway forgives", jwtVerify(stale, secret, {atSec: 1030, leewaySec: 60}).exp, 1000)
+
+println("auth: ok")

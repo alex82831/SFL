@@ -1,0 +1,49 @@
+// The BSON layer is pure, so it tests without a server; a live block runs
+// when MONGO_URL (or localhost:27017) answers.
+
+import "mongodb"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+// Encode -> decode round trips for the value model.
+val doc = {
+  s: "text", i: 42, f: 2.5, yes: true, no: false, nothing: null,
+  arr: [1, "two", [3]], nested: {a: {b: 1}},
+  wide: 9007199254740993
+}
+check("bson round trips the value model", bsonDecode(bsonEncode(doc)), doc)
+
+// The wrapper spellings survive too.
+val special = {
+  id: {"$oid": "662f0a1b2c3d4e5f60718293"},
+  when: {"$date": 1723972000000},
+  blob: {"$binary": [0, 128, 255], "$subtype": 0},
+  pat: {"$regex": "^a.*z$", "$options": "i"}
+}
+check("wrapper types round trip", bsonDecode(bsonEncode(special)), special)
+
+// ObjectIds are 24 hex chars and carry their creation time.
+val oid = newObjectId()
+check("oid shape", [length(oid["$oid"]), oidTimestamp(oid) > 1600000000000],
+  [24, true])
+check("oids differ", newObjectId()["$oid"] == oid["$oid"], false)
+
+val probe = attempt(() -> mongoConnect(getEnv("MONGO_URL") ?? "mongodb://localhost:27017/sfl_demo",
+  {timeoutMs: 1200}))
+if (probe?.error != null) {
+  println("bson: ok (live checks skipped — no MongoDB server)")
+} else {
+  val client = probe.value
+  val c = client.db("sfl_demo").coll("sfltest_probe")
+  c.drop()
+  c.insertOne({n: 41})
+  check("live round trip", c.findOne({n: 41}).n + 1, 42)
+  c.drop()
+  client.close()
+  println("bson: ok (live checks ran)")
+}

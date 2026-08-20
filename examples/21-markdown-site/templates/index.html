@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>{{site}}</title>
+  <style>body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }</style>
+</head>
+<body>
+<h1>{{site}}</h1>
+<ul>
+{{#posts}}
+  <li><a href="{{slug}}.html">{{title}}</a> <small>{{date}}</small></li>
+{{/posts}}
+</ul>
+</body>
+</html>

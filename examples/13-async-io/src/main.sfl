@@ -1,0 +1,67 @@
+// Asynchronous I/O the SFL way: readiness with poll(), racing threads with
+// awaitAny/race, futures with async/await, and the poll-able UDP surface.
+
+// async() is spawn under its future name: start now, await later.
+val futureSum = async((n) -> {
+  sleep(30)
+  n * (n + 1) / 2
+}, 1000)
+println("doing other work while the future runs...")
+println("the future resolved: ${await(futureSum)}")
+
+// awaitAny returns the index of whichever finishes first.
+val fast = spawn(() -> {
+  sleep(20)
+  "fast"
+})
+val slow = spawn(() -> {
+  sleep(400)
+  "slow"
+})
+val winner = awaitAny([slow, fast], 2000)
+println("first finisher: index ${winner} (${await(if (winner == 0) then slow else fast)})")
+await(slow)
+
+// race: the first thread to finish wins — [index, value] of the winner.
+val [winnerAt, said] = race([
+  spawn(() -> {
+    sleep(300)
+    "tortoise"
+  }),
+  spawn(() -> {
+    sleep(15)
+    "hare"
+  })
+], 2000)
+println("race says: thread ${winnerAt} with '${said}'")
+
+// UDP: sockets are cheap, datagrams carry strings, and poll() watches many.
+val a = udpSocket()
+val b = udpSocket()
+println("two UDP sockets on ports ${udpPort(a)} and ${udpPort(b)}")
+
+// A thread answers pings on socket a.
+val responder = spawn(() -> {
+  val got = udpReceive(a, 2000)
+  udpSend(a, got.host, got.port, toUpper(got.data))
+  null
+})
+
+udpSend(b, "127.0.0.1", udpPort(a), "ping over udp")
+val answer = udpReceive(b, 2000)
+println("reply: " + answer.data)
+await(responder)
+
+// poll() blocks until one of several handles is readable.
+udpSend(b, "127.0.0.1", udpPort(a), "wake up a")
+val ready = poll([a, b], 1000)
+println("poll saw ${length(ready)} readable socket(s)")
+println("it was a: " + (udpReceive(a, 100).data))
+println("poll times out empty: " + jsonStringify(poll([b], 50)))
+
+closeUdp(a)
+closeUdp(b)
+
+// withTimeout wraps any blocking computation in a deadline.
+val late = attempt(() -> withTimeout(() -> sleep(500), 50))
+println("withTimeout raised: " + (late?.error != null))

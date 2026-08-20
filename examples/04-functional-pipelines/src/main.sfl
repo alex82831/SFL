@@ -1,0 +1,62 @@
+// The functional layer: the |> pipeline, combinators, closures that carry
+// state, memoisation, and tail recursion that never overflows.
+
+// |> reads left to right; a call on the right receives the piped value as
+// its first argument: `xs |> map(f)` is `map(xs, f)`.
+val sumOfEvenSquares =
+  range(1, 101)
+  |> filter((n) -> n % 2 == 0)
+  |> map((n) -> n * n)
+  |> sum
+println("sum of even squares to 100: ${sumOfEvenSquares}")
+
+// Combinators build functions out of functions.
+val inc = (n) -> n + 1
+val dbl = (n) -> n * 2
+println("compose(inc, dbl)(5) = ${compose(inc, dbl)(5)}")   // inc(dbl(5)) = 11
+println("pipe(inc, dbl)(5) = ${pipe(inc, dbl)(5)}")         // dbl(inc(5)) = 12
+
+val add = (a, b, c) -> a + b + c
+println("curry: ${curry(add)(1)(2)(3)}")
+val addTen = partial(add, 10)
+println("partial: ${addTen(20, 12)}")
+println("flip(sub): ${flip((a, b) -> a - b)(3, 10)}")
+
+// Closures capture their environment; each call of counter() makes a new one.
+def counter() {
+  var n = 0
+  () -> {
+    n += 1
+    n
+  }
+}
+val tick = counter()
+val tock = counter()
+println("tick ${tick()} ${tick()} ${tick()}, tock ${tock()}")
+
+// memoize caches by arguments — the classic fibonacci demonstration.
+var calls = 0
+def slowFib(n) {
+  calls += 1
+  if (n < 2) then n else slowFib(n - 1) + slowFib(n - 2)
+}
+// Recursive memoisation wants the function to call the memoised name:
+var fastFib = null
+fastFib = memoize((n) -> if (n < 2) then n else fastFib(n - 1) + fastFib(n - 2))
+println("fib(60) = ${fastFib(60)}")
+slowFib(20)
+println("(the naive version made ${calls} calls for fib(20) alone)")
+
+// Tail calls are eliminated: a million iterations of an accumulator loop.
+def sumTo(n, acc = 0) = if (n == 0) then acc else sumTo(n - 1, acc + n)
+println("sumTo(1000000) = ${sumTo(1000000)}")
+
+// once, tap and constantly round out the toolkit.
+val boot = once(() -> {
+  println("  (booting exactly once)")
+  "ready"
+})
+boot()
+println("once: ${boot()}")
+val traced = range(1, 4) |> tap((xs) -> println("  (tap sees " + jsonStringify(xs) + ")")) |> sum
+println("tap passed the value through: ${traced}")

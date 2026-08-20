@@ -1,0 +1,51 @@
+// Lazy sequences: infinite by construction, nothing computed until taken.
+// naturals/iterate/cycle produce, lazy map/filter transform, take realises.
+
+// The naturals, squared, keeping the ones that end in 6 — all infinite,
+// until take() asks for five of them.
+val squaresEndingIn6 =
+  naturals()
+  |> map((n) -> n * n)
+  |> filter((n) -> n % 10 == 6)
+  |> take(5)
+  |> toArray
+println("squares ending in 6: " + jsonStringify(squaresEndingIn6))
+
+// iterate unfolds from a seed: powers of two.
+println("powers of two: " + jsonStringify(iterate((n) -> n * 2, 1) |> take(12) |> toArray))
+
+// The Collatz walk from 27, until it reaches 1 — takeWhile on a lazy chain.
+val collatz = iterate((n) -> if (n % 2 == 0) then n / 2 else 3 * n + 1, 27)
+val walk = collatz |> takeWhile((n) -> n != 1) |> toArray
+println("collatz from 27: ${length(walk)} steps, peak ${max(walk)}")
+
+// cycle repeats a finite array forever.
+println("round robin: " + jsonStringify(cycle(["a", "b", "c"]) |> take(7) |> toArray))
+
+// A lazy fibonacci via iterate over pairs.
+val fibs = iterate((p) -> [p[1], p[0] + p[1]], [0, 1]) |> map((p) -> p[0])
+println("fibonacci: " + jsonStringify(fibs |> take(12) |> toArray))
+
+// Primes: filter the naturals by trial division. Lazy means each prime is
+// only tested when something downstream wants it.
+def isPrime(n) {
+  if (n < 2) then return false
+  var d = 2
+  while (d * d <= n) {
+    if (n % d == 0) then return false
+    d += 1
+  }
+  true
+}
+val primes = naturals() |> filter(isPrime)
+println("first primes: " + jsonStringify(primes |> take(10) |> toArray))
+println("primes after 1000: " + jsonStringify(primes |> dropWhile((p) -> p < 1000) |> take(4) |> toArray))
+
+// Laziness is observable: map only runs for what is taken.
+var evaluated = 0
+val counted = naturals() |> map((n) -> {
+  evaluated += 1
+  n * 10
+})
+val firstThree = counted |> take(3) |> toArray
+println("took " + jsonStringify(firstThree) + " — the map ran ${evaluated} times, not forever")

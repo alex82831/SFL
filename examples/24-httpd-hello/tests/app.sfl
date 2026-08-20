@@ -1,0 +1,29 @@
+import "httpd"
+import "../src/app"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+// start() serves in the background on an ephemeral port; the builtin HTTP
+// client drives it from this same process.
+val srv = httpServer({quiet: true, handler: app()})
+srv.start()
+val base = "http://127.0.0.1:${srv.port()}"
+
+check("path params and query", httpGet(base + "/hello/ada?times=2"), "hello, ada!\nhello, ada!\n")
+check("json post", jsonParse(httpPost(base + "/api/sum", "[40, 2]", "application/json")),
+  {sum: 42, count: 2})
+check("wildcard routes", jsonParse(httpGet(base + "/echo/a/b/c")).path, "a/b/c")
+check("static files serve", httpGet(base + "/assets/style.css"),
+  "body { font-family: system-ui, sans-serif; }\n")
+check("unknown paths are 404", httpRequest("GET", base + "/nope").status, 404)
+check("wrong methods are 405", httpRequest("PUT", base + "/api/sum").status, 405)
+check("redirects are followed to the page", contains(httpRequest("GET", base + "/").body,
+  "Served by the httpd package"), true)
+
+srv.stop()
+println("app: ok")

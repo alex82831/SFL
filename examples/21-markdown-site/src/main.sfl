@@ -1,0 +1,11 @@
+// A static site generator in a page of SFL: markdown posts with TOML front
+// matter, mustache templates, an index — into site/.
+
+import "site"
+
+val posts = buildSite("posts", "templates", "site", "The SFL Notebook")
+println("built site/ with ${length(posts)} post(s):")
+for (p in posts) {
+  println("  site/${p.slug}.html — ${p.title} (${p.date})")
+}
+println("open site/index.html in a browser")

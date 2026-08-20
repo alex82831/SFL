@@ -1,0 +1,5 @@
+{
+  "name": "jwt-auth",
+  "version": "0.1.0",
+  "deps": { "jwt": "^0.1.0" }
+}

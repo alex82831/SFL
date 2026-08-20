@@ -1,0 +1,37 @@
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got ${got}, want ${want}")
+    exit(1)
+  }
+}
+
+check("try returns the body's value", try(() -> 41 + 1, (e) -> -1), 42)
+check("try routes the error to the handler", try(() -> error("boom"), (e) -> "caught " + e), "caught boom")
+
+val ok = attempt(() -> 7)
+check("attempt success shape", [ok.value, ok?.error], [7, null])
+val no = attempt(() -> error("nope"))
+check("attempt failure shape", no.error.message, "nope")
+
+check("null-safe access", ({a: null})?.a?.b ?? "dflt", "dflt")
+check("?? keeps falsy non-null values", 0 ?? 5, 0)
+
+var ran = 0
+def retry(times, fn) {
+  var last1 = null
+  for (i in range(times)) {
+    val r = attempt(fn)
+    if (r?.error == null) then return r.value
+    last1 = r.error.message
+  }
+  error("gave up: ${last1}")
+}
+check("retry succeeds", retry(3, () -> {
+  ran += 1
+  if (ran < 2) then error("again")
+  ran
+}), 2)
+val gaveUp = attempt(() -> retry(2, () -> error("always")))
+check("retry gives up with the last error", gaveUp.error.message, "gave up: always")
+
+println("errors: ok")

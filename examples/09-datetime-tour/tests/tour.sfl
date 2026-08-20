@@ -1,0 +1,18 @@
+import "datetime"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got ${got}, want ${want}")
+    exit(1)
+  }
+}
+
+check("parse + iso round trip", dtIso(dtParse("2026-08-19T07:30:00Z")), "2026-08-19T07:30:00Z")
+check("offsets shift the reading", dtIso(dtParse("2026-08-19T15:30:00+08:00")), "2026-08-19T07:30:00Z")
+check("month ends clamp", dtIsoDate(dtAddMonths(dtMake(2026, 1, 31), 1)), "2026-02-28")
+check("leap clamp", dtIsoDate(dtAddMonths(dtMake(2028, 1, 31), 1)), "2028-02-29")
+check("day difference", dtDiffDays(dtMake(2027, 1, 1), dtMake(2026, 12, 25)), 7)
+check("weekday", dtParts(dtMake(2026, 8, 19)).weekday, 3)   // a Wednesday
+check("leap year", dtIsLeapYear(2028), true)
+check("not leap", dtIsLeapYear(2100), false)
+println("datetime: ok")

@@ -1,0 +1,132 @@
+// postgres/proto — PostgreSQL protocol 3.0 framing and the big-endian byte
+// forms it counts in.
+//
+// After the startup message, every message is `1-byte type + int32 length
+// (including itself) + payload`, in both directions. `state` is the
+// connection state the driver builds: {sock, timeoutMs, ...}. The `pgp`
+// prefix keeps these public helpers (the test suite drives them directly)
+// out of everyone else's namespace; they are an implementation surface, not
+// the driver's API.
+
+def pgpAppend(dst, src) {
+  for (b in src) { push(dst, b) }
+  dst
+}
+
+def pgpPushU16(out, v) {
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(v, 0xff))
+  out
+}
+
+def pgpPushU32(out, v) {
+  push(out, bitAnd(shiftRightU(v, 24), 0xff))
+  push(out, bitAnd(shiftRightU(v, 16), 0xff))
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(v, 0xff))
+  out
+}
+
+// NUL-terminated UTF-8 string, the protocol's only string form.
+def pgpPushStr(out, s) {
+  pgpAppend(out, utf8Encode(s))
+  push(out, 0)
+  out
+}
+
+// ------------------------------------------------------------- read cursor
+
+def pgpCur(bytes) = {b: bytes, at: 0}
+
+def pgpRemaining(cur) = length(cur.b) - cur.at
+
+def pgpSkip(cur, n) {
+  cur.at += n
+  null
+}
+
+def pgpU8(cur) {
+  val v = cur.b[cur.at]
+  cur.at += 1
+  v
+}
+
+def pgpU16(cur) {
+  val b = cur.b
+  val v = shiftLeft(b[cur.at], 8) + b[cur.at + 1]
+  cur.at += 2
+  v
+}
+
+def pgpU32(cur) {
+  val b = cur.b
+  val v = shiftLeft(b[cur.at], 24) + shiftLeft(b[cur.at + 1], 16) +
+    shiftLeft(b[cur.at + 2], 8) + b[cur.at + 3]
+  cur.at += 4
+  v
+}
+
+// int32 with the sign kept: row values use -1 for NULL.
+def pgpI32(cur) {
+  val v = pgpU32(cur)
+  if (v >= 0x80000000) then v - 0x100000000 else v
+}
+
+def pgpBytesN(cur, n) {
+  val out = []
+  val stop = cur.at + n
+  while (cur.at < stop) {
+    push(out, cur.b[cur.at])
+    cur.at += 1
+  }
+  out
+}
+
+def pgpStrN(cur, n) = utf8Decode(pgpBytesN(cur, n))
+
+def pgpStrNul(cur) {
+  val out = []
+  val n = length(cur.b)
+  while (cur.at < n && cur.b[cur.at] != 0) {
+    push(out, cur.b[cur.at])
+    cur.at += 1
+  }
+  cur.at += 1
+  utf8Decode(out)
+}
+
+// --------------------------------------------------------------- messages
+
+// Sends one typed message; `kind` is a one-character string, or null for the
+// untyped startup family (StartupMessage, SSLRequest).
+def pgpSend(state, kind, payload) {
+  val out = []
+  if (kind != null) then push(out, ord(kind))
+  pgpPushU32(out, 4 + length(payload))
+  pgpAppend(out, payload)
+  socketWriteBytes(state.sock, out)
+}
+
+def _readN(state, n) {
+  val out = []
+  while (length(out) < n) {
+    val chunk = socketReadBytes(state.sock, n - length(out), state.timeoutMs)
+    if (chunk == null) {
+      error("postgres: timed out after " + state.timeoutMs + "ms waiting for the server")
+    }
+    if (length(chunk) == 0) then error("postgres: the server closed the connection")
+    pgpAppend(out, chunk)
+  }
+  out
+}
+
+// Reads one message: {kind: "R", payload: bytes}.
+def pgpRead(state) {
+  val head = _readN(state, 5)
+  val kind = chr(head[0])
+  val len = shiftLeft(head[1], 24) + shiftLeft(head[2], 16) + shiftLeft(head[3], 8) + head[4]
+  if (len < 4 || len > 0x40000000) {
+    error("postgres: malformed message length " + len)
+  }
+  {kind: kind, payload: _readN(state, len - 4)}
+}

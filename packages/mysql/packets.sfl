@@ -1,0 +1,241 @@
+// mysql/packets — MySQL packet framing and the little-endian byte forms the
+// protocol counts in: fixed-width integers, length-encoded integers and
+// strings, NUL-terminated strings.
+//
+// Everything travels in packets of `3-byte length (LE) + 1-byte sequence id +
+// payload`; a payload of 0xffffff bytes means "continued in the next packet".
+// `state` is the connection state the driver builds: {sock, timeoutMs, seq},
+// where seq is the next sequence id to send (the reader keeps it in step with
+// the server). The names carry a `myp` prefix because SFL modules share one
+// global namespace; they are public so the test suite and the other modules
+// of this package can reach them, but they are an implementation surface, not
+// the driver's API.
+
+// ------------------------------------------------------------ write helpers
+
+// Appends every byte of src to dst and returns dst.
+def mypAppend(dst, src) {
+  for (b in src) { push(dst, b) }
+  dst
+}
+
+def mypPushU16(out, v) {
+  push(out, bitAnd(v, 0xff))
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  out
+}
+
+def mypPushU24(out, v) {
+  push(out, bitAnd(v, 0xff))
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(shiftRightU(v, 16), 0xff))
+  out
+}
+
+def mypPushU32(out, v) {
+  push(out, bitAnd(v, 0xff))
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(shiftRightU(v, 16), 0xff))
+  push(out, bitAnd(shiftRightU(v, 24), 0xff))
+  out
+}
+
+def mypPushU64(out, v) {
+  var i = 0
+  while (i < 8) {
+    push(out, bitAnd(shiftRightU(v, i * 8), 0xff))
+    i += 1
+  }
+  out
+}
+
+// Length-encoded integer: 1, 3, 4 or 9 bytes depending on magnitude.
+def mypPushLenenc(out, v) {
+  if (v < 251) {
+    push(out, v)
+  } elsif (v < 65536) {
+    push(out, 0xfc)
+    mypPushU16(out, v)
+  } elsif (v < 16777216) {
+    push(out, 0xfd)
+    mypPushU24(out, v)
+  } else {
+    push(out, 0xfe)
+    mypPushU64(out, v)
+  }
+  out
+}
+
+// Length-encoded string from raw bytes.
+def mypPushLenencBytes(out, bytes) {
+  mypPushLenenc(out, length(bytes))
+  mypAppend(out, bytes)
+}
+
+// NUL-terminated UTF-8 string.
+def mypPushZeroStr(out, s) {
+  mypAppend(out, utf8Encode(s))
+  push(out, 0)
+  out
+}
+
+// ------------------------------------------------------------- read cursor
+
+// A mutable read position over a byte array; every reader advances it.
+def mypCur(bytes) = {b: bytes, at: 0}
+
+def mypRemaining(cur) = length(cur.b) - cur.at
+
+def mypU8(cur) {
+  val v = cur.b[cur.at]
+  cur.at += 1
+  v
+}
+
+def mypU16(cur) {
+  val b = cur.b
+  val v = b[cur.at] + shiftLeft(b[cur.at + 1], 8)
+  cur.at += 2
+  v
+}
+
+def mypU24(cur) {
+  val b = cur.b
+  val v = b[cur.at] + shiftLeft(b[cur.at + 1], 8) + shiftLeft(b[cur.at + 2], 16)
+  cur.at += 3
+  v
+}
+
+def mypU32(cur) {
+  val b = cur.b
+  val v = b[cur.at] + shiftLeft(b[cur.at + 1], 8) + shiftLeft(b[cur.at + 2], 16) +
+    shiftLeft(b[cur.at + 3], 24)
+  cur.at += 4
+  v
+}
+
+// Eight bytes little-endian. The top byte shifts into the sign bit, so a
+// server value past 2^63-1 (an unsigned BIGINT insert id) wraps negative —
+// the driver guards the one place that could matter.
+def mypU64(cur) {
+  var v = 0
+  var i = 7
+  while (i >= 0) {
+    v = shiftLeft(v, 8) + cur.b[cur.at + i]
+    i -= 1
+  }
+  cur.at += 8
+  v
+}
+
+// Length-encoded integer; 0xfb (the NULL marker in row values) is the
+// caller's to check before coming here.
+def mypLenenc(cur) {
+  val first = mypU8(cur)
+  if (first < 0xfb) then first
+  elsif (first == 0xfc) then mypU16(cur)
+  elsif (first == 0xfd) then mypU24(cur)
+  elsif (first == 0xfe) then mypU64(cur)
+  else error("mysql: 0x" + hexEncodeBytes([first]) + " is not a length-encoded integer")
+}
+
+def mypBytesN(cur, n) {
+  val out = []
+  val stop = cur.at + n
+  while (cur.at < stop) {
+    push(out, cur.b[cur.at])
+    cur.at += 1
+  }
+  out
+}
+
+def mypSkip(cur, n) {
+  cur.at += n
+  null
+}
+
+def mypStrN(cur, n) = utf8Decode(mypBytesN(cur, n))
+
+def mypStrNul(cur) {
+  val out = []
+  val n = length(cur.b)
+  while (cur.at < n && cur.b[cur.at] != 0) {
+    push(out, cur.b[cur.at])
+    cur.at += 1
+  }
+  cur.at += 1
+  utf8Decode(out)
+}
+
+def mypStrLenenc(cur) = mypStrN(cur, mypLenenc(cur))
+
+def mypBytesLenenc(cur) = mypBytesN(cur, mypLenenc(cur))
+
+// The rest of the payload as a string (used by ERR messages and auth data).
+def mypStrEof(cur) = mypStrN(cur, mypRemaining(cur))
+
+def mypBytesEof(cur) = mypBytesN(cur, mypRemaining(cur))
+
+// --------------------------------------------------------------- packet IO
+
+// Sends one payload, splitting at the 0xffffff boundary as the protocol
+// requires (a maximal chunk promises a follow-up, so an exact multiple ends
+// with an empty packet).
+def mypSend(state, payload) {
+  var at = 0
+  val total = length(payload)
+  while (true) {
+    val n = min(total - at, 0xffffff)
+    val head = []
+    mypPushU24(head, n)
+    push(head, state.seq)
+    state.seq = bitAnd(state.seq + 1, 0xff)
+    socketWriteBytes(state.sock, head)
+    if (n > 0) {
+      // Written straight from the payload when whole, sliced only when split.
+      if (n == total) {
+        socketWriteBytes(state.sock, payload)
+      } else {
+        socketWriteBytes(state.sock, slice(payload, at, at + n))
+      }
+    }
+    at += n
+    if (n < 0xffffff) then break
+  }
+  null
+}
+
+// Reads exactly n bytes from the socket, or raises.
+def _readN(state, n) {
+  val out = []
+  while (length(out) < n) {
+    val chunk = socketReadBytes(state.sock, n - length(out), state.timeoutMs)
+    if (chunk == null) {
+      error("mysql: timed out after " + state.timeoutMs + "ms waiting for the server")
+    }
+    if (length(chunk) == 0) then error("mysql: the server closed the connection")
+    mypAppend(out, chunk)
+  }
+  out
+}
+
+// Reads one logical payload, reassembling 0xffffff continuations, and keeps
+// the sequence counter in step for the reply that follows.
+def mypRead(state) {
+  var payload = null
+  while (true) {
+    val head = _readN(state, 4)
+    val hc = mypCur(head)
+    val n = mypU24(hc)
+    val seq = mypU8(hc)
+    state.seq = bitAnd(seq + 1, 0xff)
+    val part = _readN(state, n)
+    if (payload == null) {
+      payload = part
+    } else {
+      mypAppend(payload, part)
+    }
+    if (n < 0xffffff) then break
+  }
+  payload
+}

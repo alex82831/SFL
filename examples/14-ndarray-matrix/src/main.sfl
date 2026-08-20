@@ -1,0 +1,80 @@
+// Multidimensional arrays: ndarray builds rectangular grids, a[i, j] sugar
+// reads and writes them, shape() measures them. A matrix multiply and a
+// small heat-diffusion grid.
+
+// ndarray([rows, cols], fill) — a nested array, nothing more exotic.
+val m = ndarray([2, 3], 0)
+m[0, 0] = 1
+m[0, 2] = 5
+m[1, 1] = 7
+println("m = " + jsonStringify(m))
+println("shape: " + jsonStringify(shape(m)) + ", rectangular: " + isRectangular(m))
+println("m[1, 1] = ${m[1, 1]}")
+
+// Matrix multiply, the triple loop.
+def matmul(a, b) {
+  val [n, k1] = shape(a)
+  val [k2, p] = shape(b)
+  assert(k1 == k2, "shapes ${jsonStringify(shape(a))} x ${jsonStringify(shape(b))} do not chain")
+  val out = ndarray([n, p], 0)
+  for (i in range(n)) {
+    for (j in range(p)) {
+      var s = 0
+      for (k in range(k1)) {
+        s += a[i, k] * b[k, j]
+      }
+      out[i, j] = s
+    }
+  }
+  out
+}
+
+val a = [[1, 2], [3, 4]]
+val b = [[5, 6], [7, 8]]
+println("a x b = " + jsonStringify(matmul(a, b)))
+
+def identity(n) {
+  val out = ndarray([n, n], 0)
+  for (i in range(n)) { out[i, i] = 1 }
+  out
+}
+println("a x I = a? " + (matmul(a, identity(2)) == a))
+
+// A 3-D array is just deeper nesting.
+val cube = ndarray([2, 2, 2], 0)
+cube[1, 0, 1] = 9
+println("cube shape " + jsonStringify(shape(cube)) + ", cube[1,0,1] = ${cube[1, 0, 1]}")
+
+// Heat diffusion on a grid: average each cell with its neighbours.
+def step(grid) {
+  val [h, w] = shape(grid)
+  val next = ndarray([h, w], 0.0)
+  for (y in range(h)) {
+    for (x in range(w)) {
+      var total = 0.0
+      var count = 0
+      for (dy in [-1, 0, 1]) {
+        for (dx in [-1, 0, 1]) {
+          val ny = y + dy
+          val nx = x + dx
+          if (ny >= 0 && ny < h && nx >= 0 && nx < w) {
+            total += grid[ny, nx]
+            count += 1
+          }
+        }
+      }
+      next[y, x] = total / count
+    }
+  }
+  next
+}
+
+var grid = ndarray([7, 7], 0.0)
+grid[3, 3] = 100.0
+for (i in range(3)) { grid = step(grid) }
+println("heat after 3 steps:")
+val glyphs = [" ", ".", ":", "*", "#"]
+for (row in grid) {
+  println("  " + join(map(row, (v) -> glyphs[min(toInt(v / 3.0), 4)]), ""))
+}
+printf("centre holds %.2f of the original heat\n", grid[3, 3])

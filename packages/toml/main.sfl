@@ -1,0 +1,558 @@
+// toml — TOML 1.0 configuration files: parse and generate.
+//
+//   import "toml"
+//
+//   val cfg = tomlParse(readFile("app.toml"))
+//   cfg.server.port
+//   writeFile("out.toml", tomlStringify({server: {port: 8080}}))
+//
+// What it speaks, of TOML 1.0: bare/quoted/dotted keys, basic and literal
+// strings in single- and multi-line forms with the full escape set, integers
+// (decimal with underscores, 0x/0o/0b), floats (exponents, inf, nan),
+// booleans, arrays (multi-line, trailing commas, comments inside), inline
+// tables, [tables], [[arrays of tables]], and # comments. Dates and times
+// (1979-05-27T07:32:00Z and friends) come back as their literal strings —
+// SFL has no date kind, and the string round-trips into the datetime
+// package's dtParse. Duplicate keys and table redefinitions are errors, as
+// the spec demands. TOML has no null: tomlStringify refuses one.
+
+// ------------------------------------------------------------------ parse
+
+def tomlParse(text) {
+  val c = {s: text, at: 0, line: 1, root: {}, tables: []}
+  var current = c.root
+  while (true) {
+    _tSkipBlank(c)
+    if (_tEof(c)) then break
+    val ch = _tPeek(c)
+    if (ch == "[") {
+      _tNext(c)
+      val isArray = _tPeek(c) == "["
+      if (isArray) then _tNext(c)
+      _tSkipSpace(c)
+      val path = _tKeyPath(c, "]")
+      _tSkipSpace(c)
+      _tExpect(c, "]")
+      if (isArray) then _tExpect(c, "]")
+      _tEol(c)
+      current = if (isArray) then _tArrayTable(c, path) else _tDefineTable(c, path)
+    } else {
+      val path = _tKeyPath(c, "=")
+      _tExpect(c, "=")
+      _tSkipSpace(c)
+      val value = _tValue(c)
+      _tEol(c)
+      _tAssign(c, current, path, value)
+    }
+  }
+  c.root
+}
+
+// ------------------------------------------------------------ the cursor
+
+def _tEof(c) = c.at >= length(c.s)
+
+def _tPeek(c) = if (_tEof(c)) then "" else charAt(c.s, c.at)
+
+def _tPeek2(c) = if (c.at + 1 >= length(c.s)) then "" else charAt(c.s, c.at + 1)
+
+def _tNext(c) {
+  val ch = charAt(c.s, c.at)
+  c.at += 1
+  if (ch == "\n") then c.line += 1
+  ch
+}
+
+def _tErr(c, msg) = error("toml: " + msg + " (line " + c.line + ")")
+
+def _tExpect(c, ch) {
+  if (_tPeek(c) != ch) then _tErr(c, "expected '" + ch + "', found " +
+    (if (_tEof(c)) then "the end" else "'" + _tPeek(c) + "'"))
+  _tNext(c)
+  null
+}
+
+def _tSkipSpace(c) {
+  while (!_tEof(c) && (_tPeek(c) == " " || _tPeek(c) == "\t")) { _tNext(c) }
+  null
+}
+
+// Spaces, comments and newlines — between top-level constructs.
+def _tSkipBlank(c) {
+  while (!_tEof(c)) {
+    val ch = _tPeek(c)
+    if (ch == " " || ch == "\t" || ch == "\n" || ch == "\r") {
+      _tNext(c)
+    } elsif (ch == "#") {
+      while (!_tEof(c) && _tPeek(c) != "\n") { _tNext(c) }
+    } else {
+      break
+    }
+  }
+  null
+}
+
+// After a value or header: only spaces and a comment may precede the newline.
+def _tEol(c) {
+  _tSkipSpace(c)
+  if (_tPeek(c) == "#") {
+    while (!_tEof(c) && _tPeek(c) != "\n") { _tNext(c) }
+  }
+  if (_tEof(c)) then return null
+  if (_tPeek(c) == "\r") then _tNext(c)
+  if (_tPeek(c) != "\n") then _tErr(c, "expected the end of the line, found '" + _tPeek(c) + "'")
+  _tNext(c)
+  null
+}
+
+// -------------------------------------------------------------------- keys
+
+// A dotted key path, stopping before `stop` ('=' or ']').
+def _tKeyPath(c, stop) {
+  val path = []
+  while (true) {
+    _tSkipSpace(c)
+    push(path, _tKey(c))
+    _tSkipSpace(c)
+    if (_tPeek(c) == ".") {
+      _tNext(c)
+    } else {
+      break
+    }
+  }
+  if (isEmpty(path)) then _tErr(c, "expected a key before '" + stop + "'")
+  path
+}
+
+def _tKey(c) {
+  val ch = _tPeek(c)
+  if (ch == "\"") then return _tBasicString(c)
+  if (ch == "'") then return _tLiteralString(c)
+  var out = ""
+  while (!_tEof(c)) {
+    val k = _tPeek(c)
+    if (matches(k, "^[A-Za-z0-9_-]$")) {
+      out += _tNext(c)
+    } else {
+      break
+    }
+  }
+  if (out == "") then _tErr(c, "expected a key, found '" + _tPeek(c) + "'")
+  out
+}
+
+// ------------------------------------------------------------------ values
+
+def _tValue(c) {
+  val ch = _tPeek(c)
+  if (ch == "\"") then return _tBasicString(c)
+  if (ch == "'") then return _tLiteralString(c)
+  if (ch == "[") then return _tArray(c)
+  if (ch == "{") then return _tInlineTable(c)
+  // Bare word: booleans, numbers, dates. Consume the raw run; a space ends
+  // it except for the one a local datetime may put between date and time.
+  var raw = ""
+  while (!_tEof(c)) {
+    val k = _tPeek(c)
+    if (k == "\n" || k == "\r" || k == "#" || k == "," || k == "]" || k == "}") then break
+    if (k == " " || k == "\t") {
+      if (matches(raw, "^\\d{4}-\\d{2}-\\d{2}$") && _tTimeAhead(c)) {
+        raw += " "
+        _tNext(c)
+        continue
+      }
+      break
+    }
+    raw += _tNext(c)
+  }
+  raw = trim(raw)
+  if (raw == "") then _tErr(c, "expected a value")
+  if (raw == "true") then return true
+  if (raw == "false") then return false
+  if (_tIsDate(raw)) then return raw
+  _tNumber(c, raw)
+}
+
+// Offset/local datetimes, dates and times stay strings; the shapes all open
+// with 4-digit-year dashes or 2-digit-colon times.
+def _tIsDate(raw) =
+  matches(raw, "^\\d{4}-\\d{2}-\\d{2}([Tt ].*)?$") || matches(raw, "^\\d{2}:\\d{2}:\\d{2}.*$")
+
+// True when hh:mm follows the space the cursor sits on.
+def _tTimeAhead(c) {
+  val s = c.s
+  if (c.at + 3 >= length(s)) then return false
+  matches(charAt(s, c.at + 1), "^\\d$") && matches(charAt(s, c.at + 2), "^\\d$") &&
+    charAt(s, c.at + 3) == ":"
+}
+
+def _tNumber(c, raw0) {
+  val raw = replace(raw0, "_", "")
+  if (matches(raw0, "^[+-]?[0-9_]+$")) {
+    // Underscores must separate digits, never lead or trail.
+    if (contains(raw0, "_") && !matches(raw0, "^[+-]?[0-9]+(_[0-9]+)*$")) {
+      _tErr(c, "misplaced underscore in the number " + raw0)
+    }
+    return parseInt(raw)
+  }
+  if (matches(raw, "^[+-]?0x[0-9A-Fa-f]+$")) then return _tSigned(raw, 16)
+  if (matches(raw, "^[+-]?0o[0-7]+$")) then return _tSigned(raw, 8)
+  if (matches(raw, "^[+-]?0b[01]+$")) then return _tSigned(raw, 2)
+  if (raw == "inf" || raw == "+inf") then return 1.0 / 0.0
+  if (raw == "-inf") then return -1.0 / 0.0
+  if (raw == "nan" || raw == "+nan" || raw == "-nan") then return 0.0 / 0.0
+  if (matches(raw, "^[+-]?[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?$") &&
+      (contains(raw, ".") || contains(toLower(raw), "e"))) {
+    return parseFloat(raw)
+  }
+  _tErr(c, "'" + raw0 + "' is not a TOML value")
+}
+
+def _tSigned(raw, radix) {
+  if (startsWith(raw, "-")) then -parseInt(substring(raw, 3, length(raw)), radix)
+  elsif (startsWith(raw, "+")) then parseInt(substring(raw, 3, length(raw)), radix)
+  else parseInt(substring(raw, 2, length(raw)), radix)
+}
+
+def _tBasicString(c) {
+  _tNext(c)                                  // the opening quote
+  if (_tPeek(c) == "\"" && _tPeek2(c) == "\"") {
+    _tNext(c)
+    _tNext(c)
+    return _tMultiline(c, "\"", true)
+  }
+  var out = ""
+  while (true) {
+    if (_tEof(c) || _tPeek(c) == "\n") then _tErr(c, "a basic string never closes")
+    val ch = _tNext(c)
+    if (ch == "\"") then break
+    if (ch == "\\") {
+      out += _tEscape(c)
+    } else {
+      out += ch
+    }
+  }
+  out
+}
+
+def _tLiteralString(c) {
+  _tNext(c)
+  if (_tPeek(c) == "'" && _tPeek2(c) == "'") {
+    _tNext(c)
+    _tNext(c)
+    return _tMultiline(c, "'", false)
+  }
+  var out = ""
+  while (true) {
+    if (_tEof(c) || _tPeek(c) == "\n") then _tErr(c, "a literal string never closes")
+    val ch = _tNext(c)
+    if (ch == "'") then break
+    out += ch
+  }
+  out
+}
+
+// The body of a multi-line string, after its opening triple quote.
+def _tMultiline(c, quote, escapes) {
+  // A newline right after the opening quotes is trimmed.
+  if (_tPeek(c) == "\r") then _tNext(c)
+  if (_tPeek(c) == "\n") then _tNext(c)
+  var out = ""
+  while (true) {
+    if (_tEof(c)) then _tErr(c, "a multi-line string never closes")
+    if (_tPeek(c) == quote && _tPeek2(c) == quote &&
+        c.at + 2 < length(c.s) && charAt(c.s, c.at + 2) == quote) {
+      _tNext(c)
+      _tNext(c)
+      _tNext(c)
+      break
+    }
+    val ch = _tNext(c)
+    if (escapes && ch == "\\") {
+      // A backslash before the line's end eats whitespace to the next content.
+      var probe = c.at
+      var onlySpace = true
+      var sawNewline = false
+      while (probe < length(c.s)) {
+        val k = charAt(c.s, probe)
+        if (k == "\n") {
+          sawNewline = true
+          probe += 1
+        } elsif (k == " " || k == "\t" || k == "\r") {
+          probe += 1
+          if (sawNewline) then null
+        } else {
+          break
+        }
+        if (sawNewline && probe < length(c.s) &&
+            charAt(c.s, probe) != " " && charAt(c.s, probe) != "\t" &&
+            charAt(c.s, probe) != "\n" && charAt(c.s, probe) != "\r") then break
+      }
+      if (sawNewline) {
+        while (c.at < probe) { _tNext(c) }
+      } else {
+        out += _tEscape(c)
+      }
+    } elsif (ch == "\r" && _tPeek(c) == "\n") {
+      out += _tNext(c)                       // normalise CRLF to LF
+    } else {
+      out += ch
+    }
+  }
+  out
+}
+
+def _tEscape(c) {
+  val e = _tNext(c)
+  select (e) {
+    case "b": chr(8)
+    case "t": "\t"
+    case "n": "\n"
+    case "f": chr(12)
+    case "r": "\r"
+    case "\"": "\""
+    case "\\": "\\"
+    case "u": chr(parseInt(_tHex(c, 4), 16))
+    case "U": chr(parseInt(_tHex(c, 8), 16))
+    default: _tErr(c, "'\\" + e + "' is not a TOML escape")
+  }
+}
+
+def _tHex(c, n) {
+  var out = ""
+  var i = 0
+  while (i < n) {
+    val ch = _tNext(c)
+    if (!matches(ch, "^[0-9A-Fa-f]$")) then _tErr(c, "expected " + n + " hex digits after \\u")
+    out += ch
+    i += 1
+  }
+  out
+}
+
+def _tArray(c) {
+  _tNext(c)                                  // '['
+  val out = []
+  while (true) {
+    _tSkipBlank(c)
+    if (_tEof(c)) then _tErr(c, "an array never closes")
+    if (_tPeek(c) == "]") {
+      _tNext(c)
+      break
+    }
+    push(out, _tValue(c))
+    _tSkipBlank(c)
+    if (_tEof(c)) then _tErr(c, "an array never closes")
+    if (_tPeek(c) == ",") {
+      _tNext(c)
+    } elsif (_tPeek(c) != "]") {
+      _tErr(c, "expected ',' or ']' in an array")
+    }
+  }
+  out
+}
+
+def _tInlineTable(c) {
+  _tNext(c)                                  // '{'
+  val out = {}
+  _tSkipSpace(c)
+  if (_tPeek(c) == "}") {
+    _tNext(c)
+    return out
+  }
+  while (true) {
+    val path = _tKeyPath(c, "=")
+    _tExpect(c, "=")
+    _tSkipSpace(c)
+    _tAssign(c, out, path, _tValue(c))
+    _tSkipSpace(c)
+    val ch = _tPeek(c)
+    if (ch == ",") {
+      _tNext(c)
+      _tSkipSpace(c)
+    } elsif (ch == "}") {
+      _tNext(c)
+      break
+    } else {
+      _tErr(c, "expected ',' or '}' in an inline table")
+    }
+  }
+  out
+}
+
+// --------------------------------------------------------------- structure
+
+// Assigns through a dotted path, creating intermediate tables.
+def _tAssign(c, table, path, value) {
+  var t = table
+  var i = 0
+  while (i < length(path) - 1) {
+    val k = path[i]
+    if (!contains(t, k)) then t[k] = {}
+    if (!isObject(t[k])) then _tErr(c, "'" + k + "' is already a value, not a table")
+    t = t[k]
+    i += 1
+  }
+  val leaf = last(path)
+  if (contains(t, leaf)) then _tErr(c, "duplicate key '" + join(path, ".") + "'")
+  t[leaf] = value
+  null
+}
+
+// [a.b.c] — walk or create, and refuse to define the same table twice.
+def _tDefineTable(c, path) {
+  var t = c.root
+  var i = 0
+  while (i < length(path)) {
+    val k = path[i]
+    if (!contains(t, k)) then t[k] = {}
+    val v = t[k]
+    if (isArray(v)) {
+      if (isEmpty(v) || !isObject(last(v))) then _tErr(c, "'" + k + "' is not a table array")
+      t = last(v)
+    } elsif (isObject(v)) {
+      t = v
+    } else {
+      _tErr(c, "'" + k + "' is already a value, not a table")
+    }
+    i += 1
+  }
+  val name = join(path, ".")
+  if (contains(c.tables, name)) then _tErr(c, "table [" + name + "] is defined twice")
+  push(c.tables, name)
+  t
+}
+
+// [[a.b]] — append a fresh table to the array at the path.
+def _tArrayTable(c, path) {
+  var t = c.root
+  var i = 0
+  while (i < length(path) - 1) {
+    val k = path[i]
+    if (!contains(t, k)) then t[k] = {}
+    val v = t[k]
+    if (isArray(v)) {
+      if (isEmpty(v) || !isObject(last(v))) then _tErr(c, "'" + k + "' is not a table array")
+      t = last(v)
+    } elsif (isObject(v)) {
+      t = v
+    } else {
+      _tErr(c, "'" + k + "' is already a value, not a table")
+    }
+    i += 1
+  }
+  val leaf = last(path)
+  if (!contains(t, leaf)) then t[leaf] = []
+  if (!isArray(t[leaf])) then _tErr(c, "'" + leaf + "' is not a table array")
+  val fresh = {}
+  push(t[leaf], fresh)
+  fresh
+}
+
+// -------------------------------------------------------------- stringify
+
+// Renders an object as a TOML document: scalar keys first, then [tables]
+// and [[table arrays]], depth first — the order TOML requires.
+def tomlStringify(obj) {
+  if (!isObject(obj)) then error("toml: only an object can be a TOML document")
+  val out = []
+  _tsTable(out, obj, [])
+  join(out, "")
+}
+
+def _tsTable(out, obj, path) {
+  val ks = keys(obj)
+  val scalars = filter(ks, (k) -> !_tsIsSection(obj[k]))
+  val sections = filter(ks, (k) -> _tsIsSection(obj[k]))
+  if (!isEmpty(path) && (!isEmpty(scalars) || isEmpty(sections))) {
+    push(out, "[" + _tsPath(path) + "]\n")
+  }
+  for (k in scalars) {
+    push(out, _tsKey(k) + " = " + _tsValue(obj[k]) + "\n")
+  }
+  if ((!isEmpty(scalars) || isEmpty(path)) && !isEmpty(sections)) then push(out, "\n")
+  var i = 0
+  for (k in sections) {
+    val v = obj[k]
+    val sub = concat(path, [k])
+    if (isObject(v)) {
+      _tsTable(out, v, sub)
+    } else {
+      for (item in v) {
+        push(out, "[[" + _tsPath(sub) + "]]\n")
+        _tsTableBody(out, item, sub)
+      }
+    }
+    i += 1
+    if (i < length(sections)) then push(out, "\n")
+  }
+  null
+}
+
+// The body of one [[...]] element: scalars, then nested sections.
+def _tsTableBody(out, obj, path) {
+  val ks = keys(obj)
+  for (k in ks) {
+    if (!_tsIsSection(obj[k])) {
+      push(out, _tsKey(k) + " = " + _tsValue(obj[k]) + "\n")
+    }
+  }
+  for (k in ks) {
+    if (_tsIsSection(obj[k])) {
+      val v = obj[k]
+      val sub = concat(path, [k])
+      if (isObject(v)) {
+        push(out, "\n")
+        _tsTable(out, v, sub)
+      } else {
+        for (item in v) {
+          push(out, "\n[[" + _tsPath(sub) + "]]\n")
+          _tsTableBody(out, item, sub)
+        }
+      }
+    }
+  }
+  null
+}
+
+// A value becomes a section when it is a table, or an array of tables.
+def _tsIsSection(v) =
+  isObject(v) || (isArray(v) && !isEmpty(v) && every(v, isObject))
+
+def _tsPath(path) = join(map(path, _tsKey), ".")
+
+def _tsKey(k) =
+  if (matches(k, "^[A-Za-z0-9_-]+$")) then k else "\"" + _tsEscape(k) + "\""
+
+def _tsValue(v) {
+  if (v == null) then error("toml: TOML has no null — drop the key instead")
+  if (isBool(v)) then return (if (v) then "true" else "false")
+  if (isInt(v)) then return toString(v)
+  if (isFloat(v)) {
+    if (isNaN(v)) then return "nan"
+    if (isInfinite(v)) then return (if (v > 0) then "inf" else "-inf")
+    return toString(v)
+  }
+  if (isString(v)) then return "\"" + _tsEscape(v) + "\""
+  if (isArray(v)) then return "[" + join(map(v, _tsValue), ", ") + "]"
+  if (isObject(v)) {
+    val pairs = map(keys(v), (k) -> _tsKey(k) + " = " + _tsValue(v[k]))
+    return "{" + join(pairs, ", ") + "}"
+  }
+  error("toml: a " + typeOf(v) + " has no TOML form")
+}
+
+def _tsEscape(s) {
+  var out = ""
+  for (ch in s) {
+    val c = ord(ch)
+    if (ch == "\"") then out += "\\\""
+    elsif (ch == "\\") then out += "\\\\"
+    elsif (ch == "\n") then out += "\\n"
+    elsif (ch == "\t") then out += "\\t"
+    elsif (ch == "\r") then out += "\\r"
+    elsif (c < 32) then out += "\\u" + padStart(toUpper(hexEncodeBytes([c])), 4, "0")
+    else out += ch
+  }
+  out
+}

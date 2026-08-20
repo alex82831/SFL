@@ -1,0 +1,39 @@
+// Control flow: `if` is an expression, `for` walks ranges, `while`/`break`/
+// `continue` behave as expected. FizzBuzz twice — once each way.
+
+// `if ... then ... elsif ... else` as an expression, straight into println.
+def fizzbuzz(n) {
+  for (i in range(1, n + 1)) {
+    println(
+      if (i % 15 == 0) then "FizzBuzz"
+      elsif (i % 3 == 0) then "Fizz"
+      elsif (i % 5 == 0) then "Buzz"
+      else i
+    )
+  }
+}
+
+// The same thing built as a value — collect, then print once.
+def fizzbuzzLine(n) {
+  val words = map(range(1, n + 1), (i) ->
+    if (i % 15 == 0) then "FizzBuzz"
+    elsif (i % 3 == 0) then "Fizz"
+    elsif (i % 5 == 0) then "Buzz"
+    else toString(i))
+  join(words, " ")
+}
+
+fizzbuzz(20)
+println("---")
+println(fizzbuzzLine(20))
+
+// while / break / continue: the first ten odd squares.
+val odds = []
+var i = 0
+while (true) {
+  i += 1
+  if (i % 2 == 0) then continue
+  push(odds, i * i)
+  if (length(odds) == 10) then break
+}
+println("odd squares: " + join(map(odds, toString), ", "))

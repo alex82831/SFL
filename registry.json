@@ -2,14 +2,23 @@
   "registry": "sfl-official",
   "note": "The standard package suite, served from this repository's packages/ directory. 'sfl install <name>' resolves a name here to a git source; override the index with SFL_REGISTRY.",
   "packages": {
+    "gui":      { "git": "github.com/alex82831/SFL", "subdir": "packages/gui" },
+    "httpd":    { "git": "github.com/alex82831/SFL", "subdir": "packages/httpd" },
     "mongodb":  { "git": "github.com/alex82831/SFL", "subdir": "packages/mongodb" },
+    "mysql":    { "git": "github.com/alex82831/SFL", "subdir": "packages/mysql" },
+    "postgres": { "git": "github.com/alex82831/SFL", "subdir": "packages/postgres" },
+    "redis":    { "git": "github.com/alex82831/SFL", "subdir": "packages/redis" },
     "datetime": { "git": "github.com/alex82831/SFL", "subdir": "packages/datetime" },
     "csv":      { "git": "github.com/alex82831/SFL", "subdir": "packages/csv" },
+    "toml":     { "git": "github.com/alex82831/SFL", "subdir": "packages/toml" },
+    "markdown": { "git": "github.com/alex82831/SFL", "subdir": "packages/markdown" },
+    "template": { "git": "github.com/alex82831/SFL", "subdir": "packages/template" },
+    "jwt":      { "git": "github.com/alex82831/SFL", "subdir": "packages/jwt" },
+    "smtp":     { "git": "github.com/alex82831/SFL", "subdir": "packages/smtp" },
     "uuid":     { "git": "github.com/alex82831/SFL", "subdir": "packages/uuid" },
     "cli":      { "git": "github.com/alex82831/SFL", "subdir": "packages/cli" },
     "log":      { "git": "github.com/alex82831/SFL", "subdir": "packages/log" },
-    "redis":    { "git": "github.com/alex82831/SFL", "subdir": "packages/redis" },
-    "httpd":    { "git": "github.com/alex82831/SFL", "subdir": "packages/httpd" },
-    "gui":      { "git": "github.com/alex82831/SFL", "subdir": "packages/gui" }
+    "ansi":     { "git": "github.com/alex82831/SFL", "subdir": "packages/ansi" },
+    "dotenv":   { "git": "github.com/alex82831/SFL", "subdir": "packages/dotenv" }
   }
 }

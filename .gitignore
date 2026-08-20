@@ -33,6 +33,13 @@ editors/vscode/out/
 packages/*/bin/
 tests/**/bin/
 
+# Example projects: build outputs, locally installed packages, generated files
+examples/*/build/
+examples/*/sfl_packages/
+examples/*/*.sflpkg
+examples/21-markdown-site/site/
+examples/19-csv-report/report.csv
+
 # Claude Code local settings
 .claude/settings.local.json
 

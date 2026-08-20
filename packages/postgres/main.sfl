@@ -1,0 +1,561 @@
+// postgres — a PostgreSQL client in pure SFL, speaking protocol 3.0 over TCP.
+//
+//   import "postgres"
+//
+//   val db = pgConnect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
+//   db.exec("CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, name TEXT)")
+//   db.query("INSERT INTO users (name) VALUES ($1) RETURNING id", ["ada"])  // [{id: 1}]
+//   db.query("SELECT * FROM users WHERE id > $1", [0])
+//   db.close()
+//
+// Parameters are real: query() runs the extended protocol, so $1..$n go to
+// the server out of band and nothing is ever spliced into SQL text. exec()
+// runs the simple protocol — use it for scripts of several statements and
+// DDL. The client is one connection guarded by a mutex; a transaction owns
+// it, so keep a transaction to one thread.
+//
+// Authentication: SCRAM-SHA-256, MD5, and cleartext (the latter only over
+// tls or with allowCleartext: true). TLS: {tls: true} or {tls: {caFile:
+// "..."}} for a self-signed server; the certificate is always verified.
+// LISTEN/NOTIFY: listen(channel) then waitNotification(timeoutMs) or
+// notifications(). COPY FROM STDIN is refused; COPY TO STDOUT is drained.
+
+import "proto"
+import "sasl"
+
+// ---------------------------------------------------------------- connect
+
+// Opens a connection. `target` is a postgres:// URL, a plain host name, or
+// the options object itself. Recognised options (over the URL, the object
+// wins): host, port, user, password, db, timeoutMs, tls, appName,
+// allowCleartext, params (extra startup parameters, e.g. {search_path: ...}).
+def pgConnect(target = "127.0.0.1", options = {}) {
+  val opt = merge(_parseTarget(target), options)
+  val host = get(opt, "host", "127.0.0.1")
+  val port = get(opt, "port", 5432)
+  val user = get(opt, "user", "postgres")
+  val password = get(opt, "password", "") ?? ""
+  val db = get(opt, "db", user)
+  val timeoutMs = get(opt, "timeoutMs", 10000)
+  val tls = get(opt, "tls", null)
+
+  val sock = connect(host, port, timeoutMs)
+  val state = {sock: sock, timeoutMs: timeoutMs, lock: mutex(), params: {},
+    pid: 0, secret: 0, tx: "I", notifications: []}
+
+  var isTls = false
+  if (tls != null && tls != false) {
+    val req = []
+    pgpPushU32(req, 80877103)              // SSLRequest
+    pgpSend(state, null, req)
+    val answer = socketReadBytes(sock, 1, timeoutMs)
+    if (answer == null || length(answer) == 0) {
+      error("postgres: the server closed the connection during the TLS request")
+    }
+    if (chr(answer[0]) != "S") {
+      closeSocket(sock)
+      error("postgres: the server does not accept TLS connections")
+    }
+    if (isObject(tls) && contains(tls, "caFile")) {
+      tlsWrap(sock, host, tls.caFile, timeoutMs)
+    } else {
+      tlsWrap(sock, host, null, timeoutMs)
+    }
+    isTls = true
+  }
+
+  val startup = []
+  pgpPushU32(startup, 196608)              // protocol 3.0
+  pgpPushStr(startup, "user")
+  pgpPushStr(startup, user)
+  pgpPushStr(startup, "database")
+  pgpPushStr(startup, db)
+  pgpPushStr(startup, "application_name")
+  pgpPushStr(startup, get(opt, "appName", "sfl"))
+  pgpPushStr(startup, "client_encoding")
+  pgpPushStr(startup, "UTF8")
+  for (k in keys(get(opt, "params", {}))) {
+    pgpPushStr(startup, k)
+    pgpPushStr(startup, toString(opt.params[k]))
+  }
+  push(startup, 0)
+  pgpSend(state, null, startup)
+
+  _authenticate(state, user, password, isTls, get(opt, "allowCleartext", false))
+
+  var closed = false
+  def guard() {
+    if (closed) then error("postgres: the client is closed")
+    null
+  }
+
+  // Simple protocol: one or more statements in one string, no parameters.
+  def exec(sql) {
+    withLock(state.lock, () -> {
+      guard()
+      val out = []
+      pgpPushStr(out, sql)
+      pgpSend(state, "Q", out)
+      val sets = _collect(state)
+      if (isEmpty(sets)) then {tag: "", affectedRows: 0}
+      else {
+        val last1 = last(sets)
+        {tag: last1.tag, affectedRows: last1.affectedRows}
+      }
+    })
+  }
+
+  // Extended protocol: exactly one statement, $1..$n bound server-side.
+  def runQuery(sql, params) {
+    withLock(state.lock, () -> {
+      guard()
+      // Everything renders before anything is sent, so a bad parameter
+      // raises cleanly instead of leaving a half-spoken conversation.
+      val texts = map(params, _paramText)
+
+      val parse = []
+      pgpPushStr(parse, "")                // unnamed statement
+      pgpPushStr(parse, sql)
+      pgpPushU16(parse, 0)                 // no declared parameter types
+      pgpSend(state, "P", parse)
+
+      val bind = []
+      pgpPushStr(bind, "")                 // unnamed portal
+      pgpPushStr(bind, "")
+      pgpPushU16(bind, 0)                  // parameter formats: all text
+      pgpPushU16(bind, length(texts))
+      for (v in texts) {
+        if (v == null) {
+          pgpPushU32(bind, 0xffffffff)     // -1: NULL
+        } else {
+          val b = utf8Encode(v)
+          pgpPushU32(bind, length(b))
+          pgpAppend(bind, b)
+        }
+      }
+      pgpPushU16(bind, 0)                  // result formats: all text
+      pgpSend(state, "B", bind)
+
+      val describe = [ord("P")]
+      pgpPushStr(describe, "")
+      pgpSend(state, "D", describe)
+
+      val execute = []
+      pgpPushStr(execute, "")
+      pgpPushU32(execute, 0)               // no row limit
+      pgpSend(state, "E", execute)
+      pgpSend(state, "S", [])
+
+      val sets = _collect(state)
+      if (isEmpty(sets)) then {columns: [], rows: [], tag: "", affectedRows: 0}
+      else sets[0]
+    })
+  }
+
+  def query(sql, params = []) {
+    val set = runQuery(sql, params)
+    if (set.rows == null) then return []
+    val names = map(set.columns, (c) -> c.name)
+    map(set.rows, (row) -> fromEntries(zip(names, row)))
+  }
+
+  {
+    // One statement with $1..$n parameters -> array of row objects. A
+    // statement without rows (INSERT without RETURNING) gives [].
+    query: query,
+    queryOne: (sql, params = []) -> {
+      val rows = query(sql, params)
+      if (isEmpty(rows)) then null else rows[0]
+    },
+    // Rows as arrays plus column metadata: {columns: [{name, typeOid,
+    // typeName}], rows, tag, affectedRows}.
+    queryFull: (sql, params = []) -> {
+      val set = runQuery(sql, params)
+      {columns: set.columns, rows: set.rows ?? [], tag: set.tag, affectedRows: set.affectedRows}
+    },
+    // Simple protocol, several statements allowed; returns the last
+    // statement's {tag, affectedRows}.
+    exec: exec,
+
+    begin: () -> { exec("BEGIN"); null },
+    commit: () -> { exec("COMMIT"); null },
+    rollback: () -> { exec("ROLLBACK"); null },
+    // Runs fn inside a transaction: commits its value out, rolls back and
+    // re-raises when it raises.
+    transaction: (fn) -> {
+      exec("BEGIN")
+      val r = attempt(fn)
+      if (r?.error != null) {
+        attempt(() -> exec("ROLLBACK"))
+        error(r.error.message)
+      }
+      exec("COMMIT")
+      r.value
+    },
+
+    ping: () -> {
+      val t0 = timeMillis()
+      exec("")
+      timeMillis() - t0
+    },
+    serverVersion: () -> get(state.params, "server_version", ""),
+    // Every ParameterStatus the server has reported (server_version,
+    // TimeZone, standard_conforming_strings, ...).
+    serverParams: () -> copy(state.params),
+    backendPid: () -> state.pid,
+    // "I" idle, "T" in a transaction, "E" in a failed transaction.
+    txStatus: () -> state.tx,
+
+    listen: (channel) -> { exec("LISTEN " + _ident(channel)); null },
+    unlisten: (channel) -> { exec("UNLISTEN " + _ident(channel)); null },
+    // Notifications gathered so far, each {pid, channel, payload}; drains.
+    notifications: () -> {
+      withLock(state.lock, () -> {
+        val out = state.notifications
+        state.notifications = []
+        out
+      })
+    },
+    // Blocks up to timeoutMs for one notification; null when none arrives.
+    waitNotification: (timeoutMs = 10000) -> {
+      withLock(state.lock, () -> {
+        guard()
+        val deadline = timeMillis() + timeoutMs
+        while (isEmpty(state.notifications)) {
+          val left = deadline - timeMillis()
+          if (left <= 0) then return null
+          val ready = poll([state.sock], left)
+          if (isEmpty(ready)) then return null
+          _handleAsync(state, pgpRead(state))
+        }
+        shift(state.notifications)
+      })
+    },
+
+    close: () -> {
+      if (!closed) {
+        closed = true
+        attempt(() -> pgpSend(state, "X", []))
+        closeSocket(state.sock)
+      }
+      null
+    }
+  }
+}
+
+// A double-quoted SQL identifier (for LISTEN/UNLISTEN channel names).
+def _ident(name) = "\"" + replace(name, "\"", "\"\"") + "\""
+
+// Wraps raw bytes so a parameter binds as bytea ("\x..." hex text form).
+def pgBinary(bytes) = {"$pgBinary": bytes}
+
+// Renders values as a PostgreSQL array literal, for `= ANY($1)` and casts
+// like $1::int[]: pgArray([1, 2]) -> "{1,2}". Strings are quoted, null is
+// NULL, nested arrays nest.
+def pgArray(values) {
+  val parts = map(values, (v) ->
+    if (v == null) then "NULL"
+    elsif (isBool(v)) then (if (v) then "t" else "f")
+    elsif (isInt(v) || isFloat(v)) then toString(v)
+    elsif (isArray(v)) then pgArray(v)
+    elsif (isString(v)) then "\"" + replace(replace(v, "\\", "\\\\"), "\"", "\\\"") + "\""
+    else error("postgres: a " + typeOf(v) + " cannot go into an array literal"))
+  "{" + join(parts, ",") + "}"
+}
+
+// One parameter as its text form, or null for SQL NULL.
+def _paramText(v) {
+  if (v == null) then null
+  elsif (isBool(v)) then (if (v) then "t" else "f")
+  elsif (isInt(v)) then toString(v)
+  elsif (isFloat(v)) {
+    if (isNaN(v)) then "NaN"
+    elsif (isInfinite(v)) then (if (v > 0) then "Infinity" else "-Infinity")
+    else toString(v)
+  }
+  elsif (isString(v)) then v
+  elsif (isObject(v) && contains(v, "$pgBinary")) then "\\x" + hexEncodeBytes(v["$pgBinary"])
+  elsif (isArray(v)) {
+    error("postgres: bind arrays with pgArray(values) and `= ANY($1)` (or pgBinary for bytea)")
+  }
+  else error("postgres: cannot bind a " + typeOf(v) + " parameter")
+}
+
+// ------------------------------------------------------- target parsing
+
+def _parseTarget(target) {
+  if (isObject(target)) then return target
+  val isUrl = startsWith(target, "postgres://") || startsWith(target, "postgresql://")
+  if (!isUrl) then return {host: target}
+  val scheme = indexOf(target, "://")
+  var rest = substring(target, scheme + 3, length(target))
+  val out = {}
+  val slash = indexOf(rest, "/")
+  if (slash >= 0) {
+    var db = substring(rest, slash + 1, length(rest))
+    rest = substring(rest, 0, slash)
+    val q = indexOf(db, "?")
+    if (q >= 0) {
+      for (pair in split(substring(db, q + 1, length(db)), "&")) {
+        val eq = indexOf(pair, "=")
+        if (eq > 0) {
+          val k = substring(pair, 0, eq)
+          val v = urlDecode(substring(pair, eq + 1, length(pair)))
+          if (k == "timeoutMs") then out.timeoutMs = parseInt(v)
+          elsif (k == "tls" || k == "sslmode") then out.tls = v == "1" || v == "true" || v == "require"
+          else out[k] = v
+        }
+      }
+      db = substring(db, 0, q)
+    }
+    if (db != "") then out.db = urlDecode(db)
+  }
+  val at = lastIndexOf(rest, "@")
+  if (at >= 0) {
+    val cred = substring(rest, 0, at)
+    rest = substring(rest, at + 1, length(rest))
+    val colon = indexOf(cred, ":")
+    if (colon >= 0) {
+      out.user = urlDecode(substring(cred, 0, colon))
+      out.password = urlDecode(substring(cred, colon + 1, length(cred)))
+    } else {
+      out.user = urlDecode(cred)
+    }
+  }
+  val colon = lastIndexOf(rest, ":")
+  if (colon >= 0) {
+    out.host = substring(rest, 0, colon)
+    out.port = parseInt(substring(rest, colon + 1, length(rest)))
+  } elsif (rest != "") {
+    out.host = rest
+  }
+  out
+}
+
+// ----------------------------------------------------------- authenticate
+
+def _authenticate(state, user, password, isTls, allowCleartext) {
+  while (true) {
+    val m = pgpRead(state)
+    val k = m.kind
+    if (k == "R") {
+      val c = pgpCur(m.payload)
+      val code = pgpU32(c)
+      if (code == 0) {
+        null                               // AuthenticationOk
+      } elsif (code == 3) {
+        if (!isTls && !allowCleartext) {
+          error("postgres: the server asked for a cleartext password over plain TCP; " +
+            "refusing (connect with tls: true, or allowCleartext: true if you accept the risk)")
+        }
+        val out = []
+        pgpPushStr(out, password)
+        pgpSend(state, "p", out)
+      } elsif (code == 5) {
+        val salt = pgpBytesN(c, 4)
+        val inner = hexEncodeBytes(digestBytes("md5", utf8Encode(password + user)))
+        val outer = hexEncodeBytes(digestBytes("md5", concat(utf8Encode(inner), salt)))
+        val out = []
+        pgpPushStr(out, "md5" + outer)
+        pgpSend(state, "p", out)
+      } elsif (code == 10) {
+        val mechs = []
+        while (pgpRemaining(c) > 0) {
+          val s = pgpStrNul(c)
+          if (s == "") then break
+          push(mechs, s)
+        }
+        pgScramAuth(state, password, mechs)
+      } else {
+        error("postgres: the server wants authentication method " + code +
+          ", which this driver does not speak (it has cleartext, md5 and SCRAM-SHA-256)")
+      }
+    } elsif (k == "E") {
+      _raise(_errorFields(m.payload))
+    } elsif (k == "Z") {
+      val c = pgpCur(m.payload)
+      state.tx = chr(pgpU8(c))
+      break
+    } elsif (k == "v") {
+      null                                 // NegotiateProtocolVersion: fine
+    } else {
+      _handleAsync(state, m)
+    }
+  }
+  null
+}
+
+// ------------------------------------------------------------ the pump
+
+// S/K/N/A messages can arrive almost any time; this absorbs one.
+def _handleAsync(state, m) {
+  val k = m.kind
+  val c = pgpCur(m.payload)
+  if (k == "S") {
+    val name = pgpStrNul(c)
+    state.params[name] = pgpStrNul(c)
+  } elsif (k == "K") {
+    state.pid = pgpU32(c)
+    state.secret = pgpU32(c)
+  } elsif (k == "N") {
+    _errorFields(m.payload)                // parsed and dropped
+  } elsif (k == "A") {
+    val pid = pgpU32(c)
+    push(state.notifications, {pid: pid, channel: pgpStrNul(c), payload: pgpStrNul(c)})
+  } else {
+    error("postgres: unexpected message '" + k + "' from the server")
+  }
+  null
+}
+
+// Reads to ReadyForQuery, gathering result sets; if the server reported an
+// error along the way, raises it once the connection is quiet again (which
+// is what keeps the connection usable after a failed statement).
+def _collect(state) {
+  val sets = []
+  var cols = null
+  var rows = null
+  var err = null
+  while (true) {
+    val m = pgpRead(state)
+    val k = m.kind
+    if (k == "Z") {
+      val c = pgpCur(m.payload)
+      state.tx = chr(pgpU8(c))
+      break
+    } elsif (k == "E") {
+      if (err == null) then err = _errorFields(m.payload)
+    } elsif (k == "T") {
+      cols = _rowDescription(m.payload)
+      rows = []
+    } elsif (k == "D") {
+      if (rows != null) then push(rows, _dataRow(state, cols, m.payload))
+    } elsif (k == "C") {
+      val c = pgpCur(m.payload)
+      val tag = pgpStrNul(c)
+      push(sets, {columns: cols ?? [], rows: rows, tag: tag, affectedRows: _tagRows(tag)})
+      cols = null
+      rows = null
+    } elsif (k == "I") {
+      push(sets, {columns: [], rows: null, tag: "", affectedRows: 0})
+    } elsif (k == "G") {
+      val fail = []
+      pgpPushStr(fail, "this driver refuses COPY FROM STDIN")
+      pgpSend(state, "f", fail)
+    } elsif (k == "H" || k == "d" || k == "c" || k == "W") {
+      null                                 // COPY TO STDOUT drains
+    } elsif (k == "1" || k == "2" || k == "3" || k == "n" || k == "s" || k == "t") {
+      null                                 // parse/bind/close complete, no data, suspended
+    } else {
+      _handleAsync(state, m)
+    }
+  }
+  if (err != null) then _raise(err)
+  sets
+}
+
+def _tagRows(tag) {
+  val parts = split(tag, " ")
+  val last1 = last(parts)
+  if (length(parts) > 1 && matches(last1, "^[0-9]+$")) then parseInt(last1) else 0
+}
+
+def _rowDescription(payload) {
+  val c = pgpCur(payload)
+  val n = pgpU16(c)
+  val cols = []
+  var i = 0
+  while (i < n) {
+    val name = pgpStrNul(c)
+    pgpSkip(c, 6)                          // table oid, attribute number
+    val typeOid = pgpU32(c)
+    pgpSkip(c, 6)                          // type size (2), type modifier (4)
+    val format = pgpU16(c)
+    push(cols, {name: name, typeOid: typeOid, typeName: _oidName(typeOid), format: format})
+    i += 1
+  }
+  cols
+}
+
+def _dataRow(state, cols, payload) {
+  val c = pgpCur(payload)
+  val n = pgpU16(c)
+  val row = []
+  var i = 0
+  while (i < n) {
+    val len = pgpI32(c)
+    if (len < 0) {
+      push(row, null)
+    } else {
+      push(row, _convert(cols[i].typeOid, pgpBytesN(c, len)))
+    }
+    i += 1
+  }
+  row
+}
+
+// Text-format value -> SFL value by type OID. NUMERIC stays a string
+// (exact); dates, times and intervals stay strings; bytea becomes bytes.
+def _convert(oid, bytes) {
+  if (oid == 16) {
+    utf8Decode(bytes) == "t"
+  } elsif (oid == 20 || oid == 21 || oid == 23 || oid == 26) {
+    parseInt(utf8Decode(bytes))
+  } elsif (oid == 700 || oid == 701) {
+    parseFloat(utf8Decode(bytes))
+  } elsif (oid == 17) {
+    val s = utf8Decode(bytes)
+    if (startsWith(s, "\\x")) then hexDecodeBytes(substring(s, 2, length(s))) else s
+  } else {
+    utf8Decode(bytes)
+  }
+}
+
+def _oidName(oid) = select (oid) {
+  case 16:   "bool"
+  case 17:   "bytea"
+  case 18:   "char"
+  case 20:   "int8"
+  case 21:   "int2"
+  case 23:   "int4"
+  case 25:   "text"
+  case 26:   "oid"
+  case 114:  "json"
+  case 700:  "float4"
+  case 701:  "float8"
+  case 1042: "bpchar"
+  case 1043: "varchar"
+  case 1082: "date"
+  case 1083: "time"
+  case 1114: "timestamp"
+  case 1184: "timestamptz"
+  case 1186: "interval"
+  case 1700: "numeric"
+  case 2950: "uuid"
+  case 3802: "jsonb"
+  default:   "oid" + oid
+}
+
+// ------------------------------------------------------------- errors
+
+def _errorFields(payload) {
+  val c = pgpCur(payload)
+  val out = {}
+  while (pgpRemaining(c) > 0) {
+    val t = pgpU8(c)
+    if (t == 0) then break
+    out[chr(t)] = pgpStrNul(c)
+  }
+  out
+}
+
+def _raise(f) {
+  var msg = "postgres: " + get(f, "M", "the server reported an error")
+  val code = get(f, "C", "")
+  if (code != "") then msg += " (" + code + ")"
+  val detail = get(f, "D", "")
+  if (detail != "") then msg += " — " + detail
+  val pos = get(f, "P", "")
+  if (pos != "") then msg += " at character " + pos
+  error(msg)
+}

@@ -1,0 +1,24 @@
+project({
+  "name": "mandelbrot",
+  "version": "0.1.0",
+  "main": "src/main.sfl",
+  "opt": "O2"
+})
+
+// Interpreter vs compiled binary on the same input — the ahead-of-time
+// story in one task. The numeric loops here are exactly the code the
+// compiler proves and unboxes.
+task("bench", (args) -> {
+  val t0 = timeMillis()
+  var code = passthrough(exePath(), ["src/main.sfl", "--quiet"])
+  if (code != 0) { return code }
+  val t1 = timeMillis()
+  code = passthrough(exePath(), ["build", "build", "--force"])
+  if (code != 0) { return code }
+  val t2 = timeMillis()
+  code = passthrough("build/mandelbrot", ["--quiet"])
+  if (code != 0) { return code }
+  val t3 = timeMillis()
+  printf("interpreted %5dms\ncompile     %5dms\ncompiled    %5dms  (%.0fx faster)\n",
+    t1 - t0, t2 - t1, t3 - t2, toFloat(t1 - t0) / toFloat(max(t3 - t2, 1)))
+}, "Render interpreted, then compiled; report the times")

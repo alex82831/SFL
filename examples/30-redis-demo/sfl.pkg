@@ -1,0 +1,5 @@
+{
+  "name": "redis-demo",
+  "version": "0.1.0",
+  "deps": { "redis": "^0.1.0" }
+}

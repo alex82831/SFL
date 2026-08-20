@@ -1,0 +1,31 @@
+import "smtp"
+import "../src/mail"
+
+def checkHas(what, hay, needle) {
+  if (!contains(hay, needle)) {
+    eprintln("FAIL ${what}: no '" + needle + "'")
+    exit(1)
+  }
+}
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+val mime = smtpBuildMime(demoMail("Sender <s@x.y>", "r@x.y"))
+checkHas("from header", mime, "From: Sender <s@x.y>")
+checkHas("subject is an encoded word (it has CJK)", mime, "Subject: =?UTF-8?B?")
+checkHas("alternative part", mime, "multipart/alternative")
+checkHas("mixed wrapper for the attachment", mime, "multipart/mixed")
+checkHas("the csv attaches by name", mime, "filename=\"report.csv\"")
+checkHas("the csv content rides base64", mime, base64Encode("day,sent\nmon,12\ntue,40\n"))
+checkHas("custom headers ride along", mime, "X-Mailer: sfl smtp example")
+check("crlf line endings", contains(mime, "\r\n"), true)
+
+check("address parsing", smtpAddress("Ada <ada@x.y>"), "ada@x.y")
+val bad = attempt(() -> smtpAddress("evil@x.y\nRCPT TO:<other@x.y>"))
+check("header injection is refused", bad.error != null, true)
+
+println("mime: ok")

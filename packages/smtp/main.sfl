@@ -1,0 +1,412 @@
+// smtp — sending mail: SMTP with STARTTLS, AUTH, and MIME building.
+//
+//   import "smtp"
+//
+//   val m = smtpConnect("smtp.example.com", 587, {
+//     tls: "starttls", user: "app@example.com", password: "secret"
+//   })
+//   m.send({
+//     from: "App <app@example.com>",
+//     to: "ada@example.org",
+//     subject: "Hello",
+//     text: "Plain body",
+//     html: "<p>Rich body</p>",
+//     attachments: [{name: "data.csv", contentType: "text/csv", text: "a,b\n1,2\n"}]
+//   })
+//   m.quit()
+//
+// TLS: "starttls" upgrades after EHLO (port 587's way), "implicit" wraps the
+// socket first (port 465), absent means plaintext. The certificate is always
+// verified; give {caFile: "..."} a self-signed server. AUTH (PLAIN or LOGIN,
+// whichever the server offers) is refused over plaintext unless
+// {allowInsecureAuth: true} — passwords do not belong on the wire in the
+// clear. The message builder handles multipart/alternative (text + html),
+// attachments (base64), UTF-8 headers and dot-stuffing; smtpBuildMime
+// exposes it for tests and previews.
+
+// ---------------------------------------------------------------- connect
+
+// opts: tls ("starttls" | "implicit"), caFile, user, password,
+// timeoutMs (10000), heloName ("sfl.invalid"), allowInsecureAuth (false).
+def smtpConnect(host, port = 25, opts = {}) {
+  val timeoutMs = get(opts, "timeoutMs", 10000)
+  val tls = get(opts, "tls", null)
+  val helo = get(opts, "heloName", "sfl.invalid")
+  val caFile = get(opts, "caFile", null)
+
+  val sock = connect(host, port, timeoutMs)
+  val state = {sock: sock, timeoutMs: timeoutMs, caps: []}
+  var isTls = false
+  if (tls == "implicit") {
+    tlsWrap(sock, host, caFile, timeoutMs)
+    isTls = true
+  }
+
+  _smtpExpect(state, 220)
+  _smtpEhlo(state, helo)
+
+  if (tls == "starttls") {
+    if (!_smtpHasCap(state, "STARTTLS")) {
+      closeSocket(sock)
+      error("smtp: the server does not offer STARTTLS")
+    }
+    _smtpCommand(state, "STARTTLS", 220)
+    tlsWrap(sock, host, caFile, timeoutMs)
+    isTls = true
+    _smtpEhlo(state, helo)                  // capabilities change after TLS
+  }
+
+  if (contains(opts, "user")) {
+    if (!isTls && !get(opts, "allowInsecureAuth", false)) {
+      closeSocket(sock)
+      error("smtp: refusing AUTH over plaintext — use tls: \"starttls\" or \"implicit\" " +
+        "(or allowInsecureAuth: true if you accept the risk)")
+    }
+    _smtpAuth(state, opts.user, get(opts, "password", ""))
+  }
+
+  var closed = false
+  def guard() {
+    if (closed) then error("smtp: the client is closed")
+    null
+  }
+
+  {
+    // Sends one message; `mail` is documented on smtpBuildMime. Returns the
+    // server's acceptance line (queue id on most servers).
+    send: (mail) -> {
+      guard()
+      val fromAddr = smtpAddress(_need(mail, "from"))
+      val rcpts = map(_smtpRecipients(mail), smtpAddress)
+      if (isEmpty(rcpts)) then error("smtp: the mail names no recipients (to/cc/bcc)")
+      _smtpCommand(state, "MAIL FROM:<" + fromAddr + ">", 250)
+      for (r in rcpts) {
+        val reply = _smtpCommand(state, "RCPT TO:<" + r + ">", "raw")
+        if (reply.code != 250 && reply.code != 251) {
+          error("smtp: recipient <" + r + "> was refused: " + reply.code + " " + join(reply.lines, " "))
+        }
+      }
+      _smtpCommand(state, "DATA", 354)
+      val body = smtpBuildMime(mail)
+      socketWriteBytes(state.sock, utf8Encode(_smtpDotStuff(body)))
+      val done = _smtpCommand(state, ".", 250)
+      join(done.lines, " ")
+    },
+    noop: () -> {
+      guard()
+      _smtpCommand(state, "NOOP", 250)
+      null
+    },
+    // The capability lines the last EHLO reported.
+    capabilities: () -> copy(state.caps),
+    quit: () -> {
+      if (!closed) {
+        closed = true
+        attempt(() -> _smtpCommand(state, "QUIT", 221))
+        closeSocket(state.sock)
+      }
+      null
+    },
+    close: () -> {
+      if (!closed) {
+        closed = true
+        closeSocket(state.sock)
+      }
+      null
+    }
+  }
+}
+
+// "Ada L <ada@example.org>" -> "ada@example.org"; a plain address passes.
+// CR and LF are refused anywhere in the input — an address is the one string
+// a caller might pass straight from a form, and newlines in it are how
+// header injection happens.
+def smtpAddress(s) {
+  if (contains(s, "\n") || contains(s, "\r")) then error("smtp: malformed address '" + s + "'")
+  val lt = indexOf(s, "<")
+  val addr = if (lt >= 0) {
+    val gt = indexOf(s, ">")
+    if (gt < lt) then error("smtp: malformed address '" + s + "'")
+    trim(substring(s, lt + 1, gt))
+  } else {
+    trim(s)
+  }
+  if (!contains(addr, "@") || contains(addr, " ") || contains(addr, "\n")) {
+    error("smtp: malformed address '" + s + "'")
+  }
+  addr
+}
+
+def _need(mail, key) {
+  if (!contains(mail, key)) then error("smtp: the mail has no '" + key + "'")
+  mail[key]
+}
+
+def _smtpRecipients(mail) {
+  val out = []
+  for (key in ["to", "cc", "bcc"]) {
+    val v = get(mail, key, null)
+    if (v == null) then continue
+    if (isArray(v)) {
+      for (a in v) { push(out, a) }
+    } else {
+      push(out, v)
+    }
+  }
+  out
+}
+
+// ------------------------------------------------------------- the wire
+
+// One line, read byte-wise: socketReadLine's buffering would pin the socket
+// out of tlsWrap's reach, and STARTTLS upgrades mid-conversation. SMTP
+// replies are a few short lines, so the byte-at-a-time cost is nothing.
+def _smtpLine(state) {
+  val out = []
+  while (true) {
+    val b = socketReadBytes(state.sock, 1, state.timeoutMs)
+    if (b == null || length(b) == 0) then return null
+    if (b[0] == 10) then break
+    if (b[0] != 13) then push(out, b[0])
+  }
+  utf8Decode(out)
+}
+
+// One reply, multiline "250-a\r\n250 b" included: {code, lines}.
+def _smtpReply(state) {
+  val lines1 = []
+  var code = 0
+  while (true) {
+    val line = _smtpLine(state)
+    if (line == null) then error("smtp: the server went away mid-reply")
+    if (length(line) < 3) then error("smtp: malformed reply line '" + line + "'")
+    code = parseInt(substring(line, 0, 3))
+    push(lines1, trim(substring(line, min(4, length(line)), length(line))))
+    if (length(line) == 3 || charAt(line, 3) != "-") then break
+  }
+  {code: code, lines: lines1}
+}
+
+def _smtpExpect(state, want) {
+  val r = _smtpReply(state)
+  if (r.code != want) {
+    error("smtp: expected " + want + ", got " + r.code + " " + join(r.lines, " "))
+  }
+  r
+}
+
+// Sends one command. `want` is a code to insist on, null to raise on any
+// 4xx/5xx, or "raw" to hand the reply back unjudged (the caller has a better
+// error to raise). `show` replaces the command in error text, so credentials
+// never appear there.
+def _smtpCommand(state, line, want, show = null) {
+  socketWriteBytes(state.sock, utf8Encode(line + "\r\n"))
+  val shown = show ?? (if (startsWith(line, "AUTH")) then "AUTH ..." else line)
+  val r = _smtpReply(state)
+  if (isInt(want) && r.code != want) {
+    error("smtp: '" + shown + "' got " + r.code + " " + join(r.lines, " "))
+  }
+  if (want == null && r.code >= 400) {
+    error("smtp: '" + shown + "' failed: " + r.code + " " + join(r.lines, " "))
+  }
+  r
+}
+
+def _smtpEhlo(state, helo) {
+  socketWriteBytes(state.sock, utf8Encode("EHLO " + helo + "\r\n"))
+  var r = _smtpReply(state)
+  if (r.code >= 500) {
+    // A pre-extension server: fall back to HELO, no capabilities.
+    r = _smtpCommand(state, "HELO " + helo, 250)
+    state.caps = []
+    return null
+  }
+  if (r.code != 250) then error("smtp: EHLO got " + r.code + " " + join(r.lines, " "))
+  state.caps = slice(r.lines, 1, length(r.lines))   // line 0 is the server's name
+  null
+}
+
+def _smtpHasCap(state, name) {
+  for (c in state.caps) {
+    if (toUpper(c) == name || startsWith(toUpper(c), name + " ")) then return true
+  }
+  false
+}
+
+def _smtpAuth(state, user, password) {
+  var mechs = ""
+  for (c in state.caps) {
+    if (startsWith(toUpper(c), "AUTH ")) then mechs = toUpper(substring(c, 5, length(c)))
+  }
+  if (contains(split(mechs, " "), "PLAIN") || mechs == "") {
+    val token = base64EncodeBytes(concat(concat([0], utf8Encode(user)),
+      concat([0], utf8Encode(password))))
+    _smtpCommand(state, "AUTH PLAIN " + token, 235)
+  } elsif (contains(split(mechs, " "), "LOGIN")) {
+    _smtpCommand(state, "AUTH LOGIN", 334)
+    _smtpCommand(state, base64Encode(user), 334, "AUTH LOGIN user")
+    _smtpCommand(state, base64Encode(password), 235, "AUTH LOGIN password")
+  } else {
+    error("smtp: the server offers AUTH " + mechs + "; this driver speaks PLAIN and LOGIN")
+  }
+  null
+}
+
+// --------------------------------------------------------------- the MIME
+
+// Builds the full RFC 5322 message for `mail`:
+//   from            "Name <a@b>" or "a@b"          (required)
+//   to, cc          address or array of addresses  (bcc is enveloped, never written)
+//   replyTo         address
+//   subject         UTF-8 fine; encoded when needed
+//   text, html      bodies; both make multipart/alternative
+//   headers         {name: value} extras
+//   attachments     [{name, bytes | text, contentType?}]
+def smtpBuildMime(mail) {
+  val out = []
+  val headers = get(mail, "headers", {})
+  push(out, "From: " + _smtpHeaderAddr(_need(mail, "from")))
+  if (contains(mail, "to")) then push(out, "To: " + _smtpAddrList(mail.to))
+  if (contains(mail, "cc")) then push(out, "Cc: " + _smtpAddrList(mail.cc))
+  if (contains(mail, "replyTo")) then push(out, "Reply-To: " + _smtpHeaderAddr(mail.replyTo))
+  push(out, "Subject: " + _smtpHeaderText(get(mail, "subject", "")))
+  push(out, "Date: " + formatTime(timeMillis(), "%a, %d %b %Y %H:%M:%S +0000", true))
+  push(out, "Message-ID: <" + uuid() + "@" + smtpAddressDomain(_need(mail, "from")) + ">")
+  push(out, "MIME-Version: 1.0")
+  for (k in keys(headers)) {
+    push(out, k + ": " + headers[k])
+  }
+
+  val text = get(mail, "text", null)
+  val html = get(mail, "html", null)
+  val atts = get(mail, "attachments", [])
+
+  def altPart() {
+    if (text != null && html != null) {
+      val b = "alt-" + _smtpToken()
+      val inner = []
+      push(inner, "Content-Type: multipart/alternative; boundary=\"" + b + "\"")
+      push(inner, "")
+      push(inner, "--" + b)
+      _smtpBodyPart(inner, "text/plain; charset=utf-8", text)
+      push(inner, "--" + b)
+      _smtpBodyPart(inner, "text/html; charset=utf-8", html)
+      push(inner, "--" + b + "--")
+      inner
+    } elsif (html != null) {
+      val inner = []
+      _smtpBodyPart(inner, "text/html; charset=utf-8", html)
+      inner
+    } else {
+      val inner = []
+      _smtpBodyPart(inner, "text/plain; charset=utf-8", text ?? "")
+      inner
+    }
+  }
+
+  if (isEmpty(atts)) {
+    for (line in altPart()) { push(out, line) }
+  } else {
+    val b = "mix-" + _smtpToken()
+    push(out, "Content-Type: multipart/mixed; boundary=\"" + b + "\"")
+    push(out, "")
+    push(out, "--" + b)
+    for (line in altPart()) { push(out, line) }
+    for (att in atts) {
+      push(out, "--" + b)
+      val name = _need(att, "name")
+      val ctype = get(att, "contentType", "application/octet-stream")
+      val bytes = if (contains(att, "bytes")) then att.bytes else utf8Encode(_need(att, "text"))
+      push(out, "Content-Type: " + ctype + "; name=\"" + name + "\"")
+      push(out, "Content-Disposition: attachment; filename=\"" + name + "\"")
+      push(out, "Content-Transfer-Encoding: base64")
+      push(out, "")
+      for (line in _smtpB64Lines(bytes)) { push(out, line) }
+    }
+    push(out, "--" + b + "--")
+  }
+  join(out, "\r\n") + "\r\n"
+}
+
+// The domain after the @, for Message-ID.
+def smtpAddressDomain(s) {
+  val addr = smtpAddress(s)
+  substring(addr, indexOf(addr, "@") + 1, length(addr))
+}
+
+// One body part: 7bit when the text is plain ASCII with tame lines, base64
+// otherwise.
+def _smtpBodyPart(out, ctype, body) {
+  push(out, "Content-Type: " + ctype)
+  if (_smtpPlainAscii(body)) {
+    push(out, "Content-Transfer-Encoding: 7bit")
+    push(out, "")
+    for (line in lines(body)) { push(out, line) }
+  } else {
+    push(out, "Content-Transfer-Encoding: base64")
+    push(out, "")
+    for (line in _smtpB64Lines(utf8Encode(body))) { push(out, line) }
+  }
+  null
+}
+
+def _smtpPlainAscii(s) {
+  for (line in lines(s)) {
+    if (length(line) > 900) then return false
+    for (ch in line) {
+      val c = ord(ch)
+      if (c > 126 || (c < 32 && c != 9)) then return false
+    }
+  }
+  true
+}
+
+// Base64 folded at 76 columns, as MIME wants.
+def _smtpB64Lines(bytes) {
+  val whole = base64EncodeBytes(bytes)
+  val out = []
+  var i = 0
+  while (i < length(whole)) {
+    push(out, substring(whole, i, min(i + 76, length(whole))))
+    i += 76
+  }
+  if (isEmpty(out)) then push(out, "")
+  out
+}
+
+// "Name <a@b>": the name gets encoded-word treatment when it needs it.
+def _smtpHeaderAddr(s) {
+  val lt = indexOf(s, "<")
+  if (lt < 0) then return smtpAddress(s)
+  val name = trim(substring(s, 0, lt))
+  val addr = smtpAddress(s)
+  if (name == "") then return addr
+  _smtpHeaderText(name) + " <" + addr + ">"
+}
+
+def _smtpAddrList(v) {
+  val items = if (isArray(v)) then v else [v]
+  join(map(items, _smtpHeaderAddr), ", ")
+}
+
+// RFC 2047 encoded word for header text that leaves ASCII.
+def _smtpHeaderText(s) {
+  if (_smtpPlainAscii(s) && !contains(s, "\n")) then return s
+  "=?UTF-8?B?" + base64Encode(s) + "?="
+}
+
+// A line starting with a dot gets another (RFC 5321 §4.5.2), and the body
+// always ends with CRLF so the terminating dot stands alone.
+def _smtpDotStuff(body) {
+  val out = []
+  for (line in split(body, "\r\n")) {
+    push(out, if (startsWith(line, ".")) then "." + line else line)
+  }
+  var s = join(out, "\r\n")
+  if (!endsWith(s, "\r\n")) then s += "\r\n"
+  s
+}
+
+val _smtpCounter = atomic(0)
+
+def _smtpToken() = toString(timeMillis()) + "-" + toString(atomicAdd(_smtpCounter, 1))

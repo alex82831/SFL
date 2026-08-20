@@ -1,0 +1,81 @@
+// A todo list on the command line: the cli package parses arguments and
+// generates --help, the ansi package colours the listing, and the store is a
+// JSON file next to you.
+//
+//   sfl build run -- add "write the report"
+//   sfl build run -- list --all
+//   sfl build run -- done 1
+//   sfl build run -- --help
+
+import "cli"
+import "ansi"
+import "store"
+
+val spec = {
+  name: "todo",
+  doc: "A todo list in a JSON file.",
+  flags: {
+    all: {short: "a", doc: "list finished items too"}
+  },
+  options: {
+    file: {short: "f", doc: "the store file", default: "todo.json"}
+  },
+  positionals: [
+    {name: "command", doc: "add | list | done | rm | clear"},
+    {name: "rest", variadic: true}
+  ]
+}
+
+// cliParse reads args(), prints help on -h/--help, and exits on bad usage.
+val got = cliParse(spec)
+val file = got.options.file
+val cmd = got.positionals?.command ?? "list"
+val rest = got.positionals?.rest ?? []
+
+def show(item) {
+  val mark = if (item.done) then ansiGreen("✔") else ansiYellow("·")
+  val text = if (item.done) then ansiDim(item.text) else item.text
+  println(" ${mark} ${padStart(toString(item.id), 3)}  ${text}")
+}
+
+select (cmd) {
+  case "add": {
+    if (isEmpty(rest)) {
+      eprintln("todo add needs some words")
+      exit(2)
+    }
+    val item = storeAdd(file, join(rest, " "))
+    println("added #${item.id}: ${item.text}")
+  }
+  case "list": {
+    val items = storeLoad(file)
+    val wanted = if (got.flags.all) then items else filter(items, (t) -> !t.done)
+    if (isEmpty(wanted)) {
+      println("nothing to do" + (if (got.flags.all) then " at all" else " — try --all"))
+    } else {
+      for (item in wanted) { show(item) }
+    }
+  }
+  case "done": {
+    val hit = storeDone(file, parseInt(rest[0]))
+    if (hit == null) {
+      eprintln("no item #${rest[0]}")
+      exit(1)
+    }
+    println("done: ${hit.text}")
+  }
+  case "rm": {
+    if (!storeRemove(file, parseInt(rest[0]))) {
+      eprintln("no item #${rest[0]}")
+      exit(1)
+    }
+    println("removed #${rest[0]}")
+  }
+  case "clear": {
+    println("cleared ${storeClearDone(file)} finished item(s)")
+  }
+  default: {
+    eprintln("unknown command '${cmd}' — see --help")
+    exit(2)
+  }
+}

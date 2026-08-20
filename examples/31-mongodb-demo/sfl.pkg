@@ -1,0 +1,5 @@
+{
+  "name": "mongodb-demo",
+  "version": "0.1.0",
+  "deps": { "mongodb": "^0.1.0" }
+}

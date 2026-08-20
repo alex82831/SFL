@@ -1,0 +1,24 @@
+project({
+  "name": "markdown-site",
+  "version": "0.1.0",
+  "main": "src/main.sfl"
+})
+
+task("setup", (args) -> {
+  for (name in ["markdown", "template", "toml"]) {
+    val local = "../../packages/" + name
+    val code = if (isDir(local))
+      then passthrough(exePath(), ["pkg", "install", "--force", "--local", local])
+      else passthrough(exePath(), ["install", name])
+    if (code != 0) { return code }
+  }
+  0
+}, "Install the packages this example imports")
+
+task("clean-site", (args) -> {
+  if (isDir("site")) {
+    for (f in listFiles("site")) { removeFile(joinPath("site", f)) }
+    println("emptied site/")
+  }
+  0
+}, "Remove the generated site")

@@ -1,0 +1,35 @@
+// The pure layer runs anywhere; the live block runs only when a MySQL server
+// answers (set MYSQL_* or have one on 127.0.0.1:3306) and skips quietly
+// otherwise, so `sfl build test` is green with or without a database.
+
+import "mysql"
+import "../src/settings"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+check("escape strings", mysqlEscape("o'hara"), "'o''hara'")
+check("escape null and bools", [mysqlEscape(null), mysqlEscape(true)], ["NULL", "TRUE"])
+check("escape in-lists", mysqlEscape([1, "a"]), "(1, 'a')")
+check("escape blobs", mysqlEscape(mysqlBinary([1, 255])), "x'01ff'")
+check("bind respects strings and comments",
+  mysqlBind("SELECT ? FROM t -- ?\n WHERE a = '?' AND b = ?", [1, 2]),
+  "SELECT 1 FROM t -- ?\n WHERE a = '?' AND b = 2")
+
+val probe = attempt(() -> mysqlConnect(mysqlSettings(), {timeoutMs: 1500}))
+if (probe?.error != null) {
+  println("bindings: ok (live checks skipped — no MySQL server: " +
+    substring(probe.error.message, 0, 60) + "…)")
+} else {
+  val db = probe.value
+  db.exec("CREATE TABLE IF NOT EXISTS sfl_demo_probe (n INT)")
+  db.exec("INSERT INTO sfl_demo_probe VALUES (?)", [41])
+  check("live round trip", db.queryOne("SELECT n + 1 AS m FROM sfl_demo_probe LIMIT 1").m, 42)
+  db.exec("DROP TABLE sfl_demo_probe")
+  db.close()
+  println("bindings: ok (live checks ran)")
+}

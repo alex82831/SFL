@@ -1,0 +1,15 @@
+project({
+  "name": "text-and-regex",
+  "version": "0.1.0",
+  "main": "src/main.sfl"
+})
+
+// build.sfl is ordinary SFL, so a task can import project modules.
+import "src/words"
+
+task("wordcount", (args) -> {
+  val path = if (isEmpty(args)) then "data/moby.txt" else args[0]
+  for ([word, n] in topWords(readFile(path), 10)) {
+    printf("%6d  %s\n", n, word)
+  }
+}, "Top ten words of a file (default data/moby.txt)")

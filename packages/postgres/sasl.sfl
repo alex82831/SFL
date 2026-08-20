@@ -1,0 +1,146 @@
+// postgres/sasl — SCRAM-SHA-256 (RFC 5802) as PostgreSQL speaks it: the
+// conversation rides in AuthenticationSASL / SASLInitialResponse /
+// SASLContinue / SASLResponse / SASLFinal messages. Channel binding is not
+// offered (the gs2 header is "n,,"), which every stock server accepts.
+//
+// Passwords pass through a pragmatic subset of SASLprep (RFC 4013): ASCII is
+// untouched but control characters are refused, the non-ASCII space code
+// points map to a plain space, and the "commonly mapped to nothing" set
+// disappears. Change passwords more exotic than that rather than trusting
+// them to normalisation.
+
+import "proto"
+
+// Runs the whole conversation. `mechs` is the server's advertised mechanism
+// list; on success returns after AuthenticationOk's predecessor (the final
+// SASL message), leaving the caller to read on.
+def pgScramAuth(state, password, mechs) {
+  if (!contains(mechs, "SCRAM-SHA-256")) {
+    error("postgres: the server offers only " + join(mechs, ", ") +
+      "; this driver speaks SCRAM-SHA-256 without channel binding")
+  }
+  val nonce = base64EncodeBytes(randomBytes(18))
+  val bare = "n=,r=" + nonce             // the user name rides in the startup message
+  val first = "n,," + bare
+
+  val init = []
+  pgpPushStr(init, "SCRAM-SHA-256")
+  val firstBytes = utf8Encode(first)
+  pgpPushU32(init, length(firstBytes))
+  pgpAppend(init, firstBytes)
+  pgpSend(state, "p", init)
+
+  val cont = _pgSaslExpect(state, 11)
+  val serverFirst = utf8Decode(cont)
+  val sf = _pgSaslFields(serverFirst)
+  if (!startsWith(sf.r, nonce)) {
+    error("postgres: the server's SCRAM nonce does not extend the client's")
+  }
+  val salt = base64DecodeBytes(sf.s)
+  val iterations = parseInt(sf.i)
+
+  val salted = pbkdf2("sha256", utf8Encode(_pgSaslprep(password)), salt, iterations)
+  val clientKey = hmacBytes("sha256", salted, utf8Encode("Client Key"))
+  val storedKey = digestBytes("sha256", clientKey)
+  val withoutProof = "c=biws,r=" + sf.r
+  val authMessage = bare + "," + serverFirst + "," + withoutProof
+  val signature = hmacBytes("sha256", storedKey, utf8Encode(authMessage))
+  val proof = _pgXor(clientKey, signature)
+  pgpSend(state, "p", utf8Encode(withoutProof + ",p=" + base64EncodeBytes(proof)))
+
+  val fin = _pgSaslFields(utf8Decode(_pgSaslExpect(state, 12)))
+  val serverKey = hmacBytes("sha256", salted, utf8Encode(authMessage))
+  val expected = base64EncodeBytes(hmacBytes("sha256",
+    hmacBytes("sha256", salted, utf8Encode("Server Key")), utf8Encode(authMessage)))
+  if (fin?.v != expected) {
+    error("postgres: the server's SCRAM signature does not verify; not talking to the real server?")
+  }
+  null
+}
+
+// Reads the next Authentication message and requires the given SASL code,
+// returning the bytes after it. Errors surface with the server's message.
+def _pgSaslExpect(state, wantCode) {
+  val m = pgpRead(state)
+  if (m.kind == "E") then _pgSaslError(m.payload)
+  if (m.kind != "R") {
+    error("postgres: expected an authentication message during SCRAM, got '" + m.kind + "'")
+  }
+  val c = pgpCur(m.payload)
+  val code = pgpU32(c)
+  if (code != wantCode) {
+    error("postgres: unexpected SASL state " + code + " (wanted " + wantCode + ")")
+  }
+  pgpBytesN(c, pgpRemaining(c))
+}
+
+// A minimal ErrorResponse read for the auth phase (main.sfl owns the full one;
+// SCRAM runs before the connection object exists).
+def _pgSaslError(payload) {
+  val c = pgpCur(payload)
+  var message = "authentication failed"
+  while (pgpRemaining(c) > 0) {
+    val t = pgpU8(c)
+    if (t == 0) then break
+    val v = pgpStrNul(c)
+    if (chr(t) == "M") then message = v
+  }
+  error("postgres: " + message)
+}
+
+def _pgSaslFields(text) {
+  val out = {}
+  for (part in split(text, ",")) {
+    val eq = indexOf(part, "=")
+    if (eq > 0) {
+      out[substring(part, 0, eq)] = substring(part, eq + 1, length(part))
+    }
+  }
+  out
+}
+
+def _pgXor(a, b) {
+  val out = []
+  var i = 0
+  while (i < length(a)) {
+    push(out, bitXor(a[i], b[i]))
+    i += 1
+  }
+  out
+}
+
+// The SASLprep subset described in the module header.
+def _pgSaslprep(s) {
+  var ascii = true
+  for (ch in s) {
+    if (ord(ch) > 127) then ascii = false
+  }
+  if (ascii) {
+    for (ch in s) {
+      if (ord(ch) < 32 || ord(ch) == 127) {
+        error("postgres: the password contains control characters (SASLprep prohibits them)")
+      }
+    }
+    return s
+  }
+  val spaces = [0x00a0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+    0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x202f, 0x205f, 0x3000]
+  val gone = [0x00ad, 0x034f, 0x1806, 0x180b, 0x180c, 0x180d, 0x200b, 0x200c,
+    0x200d, 0x2060, 0xfe00, 0xfe01, 0xfe02, 0xfe03, 0xfe04, 0xfe05, 0xfe06,
+    0xfe07, 0xfe08, 0xfe09, 0xfe0a, 0xfe0b, 0xfe0c, 0xfe0d, 0xfe0e, 0xfe0f, 0xfeff]
+  var out = ""
+  for (ch in s) {
+    val c = ord(ch)
+    if (contains(spaces, c)) {
+      out += " "
+    } elsif (contains(gone, c)) {
+      null
+    } elsif (c < 32 || c == 127 || (c >= 0x7f && c <= 0x9f) || (c >= 0xd800 && c <= 0xdfff) ||
+             c == 0xfffe || c == 0xffff || (c >= 0x2028 && c <= 0x2029)) {
+      error("postgres: the password contains characters SASLprep prohibits")
+    } else {
+      out += ch
+    }
+  }
+  out
+}

@@ -1,0 +1,59 @@
+// JSON Web Tokens with the jwt package: issue on login, verify on every
+// request, watch them expire — the whole session lifecycle, no server
+// needed to see the mechanics.
+
+import "jwt"
+
+val SECRET = "demo-secret-change-me"
+
+// "Login": check credentials (here: a toy table), issue a short-lived token.
+val users = {ada: "lovelace", bo: "diddley"}
+def login(user, password) {
+  if (get(users, user, null) != password) then error("bad credentials")
+  jwtSign({
+    sub: user,
+    role: if (user == "ada") then "admin" else "user",
+    iat: timeMillis() / 1000,
+    exp: timeMillis() / 1000 + 900     // 15 minutes
+  }, SECRET)
+}
+
+// "Middleware": verify, then let the request see the claims.
+def authenticated(token, fn) {
+  val claims = jwtVerify(token, SECRET)   // raises on forgery and expiry
+  fn(claims)
+}
+
+val token = login("ada", "lovelace")
+println("issued: " + substring(token, 0, 40) + "…")
+
+// What is inside (decode does not verify — never trust it alone).
+val peek = jwtDecode(token)
+println("decoded header: " + jsonStringify(peek.header))
+println("decoded claims: sub=${peek.payload.sub} role=${peek.payload.role}")
+
+// A verified request.
+authenticated(token, (claims) -> {
+  println("request served for ${claims.sub} (${claims.role})")
+})
+
+// Wrong password.
+val no = attempt(() -> login("ada", "wrong"))
+println("bad login: " + no.error.message)
+
+// Tampering: change one character and the signature no longer verifies.
+val forged = substring(token, 0, length(token) - 2) + "xx"
+val f = attempt(() -> authenticated(forged, (c) -> c))
+println("forged token: " + f.error.message)
+
+// Expiry: a token whose exp is already past, and the leeway escape hatch.
+val stale = jwtSign({sub: "ada", exp: timeMillis() / 1000 - 5}, SECRET)
+val e = attempt(() -> jwtVerify(stale, SECRET))
+println("stale token: " + e.error.message)
+println("with leeway: " + jsonStringify(jwtVerify(stale, SECRET, {leewaySec: 60}).sub))
+
+// Issuer and audience pinning.
+val scoped = jwtSign({sub: "svc", iss: "auth.demo", aud: ["api"]}, SECRET)
+println("issuer checked: " + jwtVerify(scoped, SECRET, {issuer: "auth.demo", audience: "api"}).sub)
+val wrongAud = attempt(() -> jwtVerify(scoped, SECRET, {audience: "web"}))
+println("wrong audience: " + wrongAud.error.message)

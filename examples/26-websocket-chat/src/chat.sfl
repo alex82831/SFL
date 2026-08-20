@@ -1,0 +1,45 @@
+// The chat room: every open WebSocket is a member; a message from one is
+// broadcast to all. The socket set is shared state, so a mutex guards it —
+// the httpd model is a thread per connection, and broadcast crosses them.
+
+import "httpd"
+
+val _members = {}
+val _lock = mutex()
+val _seq = atomic(0)
+
+def _broadcast(payload) {
+  val msg = jsonStringify(payload)
+  withLock(_lock, () -> {
+    for (id in keys(_members)) {
+      attempt(() -> _members[id].send(msg))   // a dying socket must not stop the room
+    }
+  })
+  null
+}
+
+def chatMembers() = withLock(_lock, () -> length(keys(_members)))
+
+def chatApp(publicDir = "public") {
+  routes([
+    GET("/", (req) -> redirect("/assets/index.html")),
+    GET("/stats", (req) -> respondJson(200, {members: chatMembers()})),
+    STATIC("/assets", publicDir),
+    WS("/ws", {
+      open: (sock) -> {
+        val id = "guest-" + atomicAdd(_seq, 1)
+        sock.name = id
+        withLock(_lock, () -> _members[id] = sock)
+        sock.send(jsonStringify({kind: "sys", text: "welcome, ${id}"}))
+        _broadcast({kind: "sys", text: "${id} joined (${chatMembers()} here)"})
+      },
+      message: (sock, data, isText) -> {
+        _broadcast({kind: "chat", from: sock.name, text: data})
+      },
+      close: (sock, code, reason) -> {
+        withLock(_lock, () -> remove(_members, sock.name))
+        _broadcast({kind: "sys", text: "${sock.name} left"})
+      }
+    })
+  ])
+}

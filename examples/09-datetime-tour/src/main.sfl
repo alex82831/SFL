@@ -1,0 +1,45 @@
+// The datetime package: calendar arithmetic on epoch milliseconds, ISO 8601
+// in and out, fixed offsets — plus the builtin clock functions beside it.
+
+import "datetime"
+
+// Parse accepts dates, date-times, fractions, Z or ±hh:mm offsets.
+val t = dtParse("2026-08-19T15:30:00+08:00")
+println("parsed:   ${t} ms since the epoch")
+println("as UTC:   " + dtIso(t))
+println("as UTC+8: " + dtIso(t, 480))
+println("date only: " + dtIsoDate(t, 480))
+
+// Parts, in whatever offset you ask for.
+val p = dtParts(t, 480)
+println("parts: ${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}, " +
+  "weekday ${p.weekday} (1=Monday), day ${p.yearday} of the year")
+
+// Arithmetic clamps month ends instead of overflowing them.
+val jan31 = dtMake(2026, 1, 31)
+println("Jan 31 + 1 month:  " + dtIsoDate(dtAddMonths(jan31, 1)))
+println("Jan 31 + 2 months: " + dtIsoDate(dtAddMonths(jan31, 2)))
+println("+90 minutes: " + dtIso(dtAddMinutes(t, 90)))
+
+// Differences and boundaries.
+val newYear = dtMake(2027, 1, 1)
+println("days to 2027: " + dtDiffDays(newYear, t))
+println("start of that month: " + dtIso(dtStartOfMonth(t)))
+
+// The proleptic calendar helpers stand alone.
+println("2028 is leap: " + dtIsLeapYear(2028) + ", Feb 2028 has " + dtDaysInMonth(2028, 2) + " days")
+
+// A little report: the Fridays of a month.
+def fridays(year, month) {
+  val out = []
+  for (day in range(1, dtDaysInMonth(year, month) + 1)) {
+    val d = dtMake(year, month, day)
+    if (dtParts(d).weekday == 5) then push(out, day)
+  }
+  out
+}
+println("Fridays of 2026-08: " + jsonStringify(fridays(2026, 8)))
+
+// Beside the package: the machine's own clock and local time.
+println("now (machine local): " + formatTime(timeMillis()))
+println("now (UTC, strftime): " + formatTime(timeMillis(), "%Y-%m-%dT%H:%M:%SZ", true))

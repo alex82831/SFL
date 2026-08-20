@@ -1,0 +1,46 @@
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+// Order is preserved through a single channel.
+val ch = channel(2)
+val t = spawn(() -> {
+  for (n in range(5)) { send(ch, n) }
+  closeChannel(ch)
+})
+check("in order, then null after close", [receive(ch), receive(ch), receive(ch), receive(ch), receive(ch), receive(ch)],
+  [0, 1, 2, 3, 4, null])
+await(t)
+
+// Work distributed across a pool all arrives.
+val jobs = channel(4)
+val results = channel()
+val workers = map(range(3), (i) -> spawn(() -> {
+  while (true) {
+    val n = receive(jobs)
+    if (n == null) then break
+    send(results, n * n)
+  }
+}))
+for (n in range(1, 11)) { send(jobs, n) }
+closeChannel(jobs)
+var total = 0
+for (i in range(10)) { total += receive(results) }
+awaitAll(workers)
+check("pool computes everything exactly once", total, 385)
+
+check("tryReceive on empty", tryReceive(channel()), null)
+val d = channel()
+send(d, 1)
+send(d, 2)
+check("drain", channelDrain(d), [1, 2])
+check("closed flag", {
+  val c = channel()
+  closeChannel(c)
+  channelClosed(c)
+}, true)
+
+println("channels: ok")

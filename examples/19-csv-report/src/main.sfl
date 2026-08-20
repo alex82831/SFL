@@ -1,0 +1,25 @@
+// CSV in, CSV out: parse data/sales.csv, aggregate by month and region,
+// print a table and write report.csv.
+
+import "csv"
+import "datetime"
+import "report"
+
+val sales = loadSales(readFile("data/sales.csv"))
+println("loaded ${length(sales)} sale(s) spanning " +
+  dtDiffDays(dtParse(last(sales).date), dtParse(sales[0].date)) + " days")
+
+val summary = summarise(sales)
+println("")
+printf("%-9s %-7s %6s %10s\n", "month", "region", "units", "revenue")
+for (row in summary) {
+  printf("%-9s %-7s %6d %10s\n", row.month, row.region, row.units, row.revenue)
+}
+
+val best = bestSeller(sales)
+println("")
+println("best seller: ${best.product} (${best.units} units)")
+
+writeFile("report.csv", csvStringifyObjects(summary,
+  {columns: ["month", "region", "units", "revenue"]}))
+println("wrote report.csv")

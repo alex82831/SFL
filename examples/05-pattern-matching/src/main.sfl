@@ -1,0 +1,72 @@
+// select is the branch that takes the value apart: literals, arrays with
+// ...rest, objects, tuples, type tests, guards, extractors, @ binders and
+// alternatives — and the tagged-record idiom that ties it together.
+
+def describe(v) = select (v) {
+  case 0:                       "zero"
+  case n if isInt(n) && n < 0:  "negative ${n}"
+  case []:                      "an empty array"
+  case [only]:                  "one element: ${only}"
+  case [first, ...rest]:        "starts ${first}, ${length(rest)} more"
+  case (x, y):                  "a pair summing to ${x + y}"
+  case {"kind": k}:             "something tagged '${k}'"
+  case {name}:                  "carries a name: ${name}"       // shorthand for {"name": name}
+  case string(s):               "the string \"${s}\""
+  case float(f):                "the float ${f}"
+  case _:                       "something else"
+}
+
+for (v in [0, -4, [], [9], [1, 2, 3], (2, 40), {kind: "disc", r: 3},
+           {name: "ada"}, "hi", 2.5, true]) {
+  println(toString(v) + " -> " + describe(v))
+}
+
+// Guards see the pattern's bindings; $name pins against an existing value.
+val limit = 100
+def rate(n) = select (n) {
+  case $limit:            "exactly the limit"
+  case n1 if n1 > limit:  "over by ${n1 - limit}"
+  case _:                 "within bounds"
+}
+println("rate(100): " + rate(100) + "; rate(140): " + rate(140))
+
+// Extractors are plain functions: null means no match, an array feeds the
+// subpatterns. Any parser can be a pattern.
+def email(s) {
+  if (!isString(s)) then return null
+  val at = indexOf(s, "@")
+  if (at <= 0) then null else [substring(s, 0, at), substring(s, at + 1, length(s))]
+}
+def route(input) = select (input) {
+  case email(user, host): "mail ${user} at ${host}"
+  case whole @ [x]:       "singleton " + jsonStringify(whole)
+  case "quit" | "exit":   "goodbye"
+  case _:                 "no idea"
+}
+println(route("ada@example.org"))
+println(route([7]))
+println(route("exit"))
+
+// The tagged-record idiom: a "kind" field, constructors, literal dispatch.
+def circle(r)  = {"kind": "circle", "r": r}
+def rect(w, h) = {"kind": "rect", "w": w, "h": h}
+
+def area(s) = select (s.kind) {
+  case "circle": 3.141592653589793 * s.r * s.r
+  case "rect":   s.w * s.h
+  default: error("area: not a shape: " + jsonStringify(s))
+}
+val shapes = [circle(1.0), rect(3, 4), circle(0.5)]
+println("areas: " + join(map(shapes, (s) -> format("%.2f", toFloat(area(s)))), ", "))
+println("total: " + format("%.2f", toFloat(shapes |> map(area) |> sum)))
+
+// Destructuring runs the same patterns in val/var/for.
+val {"kind": _, "r": radius} = circle(2.0)
+println("destructured radius: ${radius}")
+for ({name, age} in [{name: "bo", age: 25}, {name: "cyd", age: 31}]) {
+  println("  ${name} is ${age}")
+}
+// A for loop with a refutable pattern keeps only what matches, Scala-style.
+for ([a, b] in [[1, 2], [3], [4, 5]]) {
+  println("  pair ${a},${b}")
+}

@@ -1,0 +1,89 @@
+// The postgres package against a real server: $1 parameters (server-side,
+// nothing spliced into SQL), RETURNING, arrays via ANY, the type mapping,
+// transactions, and LISTEN/NOTIFY between two connections.
+//
+// Point it at a server with PG_HOST/PG_USER/PG_PASSWORD/PG_DB (or one
+// PG_URL); see README.md for a one-line docker server.
+
+import "postgres"
+import "settings"
+
+val attemptConn = attempt(() -> pgConnect(pgSettings()))
+if (attemptConn?.error != null) {
+  eprintln("cannot reach PostgreSQL: " + attemptConn.error.message)
+  eprintln("")
+  eprintln("start one and point the demo at it, e.g.:")
+  eprintln("  docker run --rm -e POSTGRES_PASSWORD=secret -p 5432:5432 postgres:16")
+  eprintln("  PG_PASSWORD=secret sfl build run")
+  exit(1)
+}
+val db = attemptConn.value
+
+println("connected to PostgreSQL ${db.serverVersion()} (backend pid ${db.backendPid()})")
+
+// exec speaks the simple protocol: several statements in one string.
+db.exec(join([
+  "DROP TABLE IF EXISTS albums;",
+  "CREATE TABLE albums (",
+  "  id      SERIAL PRIMARY KEY,",
+  "  title   TEXT NOT NULL,",
+  "  artist  TEXT NOT NULL,",
+  "  year    INT NOT NULL,",
+  "  price   NUMERIC(8,2),",
+  "  artwork BYTEA",
+  ")"
+], "\n"))
+
+// query speaks the extended protocol: $1..$n go out of band, and RETURNING
+// hands the generated id straight back.
+val made = db.query(
+  "INSERT INTO albums (title, artist, year, price, artwork) VALUES ($1, $2, $3, $4, $5) RETURNING id",
+  ["Kind of Blue", "Miles Davis", 1959, "9.99", pgBinary([255, 216, 255])])
+println("inserted id ${made[0].id}")
+db.query("INSERT INTO albums (title, artist, year, price) VALUES ($1, $2, $3, $4)",
+  ["Giant Steps", "John Coltrane", 1960, "12.50"])
+db.query("INSERT INTO albums (title, artist, year) VALUES ($1, $2, $3)",
+  ["空港", "Teresa Teng", 1974])
+
+// The type mapping: INT -> int, NUMERIC -> string (exact), BYTEA -> bytes,
+// BOOL -> bool, NULL -> null.
+for (row in db.query("SELECT * FROM albums ORDER BY id")) {
+  println("  #${row.id} ${row.title} — ${row.artist} (${row.year})" +
+    (if (row.price != null) then ", $${row.price}" else "") +
+    (if (row.artwork != null) then " [artwork ${length(row.artwork)} bytes]" else ""))
+}
+
+// Arrays bind through pgArray + ANY — the parameterised IN list.
+val fifties = db.query("SELECT title FROM albums WHERE year = ANY($1::int[]) ORDER BY id",
+  [pgArray([1959, 1960])])
+println("50s/60s: " + join(map(fifties, (r) -> r.title), "; "))
+
+// queryOne, and exec's affected-rows tag.
+println("count: " + db.queryOne("SELECT COUNT(*)::int AS n FROM albums").n)
+val bump = db.exec("UPDATE albums SET price = COALESCE(price, '5.00'::numeric) * 2")
+println("update touched ${bump.affectedRows} row(s), tag '${bump.tag}'")
+
+// Transactions: commit one, roll one back.
+db.transaction(() -> db.query("UPDATE albums SET year = $1 WHERE id = $2", [1961, 2]))
+val failed = attempt(() -> db.transaction(() -> {
+  db.query("DELETE FROM albums")
+  error("no, keep them")
+}))
+println("rollback kept " + db.queryOne("SELECT COUNT(*)::int AS n FROM albums").n +
+  " rows (reason: ${failed.error.message})")
+
+// Errors carry the SQLSTATE and position; the connection stays usable.
+val oops = attempt(() -> db.query("SELECT nope FROM albums"))
+println("a server error reads: " + oops.error.message)
+
+// LISTEN/NOTIFY: a second connection notifies the first.
+val other = pgConnect(pgSettings())
+db.listen("demo_events")
+other.exec("NOTIFY demo_events, 'fresh data'")
+val note = db.waitNotification(3000)
+println("notification: '${note.payload}' on '${note.channel}' from pid ${note.pid}")
+other.close()
+
+db.exec("DROP TABLE albums")
+db.close()
+println("done")

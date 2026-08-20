@@ -1,0 +1,443 @@
+// markdown — Markdown to HTML, the working subset.
+//
+//   import "markdown"
+//
+//   mdToHtml("# Title\n\nSome *emphasis* and `code`.")
+//
+// Blocks: # headings (with slug ids for anchors), paragraphs, fenced code
+// (``` with a language class), > blockquotes (nesting), -/*/+ and 1. lists
+// (nesting by indentation, tight items), --- rules, and GFM tables with
+// alignment. Inline: **strong**, *emphasis*, `code`, ~~strikethrough~~,
+// [links](url), ![images](url), <http://autolinks>, backslash escapes, and
+// two trailing spaces for a hard break.
+//
+// Raw HTML is escaped, so untrusted text renders as text — pass
+// {allowHtml: true} only for input you trust with your page. Not spoken:
+// setext headings, indented code blocks (fence instead), reference-style
+// links, and footnotes.
+
+// ------------------------------------------------------------------ blocks
+
+def mdToHtml(text, opts = {}) {
+  val ctx = {allowHtml: get(opts, "allowHtml", false)}
+  val out = []
+  _mdBlocks(out, lines(text), ctx)
+  join(out, "\n")
+}
+
+// Inline markdown alone (for titles and table cells rendered elsewhere).
+def mdInline(text, opts = {}) = _mdInline(text, {allowHtml: get(opts, "allowHtml", false)})
+
+def _mdBlocks(out, ls, ctx) {
+  var i = 0
+  val n = length(ls)
+  while (i < n) {
+    val line = ls[i]
+    val t = trim(line)
+    if (t == "") {
+      i += 1
+    } elsif (startsWith(t, "```") || startsWith(t, "~~~")) {
+      val fence = substring(t, 0, 3)
+      val lang = trim(substring(t, 3, length(t)))
+      val body = []
+      i += 1
+      while (i < n && trim(ls[i]) != fence) {
+        push(body, ls[i])
+        i += 1
+      }
+      i += 1                                 // the closing fence
+      val cls = if (lang != "") then " class=\"language-" + _mdEscape(lang) + "\"" else ""
+      push(out, "<pre><code" + cls + ">" + _mdEscapeAll(join(body, "\n")) + "</code></pre>")
+    } elsif (matches(t, "^#{1,6}( .*|)$")) {
+      var level = 0
+      while (level < length(t) && charAt(t, level) == "#") { level += 1 }
+      var body = trim(substring(t, level, length(t)))
+      body = regexReplace(body, " #+$", "")   // trailing closing hashes
+      push(out, "<h" + level + " id=\"" + _mdSlug(body) + "\">" +
+        _mdInline(body, ctx) + "</h" + level + ">")
+      i += 1
+    } elsif (startsWith(t, ">")) {
+      val inner = []
+      while (i < n && startsWith(trim(ls[i]), ">")) {
+        val stripped = trim(ls[i])
+        var rest = substring(stripped, 1, length(stripped))
+        if (startsWith(rest, " ")) then rest = substring(rest, 1, length(rest))
+        push(inner, rest)
+        i += 1
+      }
+      val sub = []
+      _mdBlocks(sub, inner, ctx)
+      push(out, "<blockquote>\n" + join(sub, "\n") + "\n</blockquote>")
+    } elsif (matches(t, "^(-{3,}|\\*{3,}|_{3,})$")) {
+      push(out, "<hr>")
+      i += 1
+    } elsif (_mdListStart(line) != null) {
+      i = _mdList(out, ls, i, ctx)
+    } elsif (i + 1 < n && _mdTableSep(ls[i + 1]) != null && contains(line, "|")) {
+      i = _mdTable(out, ls, i, ctx)
+    } else {
+      val para = []
+      while (i < n && trim(ls[i]) != "" && !_mdBreaksParagraph(ls[i], ls, i)) {
+        push(para, trimStart(ls[i]))
+        i += 1
+      }
+      push(out, "<p>" + _mdParagraph(para, ctx) + "</p>")
+    }
+  }
+  null
+}
+
+// A paragraph run stops where another block form begins.
+def _mdBreaksParagraph(line, ls, i) {
+  val t = trim(line)
+  startsWith(t, "```") || startsWith(t, "~~~") || matches(t, "^#{1,6} .*$") ||
+    startsWith(t, ">") || matches(t, "^(-{3,}|\\*{3,}|_{3,})$") ||
+    _mdListStart(line) != null ||
+    (i + 1 < length(ls) && contains(line, "|") && _mdTableSep(ls[i + 1]) != null)
+}
+
+// Joins a paragraph's lines; two trailing spaces made a hard break.
+def _mdParagraph(para, ctx) {
+  val parts = []
+  var j = 0
+  for (line in para) {
+    val hard = endsWith(line, "  ") && j + 1 < length(para)
+    push(parts, _mdInline(trimEnd(line), ctx) + (if (hard) then "<br>" else ""))
+    j += 1
+  }
+  join(parts, "\n")
+}
+
+// ------------------------------------------------------------------- lists
+
+// {indent, ordered, start, rest} for a list line, else null.
+def _mdListStart(line) {
+  val m = regexFind(line, "^( *)([-*+]|\\d{1,9}\\.) (.*)$")
+  if (m == null) then return null
+  val marker = m[2]
+  val ordered = matches(marker, "^\\d.*$")
+  {indent: length(m[1]), ordered: ordered,
+   start: if (ordered) then parseInt(substring(marker, 0, length(marker) - 1)) else 1,
+   rest: m[3]}
+}
+
+def _mdList(out, ls, i0, ctx) {
+  var i = i0
+  val n = length(ls)
+  val first = _mdListStart(ls[i])
+  val items = []
+  while (i < n) {
+    val st = _mdListStart(ls[i])
+    if (st == null || st.indent != first.indent || st.ordered != first.ordered) then break
+    val body = [st.rest]
+    i += 1
+    // Lines indented past the marker (or blank lines inside) belong to the item.
+    while (i < n) {
+      val line = ls[i]
+      if (trim(line) == "") {
+        if (i + 1 < n && _mdIndentOf(ls[i + 1]) > first.indent) {
+          push(body, "")
+          i += 1
+        } else {
+          break
+        }
+      } elsif (_mdIndentOf(line) > first.indent) {
+        push(body, substring(line, min(first.indent + 2, _mdIndentOf(line)), length(line)))
+        i += 1
+      } else {
+        break
+      }
+    }
+    push(items, body)
+  }
+  val tag = if (first.ordered) then "ol" else "ul"
+  val attrs = if (first.ordered && first.start != 1) then " start=\"" + first.start + "\"" else ""
+  val rendered = map(items, (body) -> {
+    val sub = []
+    _mdBlocks(sub, body, ctx)
+    var inner = join(sub, "\n")
+    // A tight item — one leading paragraph, no second — loses its <p> wrap,
+    // whatever (a nested list, say) follows it.
+    if (startsWith(inner, "<p>") && strFind(inner, "<p>", 3) < 0) {
+      val close = strFind(inner, "</p>", 3)
+      inner = substring(inner, 3, close) + substring(inner, close + 4, length(inner))
+    }
+    "<li>" + inner + "</li>"
+  })
+  push(out, "<" + tag + attrs + ">\n" + join(rendered, "\n") + "\n</" + tag + ">")
+  i
+}
+
+def _mdIndentOf(line) {
+  var i = 0
+  while (i < length(line) && charAt(line, i) == " ") { i += 1 }
+  i
+}
+
+// ------------------------------------------------------------------ tables
+
+// The |---|:--:|---| separator row, parsed into alignments, else null.
+def _mdTableSep(line) {
+  val t = trim(line)
+  if (!contains(t, "-") || !matches(t, "^\\|?[ :|-]+\\|?$")) then return null
+  val cells = _mdTableCells(t)
+  if (isEmpty(cells)) then return null
+  val aligns = []
+  for (cell in cells) {
+    val c = trim(cell)
+    if (!matches(c, "^:?-+:?$")) then return null
+    push(aligns,
+      if (startsWith(c, ":") && endsWith(c, ":")) then "center"
+      elsif (endsWith(c, ":")) then "right"
+      elsif (startsWith(c, ":")) then "left"
+      else "")
+  }
+  aligns
+}
+
+def _mdTableCells(line) {
+  var t = trim(line)
+  if (startsWith(t, "|")) then t = substring(t, 1, length(t))
+  if (endsWith(t, "|")) then t = substring(t, 0, length(t) - 1)
+  // Split on unescaped pipes.
+  val cells = []
+  var cur = ""
+  var i = 0
+  while (i < length(t)) {
+    val ch = charAt(t, i)
+    if (ch == "\\" && i + 1 < length(t) && charAt(t, i + 1) == "|") {
+      cur += "|"
+      i += 2
+    } elsif (ch == "|") {
+      push(cells, cur)
+      cur = ""
+      i += 1
+    } else {
+      cur += ch
+      i += 1
+    }
+  }
+  push(cells, cur)
+  cells
+}
+
+def _mdTable(out, ls, i0, ctx) {
+  var i = i0
+  val aligns = _mdTableSep(ls[i + 1])
+  val headers = _mdTableCells(ls[i])
+  i += 2
+  def cellAttr(j) {
+    if (j < length(aligns) && aligns[j] != "") then " style=\"text-align: " + aligns[j] + "\""
+    else ""
+  }
+  val head = []
+  var j = 0
+  for (h in headers) {
+    push(head, "<th" + cellAttr(j) + ">" + _mdInline(trim(h), ctx) + "</th>")
+    j += 1
+  }
+  val rowsHtml = []
+  while (i < length(ls) && contains(ls[i], "|") && trim(ls[i]) != "") {
+    val cells = _mdTableCells(ls[i])
+    val tds = []
+    var k = 0
+    while (k < length(headers)) {
+      val cell = if (k < length(cells)) then trim(cells[k]) else ""
+      push(tds, "<td" + cellAttr(k) + ">" + _mdInline(cell, ctx) + "</td>")
+      k += 1
+    }
+    push(rowsHtml, "<tr>" + join(tds, "") + "</tr>")
+    i += 1
+  }
+  push(out, "<table>\n<thead><tr>" + join(head, "") + "</tr></thead>\n<tbody>\n" +
+    join(rowsHtml, "\n") + "\n</tbody>\n</table>")
+  i
+}
+
+// ------------------------------------------------------------------ inline
+
+def _mdInline(s, ctx) {
+  var out = ""
+  var i = 0
+  val n = length(s)
+  while (i < n) {
+    val ch = charAt(s, i)
+    if (ch == "\\" && i + 1 < n && contains("\\`*_{}[]()#+-.!|~<>", charAt(s, i + 1))) {
+      out += _mdEscapeChar(charAt(s, i + 1))
+      i += 2
+    } elsif (ch == "`") {
+      val close = strFind(s, "`", i + 1)
+      if (close < 0) {
+        out += "`"
+        i += 1
+      } else {
+        out += "<code>" + _mdEscapeAll(substring(s, i + 1, close)) + "</code>"
+        i = close + 1
+      }
+    } elsif (ch == "!" && i + 1 < n && charAt(s, i + 1) == "[") {
+      val link = _mdLink(s, i + 1)
+      if (link == null) {
+        out += "!"
+        i += 1
+      } else {
+        out += "<img src=\"" + _mdEscape(link.url) + "\" alt=\"" + _mdEscape(link.text) + "\"" +
+          (if (link.title != null) then " title=\"" + _mdEscape(link.title) + "\"" else "") + ">"
+        i = link.end
+      }
+    } elsif (ch == "[") {
+      val link = _mdLink(s, i)
+      if (link == null) {
+        out += "["
+        i += 1
+      } else {
+        out += "<a href=\"" + _mdEscape(link.url) + "\"" +
+          (if (link.title != null) then " title=\"" + _mdEscape(link.title) + "\"" else "") +
+          ">" + _mdInline(link.text, ctx) + "</a>"
+        i = link.end
+      }
+    } elsif ((ch == "*" || ch == "_") && i + 1 < n && charAt(s, i + 1) == ch) {
+      val close = _mdCloser(s, i + 2, ch + ch)
+      if (close < 0) {
+        out += ch + ch
+        i += 2
+      } else {
+        out += "<strong>" + _mdInline(substring(s, i + 2, close), ctx) + "</strong>"
+        i = close + 2
+      }
+    } elsif (ch == "*" || ch == "_") {
+      val close = _mdCloser(s, i + 1, ch)
+      if (close < 0) {
+        out += ch
+        i += 1
+      } else {
+        out += "<em>" + _mdInline(substring(s, i + 1, close), ctx) + "</em>"
+        i = close + 1
+      }
+    } elsif (ch == "~" && i + 1 < n && charAt(s, i + 1) == "~") {
+      val close = _mdCloser(s, i + 2, "~~")
+      if (close < 0) {
+        out += "~~"
+        i += 2
+      } else {
+        out += "<del>" + _mdInline(substring(s, i + 2, close), ctx) + "</del>"
+        i = close + 2
+      }
+    } elsif (ch == "<") {
+      val close = strFind(s, ">", i + 1)
+      val inner = if (close > 0) then substring(s, i + 1, close) else ""
+      if (close > 0 && (startsWith(inner, "http://") || startsWith(inner, "https://") ||
+          startsWith(inner, "mailto:"))) {
+        val label = if (startsWith(inner, "mailto:")) then substring(inner, 7, length(inner)) else inner
+        out += "<a href=\"" + _mdEscape(inner) + "\">" + _mdEscape(label) + "</a>"
+        i = close + 1
+      } elsif (ctx.allowHtml) {
+        out += "<"
+        i += 1
+      } else {
+        out += "&lt;"
+        i += 1
+      }
+    } elsif (ch == "&" && ctx.allowHtml) {
+      out += "&"
+      i += 1
+    } elsif (ch == "&") {
+      out += "&amp;"
+      i += 1
+    } elsif (ch == ">" && !ctx.allowHtml) {
+      out += "&gt;"
+      i += 1
+    } elsif (ch == "\"" && !ctx.allowHtml) {
+      out += "&quot;"
+      i += 1
+    } else {
+      out += ch
+      i += 1
+    }
+  }
+  out
+}
+
+// [text](url "title") from the '[' at `at`; null when it is not a link.
+def _mdLink(s, at) {
+  val n = length(s)
+  var depth = 1
+  var i = at + 1
+  while (i < n && depth > 0) {
+    val ch = charAt(s, i)
+    if (ch == "\\") then i += 1
+    elsif (ch == "[") then depth += 1
+    elsif (ch == "]") then depth -= 1
+    if (depth > 0) then i += 1
+  }
+  if (depth != 0 || i + 1 >= n || charAt(s, i + 1) != "(") then return null
+  val text = substring(s, at + 1, i)
+  val closeParen = strFind(s, ")", i + 2)
+  if (closeParen < 0) then return null
+  val body = trim(substring(s, i + 2, closeParen))
+  var url = body
+  var title = null
+  val sp = indexOf(body, " ")
+  if (sp > 0) {
+    val t = trim(substring(body, sp + 1, length(body)))
+    if (startsWith(t, "\"") && endsWith(t, "\"") && length(t) >= 2) {
+      url = substring(body, 0, sp)
+      title = substring(t, 1, length(t) - 1)
+    }
+  }
+  {text: text, url: url, title: title, end: closeParen + 1}
+}
+
+// The nearest closing delimiter whose inside is not empty and does not butt
+// against spaces — the pragmatic emphasis rule.
+def _mdCloser(s, from, delim) {
+  var i = from
+  val n = length(s)
+  val dlen = length(delim)
+  while (i + dlen <= n) {
+    if (substring(s, i, i + dlen) == delim && i > from &&
+        charAt(s, i - 1) != " " && charAt(s, from) != " ") {
+      return i
+    }
+    i += 1
+  }
+  -1
+}
+
+// ----------------------------------------------------------------- helpers
+
+def _mdEscapeChar(ch) = select (ch) {
+  case "<": "&lt;"
+  case ">": "&gt;"
+  case "&": "&amp;"
+  case "\"": "&quot;"
+  default: ch
+}
+
+def _mdEscape(s) {
+  var out = ""
+  for (ch in s) { out += _mdEscapeChar(ch) }
+  out
+}
+
+// For code blocks: everything neutralised, no markdown processed.
+def _mdEscapeAll(s) = _mdEscape(s)
+
+// heading text -> a stable id: lowercase, letters and digits kept (any
+// script), runs of everything else become single dashes.
+def _mdSlug(s) {
+  var out = ""
+  var dash = false
+  for (ch in toLower(s)) {
+    val c = ord(ch)
+    val keep = (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c > 127
+    if (keep) {
+      out += ch
+      dash = false
+    } elsif (!dash && out != "") {
+      out += "-"
+      dash = true
+    }
+  }
+  while (endsWith(out, "-")) { out = substring(out, 0, length(out) - 1) }
+  out
+}

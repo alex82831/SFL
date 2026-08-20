@@ -1,0 +1,36 @@
+// Layered configuration: app.toml holds the checked-in defaults, .env (and
+// the real environment above it) holds per-machine overrides. Override names
+// map APP_SERVER_PORT -> config.server.port.
+
+import "toml"
+import "dotenv"
+
+// Applies APP_* environment overrides onto a parsed config. Values keep the
+// type of what they replace: numbers parse, booleans read true/false.
+def configLoad(tomlPath, envPath = ".env") {
+  dotenvLoad(envPath)
+  val cfg = tomlParse(readFile(tomlPath))
+  _override(cfg, [])
+  cfg
+}
+
+def _override(node, path) {
+  for (k in keys(node)) {
+    val sub = concat(path, [k])
+    if (isObject(node[k])) {
+      _override(node[k], sub)
+    } else {
+      val envName = "APP_" + toUpper(join(sub, "_"))
+      val v = getEnv(envName)
+      if (v != null) then node[k] = _cast(v, node[k])
+    }
+  }
+  null
+}
+
+def _cast(text, old) {
+  if (isBool(old)) then text == "true" || text == "1"
+  elsif (isInt(old)) then parseInt(text)
+  elsif (isFloat(old)) then parseFloat(text)
+  else text
+}

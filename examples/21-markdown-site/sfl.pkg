@@ -1,0 +1,5 @@
+{
+  "name": "markdown-site",
+  "version": "0.1.0",
+  "deps": { "markdown": "^0.1.0", "template": "^0.1.0", "toml": "^0.1.0" }
+}

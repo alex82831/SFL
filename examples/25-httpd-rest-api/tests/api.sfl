@@ -1,0 +1,60 @@
+import "httpd"
+import "log"
+import "../src/api"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+logSetLevel("off")                       // keep the test output clean
+notesReset()
+val srv = httpServer({quiet: true, handler: api()})
+srv.start()
+val base = "http://127.0.0.1:${srv.port()}"
+
+def post(path, body, token = null) {
+  val headers = {}
+  if (token != null) then headers["Authorization"] = "Bearer " + token
+  httpRequest("POST", base + path, jsonStringify(body), "application/json", headers)
+}
+def getJson(path, token) {
+  jsonParse(httpRequest("GET", base + path, null, null,
+    {"Authorization": "Bearer " + token}).body)
+}
+
+// No token, no notes.
+check("unauthenticated is 401", httpRequest("GET", base + "/api/notes").status, 401)
+check("garbage tokens are 401", httpRequest("GET", base + "/api/notes", null, null,
+  {"Authorization": "Bearer not.a.token"}).status, 401)
+
+// Log in badly, then properly.
+check("bad credentials are 401", post("/api/login", {user: "ada", password: "nope"}).status, 401)
+val token = jsonParse(post("/api/login", {user: "ada", password: "lovelace"}).body).token
+check("a token comes back", length(split(token, ".")), 3)
+
+// CRUD.
+val made = post("/api/notes", {text: "first note"}, token)
+check("create is 201", made.status, 201)
+val note = jsonParse(made.body)
+check("the note carries its author", note.by, "ada")
+check("empty text is 422", post("/api/notes", {text: ""}, token).status, 422)
+
+check("list shows it", map(getJson("/api/notes", token), (n) -> n.text), ["first note"])
+check("read one", getJson("/api/notes/" + note.id, token).text, "first note")
+
+val put = httpRequest("PUT", base + "/api/notes/" + note.id,
+  jsonStringify({done: true}), "application/json", {"Authorization": "Bearer " + token})
+check("update works", jsonParse(put.body).done, true)
+
+val gone = httpRequest("DELETE", base + "/api/notes/" + note.id, null, null,
+  {"Authorization": "Bearer " + token})
+check("delete is 204", gone.status, 204)
+check("the list is empty again", getJson("/api/notes", token), [])
+check("missing notes are 404", httpRequest("GET", base + "/api/notes/ghost", null, null,
+  {"Authorization": "Bearer " + token}).status, 404)
+
+srv.stop()
+println("api: ok")

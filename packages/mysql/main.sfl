@@ -1,0 +1,740 @@
+// mysql — a MySQL / MariaDB client in pure SFL, speaking the client/server
+// protocol over TCP.
+//
+//   import "mysql"
+//
+//   val db = mysqlConnect({host: "127.0.0.1", user: "app", password: "secret", db: "shop"})
+//   db.exec("CREATE TABLE IF NOT EXISTS users (id INT AUTO_INCREMENT PRIMARY KEY, name TEXT)")
+//   db.exec("INSERT INTO users (name) VALUES (?)", ["ada"])
+//   db.query("SELECT * FROM users WHERE id > ?", [0])   // [{id: 1, name: "ada"}]
+//   db.close()
+//
+// The client is an object of functions guarded by one mutex, so it can be
+// shared between threads — though a transaction owns the connection, so keep
+// a transaction to one thread. Queries use the text protocol; `?` placeholders
+// are bound client-side with proper escaping (strings, numbers, booleans,
+// null, arrays for IN (...), and mysqlBinary(bytes) for blobs).
+//
+// Authentication: mysql_native_password and caching_sha2_password. The
+// caching_sha2 fast path works over plain TCP; the full exchange (an account
+// the server has not cached yet) requires tls, because this driver does not
+// implement the RSA password exchange — connect with {tls: true} (or a caFile
+// for a self-signed server), or use a mysql_native_password account.
+// LOCAL INFILE requests from the server are always refused.
+
+import "packets"
+import "auth"
+
+// Capability flags (the subset this driver speaks).
+val _CAP_LONG_PASSWORD = 0x1
+val _CAP_LONG_FLAG = 0x4
+val _CAP_CONNECT_WITH_DB = 0x8
+val _CAP_PROTOCOL_41 = 0x200
+val _CAP_SSL = 0x800
+val _CAP_TRANSACTIONS = 0x2000
+val _CAP_SECURE_CONNECTION = 0x8000
+val _CAP_MULTI_RESULTS = 0x20000
+val _CAP_PLUGIN_AUTH = 0x80000
+val _CAP_AUTH_LENENC = 0x200000
+val _CAP_DEPRECATE_EOF = 0x1000000
+
+val _STATUS_IN_TRANS = 0x0001
+val _STATUS_AUTOCOMMIT = 0x0002
+val _STATUS_MORE_RESULTS = 0x0008
+val _STATUS_NO_BACKSLASH = 0x0200
+
+val _COM_QUIT = 0x01
+val _COM_INIT_DB = 0x02
+val _COM_QUERY = 0x03
+val _COM_PING = 0x0e
+
+// ---------------------------------------------------------------- connect
+
+// Opens a connection. `target` is a mysql:// URL, a plain host name, or the
+// options object itself. Recognised options (over the URL, the object wins):
+// host, port, user, password, db, timeoutMs, tls (true or {caFile: "..."}),
+// charset (a collation id; 45 = utf8mb4_general_ci).
+def mysqlConnect(target = "127.0.0.1", options = {}) {
+  val opt = merge(_parseTarget(target), options)
+  val host = get(opt, "host", "127.0.0.1")
+  val port = get(opt, "port", 3306)
+  val user = get(opt, "user", "root")
+  val password = get(opt, "password", "") ?? ""
+  val db = get(opt, "db", null)
+  val timeoutMs = get(opt, "timeoutMs", 10000)
+  val tls = get(opt, "tls", null)
+
+  val sock = connect(host, port, timeoutMs)
+  val state = {sock: sock, timeoutMs: timeoutMs, seq: 0, lock: mutex(),
+    caps: 0, status: 0, serverVersion: "", threadId: 0}
+
+  val hello = _readHandshake(state)
+  val serverCaps = hello.caps
+  if (bitAnd(serverCaps, _CAP_PROTOCOL_41) == 0 || bitAnd(serverCaps, _CAP_SECURE_CONNECTION) == 0) {
+    closeSocket(sock)
+    error("mysql: the server is too old for this driver (it lacks the 4.1 protocol)")
+  }
+
+  var caps = _CAP_LONG_PASSWORD + _CAP_LONG_FLAG + _CAP_PROTOCOL_41 +
+    _CAP_TRANSACTIONS + _CAP_SECURE_CONNECTION +
+    bitAnd(serverCaps, _CAP_PLUGIN_AUTH) +
+    bitAnd(serverCaps, _CAP_AUTH_LENENC) +
+    bitAnd(serverCaps, _CAP_MULTI_RESULTS) +
+    bitAnd(serverCaps, _CAP_DEPRECATE_EOF)
+  if (db != null) then caps += _CAP_CONNECT_WITH_DB
+
+  val charset = get(opt, "charset", 45)  // utf8mb4_general_ci
+  var isTls = false
+  if (tls != null && tls != false) {
+    if (bitAnd(serverCaps, _CAP_SSL) == 0) {
+      closeSocket(sock)
+      error("mysql: tls was requested but the server does not offer it")
+    }
+    caps += _CAP_SSL
+    val req = []
+    mypPushU32(req, caps)
+    mypPushU32(req, 0x01000000)
+    push(req, charset)
+    var i = 0
+    while (i < 23) { push(req, 0); i += 1 }
+    mypSend(state, req)
+    if (isObject(tls) && contains(tls, "caFile")) {
+      tlsWrap(sock, host, tls.caFile, timeoutMs)
+    } else {
+      tlsWrap(sock, host, null, timeoutMs)
+    }
+    isTls = true
+  }
+
+  state.caps = caps
+  _sendAuthResponse(state, caps, charset, user, password, db, hello.plugin, hello.nonce, isTls)
+  _authLoop(state, password, hello.plugin, isTls)
+
+  var closed = false
+  def guard() {
+    if (closed) then error("mysql: the client is closed")
+    null
+  }
+
+  // Runs one SQL text and returns every result set it produced.
+  def run(sql, params) {
+    withLock(state.lock, () -> {
+      guard()
+      val text = if (params == null) then sql else mysqlBind(sql, params, _noBackslash(state))
+      _command(state, _COM_QUERY, utf8Encode(text))
+      _readResultSets(state)
+    })
+  }
+
+  def firstRowSet(results) {
+    for (r in results) {
+      if (r.rows != null) then return r
+    }
+    null
+  }
+
+  def query(sql, params = null) {
+    val set = firstRowSet(run(sql, params))
+    if (set == null) then return []
+    val names = map(set.columns, (c) -> c.name)
+    map(set.rows, (row) -> fromEntries(zip(names, row)))
+  }
+
+  def exec(sql, params = null) {
+    val results = run(sql, params)
+    val r = results[0]
+    if (r.rows != null) {
+      {affectedRows: 0, lastInsertId: 0, warnings: 0, info: ""}
+    } else {
+      {affectedRows: r.ok.affectedRows, lastInsertId: r.ok.lastInsertId,
+       warnings: r.ok.warnings, info: r.ok.info}
+    }
+  }
+
+  {
+    // SELECTs: an array of row objects, column names as keys. Extra result
+    // sets (CALL with several SELECTs) are drained; queryMulti keeps them.
+    query: query,
+    queryOne: (sql, params = null) -> {
+      val rows = query(sql, params)
+      if (isEmpty(rows)) then null else rows[0]
+    },
+    // Rows as arrays plus the column metadata, for when names collide or the
+    // types matter: {columns: [{name, table, type, typeName, flags, decimals}],
+    // rows: [[...]]}.
+    queryFull: (sql, params = null) -> {
+      val set = firstRowSet(run(sql, params))
+      if (set == null) then {columns: [], rows: []}
+      else {columns: set.columns, rows: set.rows}
+    },
+    // Every result set of a multi-result command (CALL), each as
+    // {columns, rows} or {affectedRows, lastInsertId, warnings, info}.
+    queryMulti: (sql, params = null) -> map(run(sql, params), (r) ->
+      if (r.rows != null) then {columns: r.columns, rows: r.rows}
+      else {affectedRows: r.ok.affectedRows, lastInsertId: r.ok.lastInsertId,
+            warnings: r.ok.warnings, info: r.ok.info}),
+    // INSERT/UPDATE/DELETE/DDL: {affectedRows, lastInsertId, warnings, info}.
+    exec: exec,
+
+    begin: () -> { exec("START TRANSACTION"); null },
+    commit: () -> { exec("COMMIT"); null },
+    rollback: () -> { exec("ROLLBACK"); null },
+    // Runs fn inside a transaction: commits its value out, rolls back and
+    // re-raises when it raises. The transaction owns the connection — do not
+    // share the client with other threads while one is open.
+    transaction: (fn) -> {
+      exec("START TRANSACTION")
+      val r = attempt(fn)
+      if (r?.error != null) {
+        attempt(() -> exec("ROLLBACK"))
+        error(r.error.message)
+      }
+      exec("COMMIT")
+      r.value
+    },
+
+    ping: () -> {
+      val t0 = timeMillis()
+      withLock(state.lock, () -> {
+        guard()
+        _command(state, _COM_PING, [])
+        _expectOk(state)
+      })
+      timeMillis() - t0
+    },
+    selectDb: (name) -> {
+      withLock(state.lock, () -> {
+        guard()
+        _command(state, _COM_INIT_DB, utf8Encode(name))
+        _expectOk(state)
+      })
+      null
+    },
+    serverVersion: () -> state.serverVersion,
+    threadId: () -> state.threadId,
+    // {inTransaction, autocommit} from the last status the server reported.
+    status: () -> {
+      inTransaction: bitAnd(state.status, _STATUS_IN_TRANS) != 0,
+      autocommit: bitAnd(state.status, _STATUS_AUTOCOMMIT) != 0
+    },
+    // One value as a SQL literal, exactly as ? binding would render it.
+    escape: (v) -> mysqlEscape(v, _noBackslash(state)),
+
+    close: () -> {
+      if (!closed) {
+        closed = true
+        attempt(() -> {
+          state.seq = 0
+          mypSend(state, [_COM_QUIT])
+        })
+        closeSocket(state.sock)
+      }
+      null
+    }
+  }
+}
+
+def _noBackslash(state) = bitAnd(state.status, _STATUS_NO_BACKSLASH) != 0
+
+// Wraps raw bytes so a parameter binds as a binary literal (x'...') rather
+// than being mistaken for an IN (...) list, which is what a bare array means.
+def mysqlBinary(bytes) = {"$mysqlBinary": bytes}
+
+// ------------------------------------------------------- target parsing
+
+def _parseTarget(target) {
+  if (isObject(target)) then return target
+  if (!startsWith(target, "mysql://")) then return {host: target}
+  var rest = substring(target, 8, length(target))
+  val out = {}
+  val slash = indexOf(rest, "/")
+  if (slash >= 0) {
+    var db = substring(rest, slash + 1, length(rest))
+    rest = substring(rest, 0, slash)
+    val q = indexOf(db, "?")
+    if (q >= 0) {
+      for (pair in split(substring(db, q + 1, length(db)), "&")) {
+        val eq = indexOf(pair, "=")
+        if (eq > 0) {
+          val k = substring(pair, 0, eq)
+          val v = urlDecode(substring(pair, eq + 1, length(pair)))
+          if (k == "timeoutMs") then out.timeoutMs = parseInt(v)
+          elsif (k == "tls") then out.tls = v == "1" || v == "true"
+          else out[k] = v
+        }
+      }
+      db = substring(db, 0, q)
+    }
+    if (db != "") then out.db = urlDecode(db)
+  }
+  val at = lastIndexOf(rest, "@")
+  if (at >= 0) {
+    val cred = substring(rest, 0, at)
+    rest = substring(rest, at + 1, length(rest))
+    val colon = indexOf(cred, ":")
+    if (colon >= 0) {
+      out.user = urlDecode(substring(cred, 0, colon))
+      out.password = urlDecode(substring(cred, colon + 1, length(cred)))
+    } else {
+      out.user = urlDecode(cred)
+    }
+  }
+  val colon = lastIndexOf(rest, ":")
+  if (colon >= 0) {
+    out.host = substring(rest, 0, colon)
+    out.port = parseInt(substring(rest, colon + 1, length(rest)))
+  } elsif (rest != "") {
+    out.host = rest
+  }
+  out
+}
+
+// ---------------------------------------------------------- handshake
+
+def _readHandshake(state) {
+  val p = mypRead(state)
+  if (p[0] == 0xff) then _raiseErr(state, p)
+  val c = mypCur(p)
+  val proto = mypU8(c)
+  if (proto != 10) {
+    error("mysql: unsupported handshake protocol version " + proto)
+  }
+  state.serverVersion = mypStrNul(c)
+  state.threadId = mypU32(c)
+  val auth1 = mypBytesN(c, 8)
+  mypSkip(c, 1)
+  val capLow = mypU16(c)
+  mypSkip(c, 1)                    // server charset
+  state.status = mypU16(c)
+  val capHigh = mypU16(c)
+  val caps = capLow + shiftLeft(capHigh, 16)
+  val authLen = mypU8(c)
+  mypSkip(c, 10)
+  var nonce = auth1
+  if (bitAnd(caps, _CAP_SECURE_CONNECTION) != 0) {
+    val auth2 = mypBytesN(c, max(13, authLen - 8))
+    nonce = concat(auth1, auth2)
+    // The scramble is authLen-1 bytes (a trailing NUL rides along).
+    val n = if (authLen >= 21) then authLen - 1 else 20
+    nonce = slice(nonce, 0, n)
+  }
+  val plugin = if (bitAnd(caps, _CAP_PLUGIN_AUTH) != 0 && mypRemaining(c) > 0)
+    then mypStrNul(c) else "mysql_native_password"
+  {caps: caps, nonce: nonce, plugin: plugin}
+}
+
+def _sendAuthResponse(state, caps, charset, user, password, db, plugin, nonce, isTls) {
+  val out = []
+  mypPushU32(out, caps)
+  mypPushU32(out, 0x01000000)      // max packet: 16 MB
+  push(out, charset)
+  var i = 0
+  while (i < 23) { push(out, 0); i += 1 }
+  mypPushZeroStr(out, user)
+  val token = _authToken(plugin, password, nonce, isTls)
+  if (bitAnd(caps, _CAP_AUTH_LENENC) != 0) {
+    mypPushLenencBytes(out, token)
+  } else {
+    push(out, length(token))
+    mypAppend(out, token)
+  }
+  if (db != null) then mypPushZeroStr(out, db)
+  if (bitAnd(caps, _CAP_PLUGIN_AUTH) != 0) then mypPushZeroStr(out, plugin)
+  mypSend(state, out)
+}
+
+// The token for one auth plugin; `moreRound` marks a mid-conversation reply
+// (an AuthSwitchRequest), where cleartext must only ever cross a TLS link.
+def _authToken(plugin, password, nonce, isTls) {
+  if (plugin == "mysql_native_password") then mysqlNativeToken(password, nonce)
+  elsif (plugin == "caching_sha2_password") then mysqlSha2Token(password, nonce)
+  elsif (plugin == "mysql_clear_password") {
+    if (!isTls) {
+      error("mysql: the server asked for a cleartext password without tls; refusing " +
+        "(connect with tls: true if you trust it)")
+    }
+    val out = []
+    mypPushZeroStr(out, password)
+    out
+  }
+  else error("mysql: unsupported auth plugin '" + plugin + "'")
+}
+
+def _trimZeros(bytes) {
+  var n = length(bytes)
+  while (n > 0 && bytes[n - 1] == 0) { n -= 1 }
+  slice(bytes, 0, n)
+}
+
+def _authLoop(state, password, plugin0, isTls) {
+  var plugin = plugin0
+  while (true) {
+    val p = mypRead(state)
+    val first = p[0]
+    if (first == 0x00) {
+      _parseOk(state, p)
+      return null
+    }
+    if (first == 0xff) then _raiseErr(state, p)
+    if (first == 0xfe) {
+      // AuthSwitchRequest: try again with the plugin the server insists on.
+      val c = mypCur(p)
+      mypU8(c)
+      plugin = mypStrNul(c)
+      val nonce = _trimZeros(mypBytesEof(c))
+      mypSend(state, _authToken(plugin, password, nonce, isTls))
+    } elsif (first == 0x01) {
+      // AuthMoreData, which for caching_sha2 carries the fast-path verdict.
+      if (plugin != "caching_sha2_password") {
+        error("mysql: unexpected extra auth data from plugin '" + plugin + "'")
+      }
+      val code = if (length(p) > 1) then p[1] else -1
+      if (code == 3) {
+        null                        // fast path accepted; the OK follows
+      } elsif (code == 4) {
+        if (!isTls) {
+          error("mysql: caching_sha2_password wants a full authentication, which needs tls " +
+            "(this driver has no RSA exchange) — connect with tls: true, " +
+            "or use a mysql_native_password account")
+        }
+        val out = []
+        mypPushZeroStr(out, password)
+        mypSend(state, out)
+      } else {
+        error("mysql: unexpected caching_sha2 state " + code)
+      }
+    } else {
+      error("mysql: unexpected auth reply 0x" + hexEncodeBytes([first]))
+    }
+  }
+}
+
+// ------------------------------------------------------------- replies
+
+def _parseOk(state, p) {
+  val c = mypCur(p)
+  mypU8(c)
+  val affected = mypLenenc(c)
+  val insertId = mypLenenc(c)
+  state.status = mypU16(c)
+  val warnings = mypU16(c)
+  val info = if (mypRemaining(c) > 0) then mypStrEof(c) else ""
+  {affectedRows: affected, lastInsertId: insertId, statusFlags: state.status,
+   warnings: warnings, info: info}
+}
+
+def _raiseErr(state, p) {
+  val c = mypCur(p)
+  mypU8(c)
+  val code = mypU16(c)
+  var sqlState = ""
+  if (mypRemaining(c) > 0 && _peek(c) == 0x23) {
+    mypU8(c)
+    sqlState = mypStrN(c, 5)
+  }
+  val message = mypStrEof(c)
+  error("mysql: " + message + " (errno " + code +
+    (if (sqlState != "") then ", sqlstate " + sqlState else "") + ")")
+}
+
+def _peek(c) = c.b[c.at]
+
+def _expectOk(state) {
+  val p = mypRead(state)
+  if (p[0] == 0xff) then _raiseErr(state, p)
+  if (p[0] != 0x00) then error("mysql: expected an OK packet, got 0x" + hexEncodeBytes([p[0]]))
+  _parseOk(state, p)
+}
+
+def _command(state, com, payload) {
+  state.seq = 0
+  val out = [com]
+  mypAppend(out, payload)
+  mypSend(state, out)
+}
+
+// --------------------------------------------------------- result sets
+
+// Reads every result set of one command. Each entry is either
+// {rows: null, ok: {...}} for a plain OK, or {columns, rows, statusFlags}.
+def _readResultSets(state) {
+  val results = []
+  while (true) {
+    val p = mypRead(state)
+    val first = p[0]
+    var status = 0
+    if (first == 0x00) {
+      val ok = _parseOk(state, p)
+      push(results, {rows: null, ok: ok, columns: []})
+      status = ok.statusFlags
+    } elsif (first == 0xff) {
+      _raiseErr(state, p)
+    } elsif (first == 0xfb) {
+      // A LOCAL INFILE request: answer with the empty packet (no file) and
+      // surface the refusal, whatever the server says to the empty upload.
+      mypSend(state, [])
+      val q = mypRead(state)
+      if (q[0] == 0xff) then _raiseErr(state, q)
+      error("mysql: the server asked to read a local file (LOAD DATA LOCAL INFILE); this driver refuses")
+    } else {
+      val set = _readOneResultSet(state, p)
+      push(results, set)
+      status = set.statusFlags
+    }
+    if (bitAnd(status, _STATUS_MORE_RESULTS) == 0) then break
+  }
+  results
+}
+
+def _readOneResultSet(state, firstPayload) {
+  val deprecateEof = bitAnd(state.caps, _CAP_DEPRECATE_EOF) != 0
+  val hc = mypCur(firstPayload)
+  val ncols = mypLenenc(hc)
+  val columns = []
+  var i = 0
+  while (i < ncols) {
+    push(columns, _parseColumn(mypRead(state)))
+    i += 1
+  }
+  if (!deprecateEof) {
+    val eof = mypRead(state)
+    if (eof[0] != 0xfe) then error("mysql: expected an EOF packet after the column definitions")
+  }
+  val rows = []
+  var statusFlags = 0
+  while (true) {
+    val p = mypRead(state)
+    if (p[0] == 0xff) then _raiseErr(state, p)
+    if (deprecateEof && p[0] == 0xfe && length(p) < 0xffffff) {
+      statusFlags = _parseOk(state, p).statusFlags
+      break
+    }
+    if (!deprecateEof && p[0] == 0xfe && length(p) < 9) {
+      val c = mypCur(p)
+      mypU8(c)
+      mypU16(c)                     // warnings
+      statusFlags = mypU16(c)
+      state.status = statusFlags
+      break
+    }
+    push(rows, _parseRow(columns, p))
+  }
+  {columns: columns, rows: rows, statusFlags: statusFlags, ok: null}
+}
+
+def _parseColumn(p) {
+  val c = mypCur(p)
+  mypStrLenenc(c)                   // catalog, always "def"
+  val schema = mypStrLenenc(c)
+  val table = mypStrLenenc(c)
+  mypStrLenenc(c)                   // org_table
+  val name = mypStrLenenc(c)
+  mypStrLenenc(c)                   // org_name
+  mypLenenc(c)                      // fixed 0x0c
+  val charset = mypU16(c)
+  val colLength = mypU32(c)
+  val kind = mypU8(c)
+  val flags = mypU16(c)
+  val decimals = mypU8(c)
+  {name: name, table: table, schema: schema, type: kind, typeName: _typeName(kind),
+   charset: charset, length: colLength, flags: flags, decimals: decimals}
+}
+
+def _typeName(kind) = select (kind) {
+  case 0:   "decimal"
+  case 1:   "tinyint"
+  case 2:   "smallint"
+  case 3:   "int"
+  case 4:   "float"
+  case 5:   "double"
+  case 6:   "null"
+  case 7:   "timestamp"
+  case 8:   "bigint"
+  case 9:   "mediumint"
+  case 10:  "date"
+  case 11:  "time"
+  case 12:  "datetime"
+  case 13:  "year"
+  case 15:  "varchar"
+  case 16:  "bit"
+  case 245: "json"
+  case 246: "decimal"
+  case 247: "enum"
+  case 248: "set"
+  case 249: "tinyblob"
+  case 250: "mediumblob"
+  case 251: "longblob"
+  case 252: "blob"
+  case 253: "varstring"
+  case 254: "string"
+  case 255: "geometry"
+  default:  "type" + kind
+}
+
+def _parseRow(columns, p) {
+  val c = mypCur(p)
+  val row = []
+  for (col in columns) {
+    if (mypRemaining(c) > 0 && _peek(c) == 0xfb) {
+      mypU8(c)
+      push(row, null)
+    } else {
+      push(row, _convert(col, mypBytesLenenc(c)))
+    }
+  }
+  row
+}
+
+// Text-protocol value -> SFL value, by column type. DECIMALs stay strings
+// (exact); dates and times stay strings; binary columns (charset 63) come
+// back as byte arrays; BIT becomes an integer.
+def _convert(col, bytes) {
+  val kind = col.type
+  if (kind == 1 || kind == 2 || kind == 3 || kind == 8 || kind == 9 || kind == 13) {
+    _textToInt(utf8Decode(bytes), bitAnd(col.flags, 0x20) != 0)
+  } elsif (kind == 4 || kind == 5) {
+    parseFloat(utf8Decode(bytes))
+  } elsif (kind == 16) {
+    if (length(bytes) <= 8) then _bitsToInt(bytes) else bytes
+  } elsif (kind == 245) {
+    utf8Decode(bytes)
+  } elsif (kind >= 249 && kind <= 255 && col.charset == 63) {
+    bytes
+  } else {
+    utf8Decode(bytes)
+  }
+}
+
+def _bitsToInt(bytes) {
+  var v = 0
+  for (b in bytes) { v = shiftLeft(v, 8) + b }
+  v
+}
+
+// An unsigned BIGINT can exceed what a 64-bit int holds; past that the digits
+// come back as a string rather than a wrong number.
+def _textToInt(s, unsigned) {
+  if (unsigned && length(s) >= 19) {
+    if (length(s) > 19 || compare(s, "9223372036854775807") > 0) then return s
+  }
+  parseInt(s)
+}
+
+// ---------------------------------------------------------- escaping
+
+// Renders one parameter as a SQL literal. `noBackslash` mirrors the server's
+// NO_BACKSLASH_ESCAPES mode, where '' is the only escape.
+def mysqlEscape(v, noBackslash = false) {
+  if (v == null) then "NULL"
+  elsif (isBool(v)) then (if (v) then "TRUE" else "FALSE")
+  elsif (isInt(v)) then toString(v)
+  elsif (isFloat(v)) {
+    if (isNaN(v) || isInfinite(v)) then error("mysql: " + v + " has no SQL literal")
+    toString(v)
+  }
+  elsif (isString(v)) then "'" + _escapeText(v, noBackslash) + "'"
+  elsif (isObject(v) && contains(v, "$mysqlBinary")) {
+    if (isEmpty(v["$mysqlBinary"])) then "''" else "x'" + hexEncodeBytes(v["$mysqlBinary"]) + "'"
+  }
+  elsif (isArray(v)) {
+    if (isEmpty(v)) then "(NULL)"
+    else "(" + join(map(v, (x) -> mysqlEscape(x, noBackslash)), ", ") + ")"
+  }
+  else error("mysql: cannot bind a " + typeOf(v) + " parameter")
+}
+
+def _escapeText(s, noBackslash) {
+  var out = ""
+  for (ch in s) {
+    if (ch == "'") {
+      out += "''"
+    } elsif (noBackslash) {
+      out += ch
+    } elsif (ch == "\\") {
+      out += "\\\\"
+    } elsif (ch == "\n") {
+      out += "\\n"
+    } elsif (ch == "\r") {
+      out += "\\r"
+    } elsif (ord(ch) == 0) {
+      out += "\\0"
+    } elsif (ord(ch) == 26) {
+      out += "\\Z"
+    } else {
+      out += ch
+    }
+  }
+  out
+}
+
+// Substitutes ? placeholders with escaped parameters, leaving quoted strings,
+// backtick identifiers and comments alone. Raises when the counts disagree.
+def mysqlBind(sql, params, noBackslash = false) {
+  var out = ""
+  var pi = 0
+  val n = length(sql)
+  var i = 0
+  var mode = "sql"
+  while (i < n) {
+    val ch = charAt(sql, i)
+    if (mode == "sql") {
+      if (ch == "?") {
+        if (pi >= length(params)) {
+          error("mysql: the query has more ? placeholders than parameters (" + length(params) + ")")
+        }
+        out += mysqlEscape(params[pi], noBackslash)
+        pi += 1
+      } else {
+        out += ch
+        if (ch == "'") then mode = "squote"
+        elsif (ch == "\"") then mode = "dquote"
+        elsif (ch == "`") then mode = "backtick"
+        elsif (ch == "#") then mode = "linecomment"
+        elsif (ch == "-" && i + 2 < n && charAt(sql, i + 1) == "-" &&
+               (charAt(sql, i + 2) == " " || charAt(sql, i + 2) == "\t" || charAt(sql, i + 2) == "\n")) {
+          mode = "linecomment"
+        }
+        elsif (ch == "/" && i + 1 < n && charAt(sql, i + 1) == "*") then mode = "blockcomment"
+      }
+    } elsif (mode == "squote" || mode == "dquote") {
+      val q = if (mode == "squote") then "'" else "\""
+      out += ch
+      if (ch == "\\" && !noBackslash && i + 1 < n) {
+        out += charAt(sql, i + 1)
+        i += 1
+      } elsif (ch == q) {
+        if (i + 1 < n && charAt(sql, i + 1) == q) {
+          out += q
+          i += 1
+        } else {
+          mode = "sql"
+        }
+      }
+    } elsif (mode == "backtick") {
+      out += ch
+      if (ch == "`") {
+        if (i + 1 < n && charAt(sql, i + 1) == "`") {
+          out += "`"
+          i += 1
+        } else {
+          mode = "sql"
+        }
+      }
+    } elsif (mode == "linecomment") {
+      out += ch
+      if (ch == "\n") then mode = "sql"
+    } else {  // blockcomment
+      out += ch
+      if (ch == "*" && i + 1 < n && charAt(sql, i + 1) == "/") {
+        out += "/"
+        i += 1
+        mode = "sql"
+      }
+    }
+    i += 1
+  }
+  if (pi < length(params)) {
+    error("mysql: the query has fewer ? placeholders (" + pi + ") than parameters (" + length(params) + ")")
+  }
+  out
+}

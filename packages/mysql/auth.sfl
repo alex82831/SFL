@@ -1,0 +1,40 @@
+// mysql/auth — the challenge-response math of MySQL's password plugins.
+//
+// The server sends a 20-byte nonce with its handshake; the client proves the
+// password by XOR-ing digests of it. Pure functions, so the test suite can
+// hold them against known-answer vectors. An empty password answers with an
+// empty token in both schemes.
+
+// mysql_native_password (MySQL up to 5.7's default, MariaDB's default):
+//   SHA1(password) XOR SHA1(nonce + SHA1(SHA1(password)))
+def mysqlNativeToken(password, nonce) {
+  if (password == "" || password == null) then return []
+  val pwd1 = digestBytes("sha1", utf8Encode(password))
+  val pwd2 = digestBytes("sha1", pwd1)
+  val mixed = []
+  for (b in nonce) { push(mixed, b) }
+  for (b in pwd2) { push(mixed, b) }
+  _mysqlXor(pwd1, digestBytes("sha1", mixed))
+}
+
+// caching_sha2_password (MySQL 8's default), the scramble of its fast path:
+//   SHA256(password) XOR SHA256(SHA256(SHA256(password)) + nonce)
+def mysqlSha2Token(password, nonce) {
+  if (password == "" || password == null) then return []
+  val pwd1 = digestBytes("sha256", utf8Encode(password))
+  val pwd2 = digestBytes("sha256", pwd1)
+  val mixed = []
+  for (b in pwd2) { push(mixed, b) }
+  for (b in nonce) { push(mixed, b) }
+  _mysqlXor(pwd1, digestBytes("sha256", mixed))
+}
+
+def _mysqlXor(a, b) {
+  val out = []
+  var i = 0
+  while (i < length(a)) {
+    push(out, bitXor(a[i], b[i]))
+    i += 1
+  }
+  out
+}

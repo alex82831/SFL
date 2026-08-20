@@ -1,0 +1,86 @@
+// The room driven by two real WebSocket clients — handshake, masked frames
+// and all, hand-rolled over plain sockets (RFC 6455 is small enough).
+
+import "httpd"
+import "../src/chat"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+def _exact(c, n) {
+  val out = []
+  while (length(out) < n) {
+    val chunk = socketReadBytes(c, n - length(out), 5000)
+    if (chunk == null || length(chunk) == 0) then error("socket ended early")
+    for (b in chunk) { push(out, b) }
+  }
+  out
+}
+
+def wsOpen(port, path) {
+  val c = connect("127.0.0.1", port, 5000)
+  val key = base64EncodeBytes(randomBytes(16))
+  socketWrite(c, "GET ${path} HTTP/1.1\r\nhost: x\r\nupgrade: websocket\r\n" +
+    "connection: Upgrade\r\nsec-websocket-key: ${key}\r\nsec-websocket-version: 13\r\n\r\n")
+  val status = parseInt(split(socketReadLine(c, 5000), " ")[1])
+  while (true) {
+    val line = socketReadLine(c, 5000)
+    if (line == null || line == "") then break
+  }
+  check("upgrade is 101", status, 101)
+  c
+}
+
+def wsSend(c, text) {
+  val payload = utf8Encode(text)
+  val out = [bitOr(128, 1)]
+  val mask = randomBytes(4)
+  push(out, bitOr(128, length(payload)))
+  for (b in mask) { push(out, b) }
+  var i = 0
+  while (i < length(payload)) {
+    push(out, bitXor(payload[i], mask[i % 4]))
+    i += 1
+  }
+  socketWriteBytes(c, out)
+}
+
+def wsRecvJson(c) {
+  val h = _exact(c, 2)
+  var len = bitAnd(h[1], 127)
+  if (len == 126) {
+    val ext = _exact(c, 2)
+    len = ext[0] * 256 + ext[1]
+  }
+  jsonParse(utf8Decode(_exact(c, len)))
+}
+
+val srv = httpServer({quiet: true, handler: chatApp("public")})
+srv.start()
+val port = srv.port()
+
+val a = wsOpen(port, "/ws")
+check("a is welcomed", wsRecvJson(a).text, "welcome, guest-1")
+check("a sees itself join", wsRecvJson(a).text, "guest-1 joined (1 here)")
+
+val b = wsOpen(port, "/ws")
+check("b is welcomed", wsRecvJson(b).text, "welcome, guest-2")
+check("a sees b join", wsRecvJson(a).text, "guest-2 joined (2 here)")
+wsRecvJson(b)                                     // b's own join broadcast
+
+wsSend(a, "hello from a")
+val heardByB = wsRecvJson(b)
+check("chat crosses sockets", [heardByB.from, heardByB.text], ["guest-1", "hello from a"])
+check("the sender hears it too", wsRecvJson(a).text, "hello from a")
+
+check("stats counts members", jsonParse(httpGet("http://127.0.0.1:${port}/stats")).members, 2)
+
+closeSocket(b)
+check("a sees b leave", wsRecvJson(a).text, "guest-2 left")
+closeSocket(a)
+srv.stop()
+println("chat: ok")

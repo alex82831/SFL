@@ -1,0 +1,5 @@
+{
+  "name": "httpd-hello",
+  "version": "0.1.0",
+  "deps": { "httpd": "^0.1.0" }
+}

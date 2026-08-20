@@ -1,0 +1,15 @@
+// The notes API served for real. Log in, then talk JSON with a Bearer token:
+//
+//   TOKEN=$(curl -s -X POST localhost:8080/api/login \
+//     -d '{"user":"ada","password":"lovelace"}' | sed 's/.*"token": "//;s/".*//')
+//   curl -s -X POST localhost:8080/api/notes \
+//     -H "Authorization: Bearer $TOKEN" -d '{"text":"ship the demo"}'
+//   curl -s localhost:8080/api/notes -H "Authorization: Bearer $TOKEN"
+
+import "httpd"
+import "log"
+import "api"
+
+val srv = httpServer({port: 8080, handler: api()})
+logInfo("notes api on http://127.0.0.1:8080 (user ada / lovelace)")
+srv.listen()

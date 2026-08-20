@@ -1,0 +1,77 @@
+// Channels move values between threads: bounded buffers, a close that wakes
+// everyone, and receive returning null once closed-and-drained. The shape
+// here is the everyday one — producers, a worker pool, a collector.
+
+// One producer, three workers, one collector.
+val jobs = channel(8)          // bounded: send blocks when 8 queue up
+val results = channel()
+
+val producer = spawn(() -> {
+  for (n in range(1, 21)) {
+    send(jobs, n)
+  }
+  closeChannel(jobs)           // no more work — workers see null and stop
+})
+
+def worker(id) {
+  var done = 0
+  while (true) {
+    val n = receive(jobs)
+    if (n == null) then break  // closed and drained
+    send(results, {worker: id, n: n, square: n * n})
+    done += 1
+  }
+  done
+}
+val workers = map(range(1, 4), (id) -> spawn(worker, id))
+
+// The collector runs here on the main thread.
+var collected = []
+var got = 0
+while (got < 20) {
+  push(collected, receive(results))
+  got += 1
+}
+val counts = map(workers, await)
+await(producer)
+closeChannel(results)
+
+println("20 jobs over 3 workers, per-worker counts: " + jsonStringify(counts))
+println("sum of squares 1..20: " + (collected |> map((r) -> r.square) |> sum))
+
+// tryReceive polls; channelDrain empties without blocking.
+val quick = channel()
+send(quick, "a")
+send(quick, "b")
+println("tryReceive: " + tryReceive(quick) + ", then drain: " + jsonStringify(channelDrain(quick)))
+println("empty tryReceive: " + toString(tryReceive(quick)))
+
+// channelToArray: a thread streams, the caller gathers until close.
+val stream = channel(4)
+spawn(() -> {
+  for (word in ["fan", "out", "fan", "in"]) { send(stream, word) }
+  closeChannel(stream)
+})
+println("channelToArray: " + jsonStringify(channelToArray(stream)))
+
+// A pipeline of stages, each a thread joined by a channel.
+def stage(input, f) {
+  val output = channel(4)
+  spawn(() -> {
+    while (true) {
+      val v = receive(input)
+      if (v == null) then break
+      send(output, f(v))
+    }
+    closeChannel(output)
+  })
+  output
+}
+val source = channel(4)
+spawn(() -> {
+  for (n in range(1, 6)) { send(source, n) }
+  closeChannel(source)
+})
+val doubled = stage(source, (n) -> n * 2)
+val labeled = stage(doubled, (n) -> "#" + n)
+println("pipeline: " + jsonStringify(channelToArray(labeled)))

@@ -1,0 +1,16 @@
+// Every .sfl in this directory runs under `sfl build test`; a non-zero exit
+// fails the suite. This one checks the interpolation forms main.sfl leans on.
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got ${got}, want ${want}")
+    exit(1)
+  }
+}
+
+val who = "world"
+check("interpolation", "Hello, ${who}", "Hello, world")
+check("expressions interpolate", "${6 * 7}", "42")
+check("single quotes stay literal", 'x ${who}', "x $" + "{who}")
+check("format", format("%05.1f", 2.75), "002.8")
+println("smoke: ok")

@@ -1,0 +1,35 @@
+// The mysql and postgres packages compile and their pure layers — packet
+// coding, auth math, escaping — behave the same under both engines. The wire
+// protocols themselves are exercised by tests/mysql.sfl and
+// tests/postgres.sfl against in-process fake servers.
+import "../../../packages/mysql/main"
+import "../../../packages/postgres/main"
+
+// mysql: length-encoded integers round trip at every width.
+for (v in [0, 250, 251, 65535, 65536, 16777215, 16777216, 4294967296]) {
+  val out = []
+  mypPushLenenc(out, v)
+  val c = mypCur(out)
+  println("lenenc " + v + " -> " + mypLenenc(c) + " (" + length(out) + " bytes)")
+}
+
+// mysql: the documented auth vectors.
+val salt = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+println("native " + hexEncodeBytes(mysqlNativeToken("sflpass", salt)))
+println("sha2   " + hexEncodeBytes(mysqlSha2Token("sflpass", salt)))
+
+// mysql: escaping and binding.
+println(mysqlEscape("it's a \\ test\n"))
+println(mysqlEscape(mysqlBinary([222, 173])))
+println(mysqlEscape([1, "two", null, true]))
+println(mysqlBind("SELECT ?, '?', `a?` -- ?\n FROM t WHERE x IN ?", [42, [1, 2]]))
+
+// postgres: big-endian coding and array literals.
+val be = []
+pgpPushU32(be, 0xdeadbeef)
+pgpPushU16(be, 258)
+pgpPushStr(be, "ok")
+println("be bytes " + jsonStringify(be))
+val cur = pgpCur(be)
+println("be reads " + pgpU32(cur) + " " + pgpU16(cur) + " " + pgpStrNul(cur))
+println(pgArray([1, "a b", null, ["x\"y"], true]))

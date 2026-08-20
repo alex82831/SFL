@@ -1,0 +1,54 @@
+// Arrays, objects and tuples — the three shapes data takes — and the
+// higher-order tools that work over them.
+
+val people = [
+  {name: "ada", age: 36, city: "london", langs: ["sfl", "asm"]},
+  {name: "bo", age: 25, city: "oslo", langs: ["sfl"]},
+  {name: "cyd", age: 31, city: "london", langs: ["c", "sfl"]},
+  {name: "dee", age: 25, city: "paris", langs: []}
+]
+
+// map / filter / reduce compose left to right with the |> pipeline.
+val totalAge = people |> map((p) -> p.age) |> reduce((a, b) -> a + b, 0)
+println("total age: ${totalAge}, average: ${totalAge / length(people)}")
+
+// groupBy and frequencies build objects keyed by what you group on.
+val byCity = groupBy(people, (p) -> p.city)
+for (city in keys(byCity)) {
+  println("${city}: " + join(map(byCity[city], (p) -> p.name), ", "))
+}
+println("ages seen: " + jsonStringify(frequencies(map(people, (p) -> p.age))))
+
+// sortBy, minBy/maxBy, find, every/any.
+println("youngest first: " + join(map(sortBy(people, (p) -> p.age), (p) -> p.name), " "))
+println("oldest: " + maxBy(people, (p) -> p.age).name)
+println("first londoner: " + find(people, (p) -> p.city == "london").name)
+println("everyone speaks sfl? " + every(people, (p) -> contains(p.langs, "sfl")))
+
+// flatMap flattens one level; unique keeps first occurrences.
+println("all languages: " + join(unique(flatMap(people, (p) -> p.langs)), ", "))
+
+// Destructuring: arrays with ...rest, objects by key, tuples by position.
+val [firstPerson, ...others] = people
+println("first is ${firstPerson.name}, ${length(others)} others")
+val {name, age} = firstPerson
+println("destructured: ${name} is ${age}")
+val (x, y) = (3, 4)
+println("tuple: (${x}, ${y}) has length ${sqrt(x * x + y * y)}")
+
+// Objects are mutable; assoc/dissoc make edited copies instead.
+val grown = assoc(firstPerson, "age", firstPerson.age + 1)
+println("assoc copy: ${grown.age}, original still ${firstPerson.age}")
+
+// Nested updates without mutation: assocIn / updateIn / getIn.
+val org = {team: {leads: ["ada"], size: 3}}
+val bigger = updateIn(org, ["team", "size"], (n) -> n + 1)
+println("updateIn: " + getIn(bigger, ["team", "size"]) + " (was " + getIn(org, ["team", "size"]) + ")")
+
+// zip pairs things up; fromEntries builds an object from pairs.
+val cities = fromEntries(zip(map(people, (p) -> p.name), map(people, (p) -> p.city)))
+println("name -> city: " + jsonStringify(cities))
+
+// chunk and windows slice a sequence two different ways.
+println("chunks of 3: " + jsonStringify(chunk(range(1, 8), 3)))
+println("windows of 3: " + jsonStringify(windows(range(1, 6), 3)))
