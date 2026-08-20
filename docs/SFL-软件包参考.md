@@ -42,6 +42,7 @@ import "datetime"
 
 | 包 | 用途 | 模块 |
 | --- | --- | --- |
+| [`httpd`](#httpd) | HTTP 服务器框架(HTTP/1.1、HTTP/2、WebSocket、SSE、静态文件、TLS) | main, router, h1, h2, hpack, ws, mime |
 | [`mongodb`](#mongodb) | MongoDB 数据库驱动(OP_MSG / BSON / SCRAM 认证) | main, bson, wire, scram, bytes |
 | [`datetime`](#datetime) | 历法运算、ISO 8601 解析与格式化、固定时区 | main |
 | [`csv`](#csv) | RFC 4180 的 CSV 解析与生成 | main |
@@ -55,6 +56,35 @@ import "datetime"
 (`utf8Encode`/`socketReadBytes`/`digestBytes`/`hmacBytes`/`pbkdf2` 等)之上。
 
 ---
+
+## httpd
+
+HTTP 服务器框架,稳定与性能优先,纯 SFL 建立在 socket/字节/TLS 原语之上。
+
+```sfl
+import "httpd"
+
+val srv = httpServer({
+  port: 8080,
+  handler: routes([
+    GET("/", (req) -> respondText(200, "hello")),
+    GET("/users/:id", (req) -> respondJson(200, {id: req.params.id})),
+    STATIC("/assets", "./public"),
+    WS("/echo", {message: (sock, data, isText) -> sock.send(data)})
+  ])
+})
+srv.listen()          // 同步:阻塞直到 srv.stop()
+// 或 srv.start() 异步接入,srv.stop() 停止接入、放空在途连接后关闭
+```
+
+**协议**:HTTP/1.1(keep-alive、双向 chunked、`Expect: 100-continue`、静态文件的条件
+与 Range 请求)、HTTP/2(明文 prior-knowledge / h2c 升级,TLS 下经 ALPN;多路复用、
+HPACK、流量控制)、WebSocket(RFC 6455)、SSE(`respondEvents`)。TLS 配置
+`{tls: {cert: "...", key: "..."}}`(PEM 文件;暂无 mTLS)。
+
+**并发模型即语言的模型**:每连接一线程、每 HTTP/2 流一线程,handler 可自由阻塞,
+与 `spawn`/channel/`await` 自然组合。模块:`main`(服务器与响应助手)、`router`、
+`h1`、`h2`、`hpack`、`ws`、`mime`。测试:`tests/httpd.sfl` 40 项全协议驱动。
 
 ## mongodb
 

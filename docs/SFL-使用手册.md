@@ -1819,7 +1819,7 @@ println(twice(1.5))    // 一份 float -> float 的特化
 
 ## 9. 内置函数参考
 
-共 363 个内置函数。在 REPL 里用 `:builtins <关键字>`、在脚本里用 `help("<关键字>")`
+共 367 个内置函数。在 REPL 里用 `:builtins <关键字>`、在脚本里用 `help("<关键字>")`
 可以随时查阅同样的内容。
 
 参数名后带 `?` 表示可省略，`...` 表示可接受任意多个参数。
@@ -2263,15 +2263,19 @@ println(twice(1.5))    // 一份 float -> float 的特化
 | `serverPort(srv)` | 服务端实际绑定的端口。 |
 | `serverSocket(port, backlog?)` | 在 TCP 端口上监听；端口传 0 表示由系统分配，可用 serverPort() 查询。 |
 | `signalProcess(pid, signal)` | 向指定进程发送信号，信号值见 SIGTERM() 等。 |
+| `socketNoDelay(c, on?)` | 打开(默认)或关闭 TCP_NODELAY:小包立即发送,不等 Nagle 合并。 |
 | `socketPeer(c)` | 对端地址，形如 'host:port'。 |
 | `socketReadBytes(c, maxBytes, timeoutMs?)` | 从连接读取至多 maxBytes 个原始字节；流结束返回 []，超时返回 null。 |
 | `socketReadLine(c, timeoutMs?)` | 读取一行；连接结束或超时返回 null。 |
 | `socketReadToBuf(c, b, maxBytes, timeoutMs?)` | 从连接读至多 maxBytes 字节追加进缓冲区:返回读到的字节数,流结束返回 0,超时返回 null。 |
+| `socketSendFile(c, path, offset?, length?)` | 从 offset 起把文件的 length 字节直接送下连接(含 TLS),字节不经过值层;返回发送的字节数。 |
 | `socketWrite(c, text)` | 向连接写入并刷新。 |
 | `socketWriteBuf(c, b)` | 把缓冲区的原始字节原样写入连接,不经解码。 |
 | `socketWriteBytes(c, bytes)` | 把字节数组（0..255 的整数）原样写入连接。 |
 | `socketWriteLine(c, text)` | 向连接写入一行并刷新。 |
-| `tlsWrap(c, host, caFile?, timeoutMs?)` | 把连接原地升级为 TLS:握手并对 host 做证书与主机名校验;caFile 可覆盖信任库。 |
+| `tlsAccept(c, certFile, keyFile, alpn?, timeoutMs?)` | 把已 accept 的连接原地升级为服务端 TLS,使用 PEM 证书与私钥;alpn 按优先级列出本服务器支持的协议,协商结果用 tlsProto 读取。 |
+| `tlsProto(c)` | TLS 握手最终协商出的 ALPN 协议,未协商则为 null。 |
+| `tlsWrap(c, host, caFile?, timeoutMs?, alpn?)` | 把连接原地升级为 TLS:握手并对 host 做证书与主机名校验;caFile 可覆盖信任库,alpn 提供协议列表(协商结果见 tlsProto)。 |
 | `udpPort(u)` | UDP 套接字实际绑定的端口。 |
 | `udpReceive(u, timeoutMs?)` | 等待一个数据报:返回 {data, host, port},超时返回 null。 |
 | `udpSend(u, host, port, text)` | 向 host:port 发送一个数据报。 |
