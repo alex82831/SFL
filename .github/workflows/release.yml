@@ -1,0 +1,108 @@
+name: release
+
+# Pushing a tag like v0.6.0 builds sfl for each platform and publishes a GitHub
+# Release with the binaries and their checksums. The release is created by the
+# runner's built-in GITHUB_TOKEN, so no personal token or gh login is needed.
+
+on:
+  push:
+    tags: ['v*']
+  # Lets the build be run by hand (from the Actions tab) without releasing, to
+  # check it still compiles on the runners.
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,     asset: sfl-macos-arm64 }
+          - { os: macos-13,     asset: sfl-macos-x86_64 }
+          - { os: ubuntu-latest, asset: sfl-linux-x86_64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Install Linux toolchain
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libunwind-dev libgc-dev libssl-dev zlib1g-dev
+
+      - name: Install macOS toolchain
+        if: runner.os == 'macOS'
+        run: brew install openssl@3 || true
+
+      - name: Build the native binary
+        env:
+          SFL_LTO: none
+          SFL_BUILD_MODE: releaseFast
+        run: sbt nativeLink
+
+      - name: Smoke test
+        run: |
+          bin=target/scala-3.8.4/sfl
+          test "$("$bin" -e 'println(6 * 7)')" = "42"
+          "$bin" --version
+
+      - name: Stage the asset
+        run: cp target/scala-3.8.4/sfl "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag matches Sfl.version
+        run: |
+          v=$(grep -oE 'val version: String = "[0-9]+\.[0-9]+\.[0-9]+"' \
+                src/main/scala/com/fartech/sfl/Sfl.scala | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          tag="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag  Sfl.version=$v"
+          test "$v" = "$tag" || { echo "::error::tag $GITHUB_REF_NAME does not match Sfl.version $v"; exit 1; }
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: sfl-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          cd dist
+          chmod +x sfl-* 2>/dev/null || true
+          sha256sum sfl-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          notes=$(printf 'Install or update (macOS / Linux):\n\n    curl -fsSL https://raw.githubusercontent.com/alex82831/SFL/main/install.sh | sh\n\nOr download the binary for your platform below, chmod +x, and put it on your PATH. Verify with SHA256SUMS.\n')
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "SFL $GITHUB_REF_NAME" \
+            --notes "$notes" \
+            dist/sfl-* dist/SHA256SUMS install.sh

@@ -44,6 +44,24 @@ Designed and implemented by Alex Xin. Released under the
 - **[语法糖审查](docs/语法糖审查.md)** — every piece of sugar the language has,
   the candidates that were rejected and why, and the rules behind the new ones.
 
+## Install
+
+macOS and Linux have prebuilt binaries on the [releases page](https://github.com/alex82831/SFL/releases).
+Install or update with one line:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alex82831/SFL/main/install.sh | sh
+```
+
+It downloads the binary for your platform, verifies its checksum, and puts `sfl`
+on your PATH; run it again, or `sfl --version` against a newer release, to update.
+Then `sfl install mongodb` and the rest of the [package suite](docs/SFL-软件包参考.md)
+are a command away. To build from source instead, see below.
+
+Releases are produced by pushing a version tag (`git tag v0.6.0 && git push --tags`),
+which the [release workflow](.github/workflows/release.yml) turns into built
+binaries and a published release — no credentials beyond the repository's own.
+
 ## Build
 
 Requires a JDK, sbt 1.12+, and a Clang toolchain. On macOS, installing Xcode or the
