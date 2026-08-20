@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -67,8 +67,10 @@ jobs:
           if-no-files-found: error
 
   release:
+    # always(): publish whatever platforms built, rather than blocking the whole
+    # release when one of them fails to compile.
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -92,6 +94,8 @@ jobs:
       - name: Checksums
         run: |
           cd dist
+          ls -l
+          test -n "$(ls sfl-* 2>/dev/null)" || { echo "::error::no binaries built for any platform"; exit 1; }
           chmod +x sfl-* 2>/dev/null || true
           sha256sum sfl-* > SHA256SUMS
           cat SHA256SUMS

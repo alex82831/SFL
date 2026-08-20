@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -52,11 +52,20 @@ jobs:
           "$bin" --version
 
       # The full suites report but do not gate yet, while their behaviour on the
-      # runners (locale, timing) is settled.
+      # runners (locale, timing) is settled. Output is captured so a failure can be
+      # read from the uploaded artifact.
       - name: JUnit tests
         continue-on-error: true
-        run: sbt test
+        run: sbt test 2>&1 | tee junit-${{ matrix.os }}.log
 
       - name: Behaviour, compiler and package suites
         continue-on-error: true
-        run: ./tests/run.sh
+        run: ./tests/run.sh 2>&1 | tee suites-${{ matrix.os }}.log
+
+      - name: Upload test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-${{ matrix.os }}
+          path: '*.log'
+          if-no-files-found: ignore
