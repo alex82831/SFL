@@ -1,0 +1,31 @@
+// Sending mail with the smtp package. Without SMTP_HOST configured this
+// previews the exact RFC 5322 message that would go out; with a .env (see
+// .env.example) it connects — STARTTLS, AUTH — and sends it.
+
+import "smtp"
+import "dotenv"
+import "mail"
+
+dotenvLoad()
+
+val host = getEnv("SMTP_HOST")
+val from = getEnv("MAIL_FROM") ?? "SFL demo <demo@sfl.invalid>"
+val to = getEnv("MAIL_TO") ?? "you@example.org"
+val mail = demoMail(from, to)
+
+if (host == null) {
+  println("SMTP_HOST is not set — previewing the message instead of sending it.")
+  println("(copy .env.example to .env to make this actually send)")
+  println("")
+  print(smtpBuildMime(mail))
+} else {
+  val client = smtpConnect(host, parseInt(getEnv("SMTP_PORT") ?? "587"), {
+    tls: getEnv("SMTP_TLS") ?? "starttls",
+    user: getEnv("SMTP_USER"),
+    password: getEnv("SMTP_PASSWORD") ?? ""
+  })
+  println("connected to ${host}; capabilities: " + join(client.capabilities(), ", "))
+  val receipt = client.send(mail)
+  println("sent: " + receipt)
+  client.quit()
+}

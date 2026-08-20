@@ -1,0 +1,38 @@
+import "../src/site"
+import "markdown"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+def checkHas(what, hay, needle) {
+  if (!contains(hay, needle)) {
+    eprintln("FAIL ${what}: no '" + needle + "' in " + substring(hay, 0, 200))
+    exit(1)
+  }
+}
+
+val fm = frontMatter("+++\ntitle = \"T\"\ntags = [\"a\"]\n+++\n\n# Body\n")
+check("front matter parses", [fm.meta.title, fm.meta.tags], ["T", ["a"]])
+check("body survives", startsWith(fm.body, "# Body"), true)
+check("no front matter is fine", frontMatter("# plain").meta, {})
+check("slug strips the date", slugOf("2026-08-01-hello-sfl.md"), "hello-sfl")
+
+// Build into a scratch directory and look at what came out.
+val out = tempFile("site-test")
+removeFile(out)
+val posts = buildSite("posts", "templates", out, "Test Site")
+check("both posts built", length(posts), 2)
+check("newest first", posts[0].slug, "two-engines")
+
+val page = readFile(joinPath(out, "hello-sfl.html"))
+checkHas("the page holds the rendered markdown", page, "<h1 id=\"why-another-scripting-language\">")
+checkHas("the template wrapped it", page, "<title>Hello, SFL — Test Site</title>")
+checkHas("code blocks carry their language", page, "language-sfl")
+val idx = readFile(joinPath(out, "index.html"))
+checkHas("the index links the posts", idx, "<a href=\"hello-sfl.html\">Hello, SFL</a>")
+
+for (f in listFiles(out)) { removeFile(joinPath(out, f)) }
+println("site: ok")

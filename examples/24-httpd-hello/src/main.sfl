@@ -1,0 +1,13 @@
+// A first HTTP server: routes with path parameters, JSON in and out, static
+// files. listen() blocks serving until Ctrl-C (or srv.stop() from a thread).
+
+import "httpd"
+import "app"
+
+val srv = httpServer({port: 8080, handler: app()})
+println("listening on http://127.0.0.1:8080 — Ctrl-C stops it")
+println("  GET  /hello/ada?times=3")
+println("  GET  /api/time")
+println("  POST /api/sum        (a JSON array of numbers)")
+println("  GET  /assets/index.html")
+srv.listen()

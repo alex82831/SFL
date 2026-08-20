@@ -1,0 +1,29 @@
+// Pure checks always; live checks only when a PostgreSQL server answers
+// (PG_* or 127.0.0.1:5432), quietly skipped otherwise.
+
+import "postgres"
+import "../src/settings"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+check("pgArray plain", pgArray([1, 2, 3]), "{1,2,3}")
+check("pgArray quotes strings", pgArray(["a b", "c\"d", null]), "{\"a b\",\"c\\\"d\",NULL}")
+check("pgArray nests", pgArray([[true], [false]]), "{{t},{f}}")
+
+val probe = attempt(() -> pgConnect(pgSettings(), {timeoutMs: 1500}))
+if (probe?.error != null) {
+  println("bindings: ok (live checks skipped — no PostgreSQL server: " +
+    substring(probe.error.message, 0, 60) + "…)")
+} else {
+  val db = probe.value
+  check("live parameters", db.queryOne("SELECT $1::int * 2 AS n", [21]).n, 42)
+  check("live types", db.queryOne("SELECT true AS t, NULL::int AS empty, 1.5::float8 AS f"),
+    {t: true, empty: null, f: 1.5})
+  db.close()
+  println("bindings: ok (live checks ran)")
+}

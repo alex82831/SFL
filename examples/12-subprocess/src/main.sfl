@@ -1,0 +1,48 @@
+// Child processes: execute() to capture a command's output, processStart()
+// for a long-lived child spoken to over pipes, passthrough() for handing the
+// terminal over. POSIX tools only, so this runs anywhere but Windows.
+
+// execute: run, capture, inspect.
+val r = execute("printf 'one\\ntwo\\nthree\\n' | wc -l")
+println("wc says: " + trim(r.out) + " (exit ${r.code})")
+val bad = execute("exit 3")
+println("a failing command reports code ${bad.code}")
+
+// execute always goes through the shell; processStart takes an argv array
+// when you want to skip it (no quoting worries), as the coprocesses below do.
+
+// processStart: a sort(1) coprocess. Write lines in, close stdin, read back.
+val p = processStart(["sort"])
+for (word in ["pear", "apple", "quince", "banana"]) {
+  processWriteLine(p, word)
+}
+processCloseInput(p)
+var sorted = []
+while (true) {
+  val line = processReadLine(p)
+  if (line == null) then break
+  push(sorted, line)
+}
+println("sorted by sort(1): " + join(sorted, ", "))
+println("sort exited ${processWait(p)}")
+
+// A pipeline of our own: feed a child grep, read what survives.
+val g = processStart(["grep", "-n", "err"])
+processWriteLine(g, "ok: started")
+processWriteLine(g, "err: fell over")
+processWriteLine(g, "ok: recovered")
+processWriteLine(g, "err: again")
+processCloseInput(g)
+println("grep kept: " + jsonStringify(processReadAll(g) |> trim |> lines))
+processWait(g)
+
+// Long-lived children can be checked and signalled.
+val slow = processStart(["sleep", "5"])
+println("sleep alive? " + processAlive(slow))
+processKill(slow)
+processWait(slow)
+println("after kill: " + processAlive(slow))
+
+// The environment crosses into children.
+setEnv("SFL_DEMO_FLAVOUR", "vanilla")
+println("env reaches the child: " + trim(execute("printf %s \"$SFL_DEMO_FLAVOUR\"").out))

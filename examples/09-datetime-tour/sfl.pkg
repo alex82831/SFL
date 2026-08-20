@@ -1,0 +1,5 @@
+{
+  "name": "datetime-tour",
+  "version": "0.1.0",
+  "deps": { "datetime": "^0.1.0" }
+}

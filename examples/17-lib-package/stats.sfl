@@ -1,0 +1,28 @@
+// mathkit/stats — descriptive statistics. `_`-prefixed names are private to
+// this file: callers see mean/variance/stddev/median, not the plumbing.
+
+def _requireSome(xs, what) {
+  if (isEmpty(xs)) then error("mathkit: " + what + " of an empty array")
+  null
+}
+
+def mean(xs) {
+  _requireSome(xs, "mean")
+  sum(xs) / toFloat(length(xs))
+}
+
+def variance(xs) {
+  _requireSome(xs, "variance")
+  val m = mean(xs)
+  sum(map(xs, (x) -> (x - m) * (x - m))) / toFloat(length(xs))
+}
+
+def stddev(xs) = sqrt(variance(xs))
+
+def median(xs) {
+  _requireSome(xs, "median")
+  val s = sort(copy(xs))
+  val n = length(s)
+  if (n % 2 == 1) then s[n / 2]
+  else (s[n / 2 - 1] + s[n / 2]) / 2.0
+}

@@ -1,0 +1,65 @@
+// Errors: raising with error(), catching with try() and attempt(), errors
+// as data, and the patterns they enable — fallbacks, retries, collecting
+// partial failures.
+
+// error() raises; an uncaught error stops the script with the source line
+// and a traceback. try(body, handler) catches: the handler receives the
+// message and its result becomes the expression's value.
+def parsePort(text) {
+  val n = try(() -> parseInt(text), (e) -> error("'" + text + "' is not a port (" + e + ")"))
+  if (n < 1 || n > 65535) then error("port ${n} is out of range")
+  n
+}
+println("port: " + parsePort("8080"))
+println("fallback: " + try(() -> parsePort("nope"), (e) -> 80))
+
+// attempt() returns the outcome as data: {value: ...} or {error: {message}}.
+// That makes failure a value you can route, log or collect.
+val outcomes = map(["10", "20", "bad", "30"], (t) -> attempt(() -> parseInt(t)))
+val good = outcomes |> filter((o) -> o?.error == null) |> map((o) -> o.value)
+val bad = outcomes |> filter((o) -> o?.error != null) |> map((o) -> o.error.message)
+println("parsed " + jsonStringify(good) + ", ${length(bad)} failed")
+
+// assert() raises when its condition is falsy — cheap invariants.
+def mean(xs) {
+  assert(!isEmpty(xs), "mean of an empty array")
+  sum(xs) / length(xs)
+}
+println("mean: " + mean([3, 4, 5]))
+println("assert message: " + attempt(() -> mean([])).error.message)
+
+// A retry helper: run fn up to n times, backing off between attempts.
+def retry(times, fn) {
+  var last1 = null
+  for (i in range(times)) {
+    val r = attempt(fn)
+    if (r?.error == null) then return r.value
+    last1 = r.error.message
+    if (i + 1 < times) then sleep(10 * (i + 1))
+  }
+  error("gave up after ${times} attempts: ${last1}")
+}
+var flaky = 0
+val eventually = retry(5, () -> {
+  flaky += 1
+  if (flaky < 3) then error("not yet (${flaky})")
+  "succeeded on attempt ${flaky}"
+})
+println("retry: " + eventually)
+
+// Failures compose with the ?-family: ?. absorbs null, ?? provides defaults.
+val config = attempt(() -> jsonParse("{broken"))?.value
+println("config port: " + (config?.port ?? 8080) + " (parse failed, default used)")
+
+// Cleanup that must run either way: attempt around the work, then rethrow.
+def withTempFile(fn) {
+  val path = tempFile("errors-demo")
+  val r = attempt(() -> fn(path))
+  removeFile(path)
+  if (r?.error != null) then error(r.error.message)
+  r.value
+}
+println(withTempFile((p) -> {
+  writeFile(p, "scratch")
+  "the temp file lived at " + baseName(p) + " and is gone now"
+}))

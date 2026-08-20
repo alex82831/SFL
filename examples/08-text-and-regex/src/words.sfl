@@ -1,0 +1,17 @@
+// The word-frequency pipeline, in a module of its own so main.sfl, the
+// build task and the tests can all import it (importing a module runs it
+// once — a library module like this one has only definitions to run).
+
+def topWords(text, n) {
+  val counts =
+    text
+    |> toLower
+    |> regexSplit("[^a-z']+")
+    |> filter((w) -> length(w) > 3)
+    |> frequencies
+  counts
+  |> entries
+  |> sortBy((e) -> e[0])           // alphabetical first, so ties break stably
+  |> sortBy((e) -> -e[1])          // then by count, most frequent first
+  |> take(n)
+}

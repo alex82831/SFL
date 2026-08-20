@@ -1,0 +1,39 @@
+import "httpd"
+import "../src/ticker"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+def checkHas(what, hay, needle) {
+  if (!contains(hay, needle)) {
+    eprintln("FAIL ${what}: no '" + needle + "' in " + substring(hay, 0, 300))
+    exit(1)
+  }
+}
+
+check("the walk is deterministic", map(range(1, 4), tickerValue), [106, 101, 96])
+
+// A finite stream (3 ticks, no delay) ends, so the whole body reads at once.
+val srv = httpServer({quiet: true, handler: tickerApp(3, 0)})
+srv.start()
+val base = "http://127.0.0.1:${srv.port()}"
+
+checkHas("the page serves", httpGet(base + "/"), "<title>SFL ticker</title>")
+
+val stream = httpRequest("GET", base + "/events")
+check("sse status", stream.status, 200)
+checkHas("comments open the stream", stream.body, ": stream opens")
+checkHas("events are named", stream.body, "event: tick")
+checkHas("ids ride along", stream.body, "id: 2")
+checkHas("data lines carry json", stream.body, "data: {\"n\": 1, \"value\": 106}")
+checkHas("all three ticks arrived", stream.body, "{\"n\": 3, \"value\": 96}")
+
+// The blocks separate with blank lines, as EventSource requires.
+val blocks = filter(split(stream.body, "\n\n"), (b) -> contains(b, "event: tick"))
+check("three event blocks", length(blocks), 3)
+
+srv.stop()
+println("ticker: ok")

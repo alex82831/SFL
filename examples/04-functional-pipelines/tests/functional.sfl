@@ -1,0 +1,21 @@
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got ${got}, want ${want}")
+    exit(1)
+  }
+}
+
+check("pipeline", range(1, 6) |> map((n) -> n * n) |> sum, 55)
+check("compose right to left", compose((n) -> n + 1, (n) -> n * 2)(5), 11)
+check("pipe left to right", pipe((n) -> n + 1, (n) -> n * 2)(5), 12)
+check("curry", curry((a, b) -> a - b)(10)(3), 7)
+check("partial", partial((a, b, c) -> a + b + c, 1, 2)(3), 6)
+
+var fib = null
+fib = memoize((n) -> if (n < 2) then n else fib(n - 1) + fib(n - 2))
+check("memoized fib", fib(60), 1548008755920)
+
+def sumTo(n, acc = 0) = if (n == 0) then acc else sumTo(n - 1, acc + n)
+check("tail recursion is unbounded", sumTo(1000000), 500000500000)
+
+println("functional: ok")

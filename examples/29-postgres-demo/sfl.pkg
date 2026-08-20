@@ -1,0 +1,5 @@
+{
+  "name": "postgres-demo",
+  "version": "0.1.0",
+  "deps": { "postgres": "^0.1.0" }
+}

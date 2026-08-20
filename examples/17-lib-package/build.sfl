@@ -1,0 +1,16 @@
+// A library project: no main, so `sfl build`/`run` step aside and the verbs
+// that matter are `test` and `pkg`. The package modules live at the project
+// root because that is what ships — sfl.pkg beside the modules it describes.
+
+project({
+  "name": "mathkit",
+  "version": "0.2.0",
+  "sources": ["."],
+  "tests": "tests"
+})
+
+task("demo", (args) -> {
+  passthrough(exePath(), ["-e", "import \"main\"\n" +
+    "println(\"mean of 1..10: \" + mean(toArray(range(1, 11))))\n" +
+    "println(\"norm of 3,4: \" + vecNorm([3.0, 4.0]))"])
+}, "A one-liner using the library in place")

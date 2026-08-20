@@ -1,0 +1,20 @@
+// The smallest SFL program that still shows the everyday output tools.
+// A script is the program: top-level code runs, there is no main function.
+
+println("Hello, SFL!")
+
+// String interpolation: ${...} inside double quotes takes any expression.
+val who = "world"
+println("Hello, ${who} — 6 * 7 = ${6 * 7}")
+
+// Single quotes are shell-style literal: no interpolation, no escapes.
+println('literal ${who}')
+
+// printf for formatted output; print stays on the line.
+printf("pi is roughly %.4f\n", 3.14159265)
+print("no newline")
+println(" — until now")
+
+// Command-line arguments: `sfl build run -- Ada` (or `sfl src/main.sfl Ada`).
+val name = if (isEmpty(args())) then "stranger" else args()[0]
+println("And hello to you, ${name}.")

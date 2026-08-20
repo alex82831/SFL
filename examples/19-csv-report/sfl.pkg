@@ -1,0 +1,5 @@
+{
+  "name": "csv-report",
+  "version": "0.1.0",
+  "deps": { "csv": "^0.1.0", "datetime": "^0.1.0" }
+}

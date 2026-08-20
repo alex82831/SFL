@@ -1,0 +1,69 @@
+// The mongodb package against a real server: CRUD, queries with operators,
+// the streaming cursor, aggregation, indexes — values map to BSON naturally.
+//
+// MONGO_URL points it somewhere else (default mongodb://localhost:27017).
+
+import "mongodb"
+
+val url = getEnv("MONGO_URL") ?? "mongodb://localhost:27017/sfl_demo"
+val attemptConn = attempt(() -> mongoConnect(url, {timeoutMs: 3000}))
+if (attemptConn?.error != null) {
+  eprintln("cannot reach MongoDB: " + attemptConn.error.message)
+  eprintln("start one with:  docker run --rm -p 27017:27017 mongo:7")
+  exit(1)
+}
+val client = attemptConn.value
+println("connected to MongoDB ${client.serverVersion()}, ping ${client.ping()}ms")
+
+val moons = client.db("sfl_demo").coll("moons")
+moons.drop()
+
+// insertMany: plain objects become BSON documents; _id is filled in.
+moons.insertMany([
+  {name: "Io", planet: "Jupiter", radiusKm: 1821, discovered: 1610},
+  {name: "Europa", planet: "Jupiter", radiusKm: 1560, discovered: 1610},
+  {name: "Titan", planet: "Saturn", radiusKm: 2574, discovered: 1655},
+  {name: "Mimas", planet: "Saturn", radiusKm: 198, discovered: 1789},
+  {name: "Triton", planet: "Neptune", radiusKm: 1353, discovered: 1846}
+])
+println("inserted ${moons.countDocuments({})} moons")
+
+// find with operators, sorting and projection.
+val big = moons.find({radiusKm: {"$gte": 1000}}, {sort: {radiusKm: -1}, projection: {_id: 0}})
+for (m in big) {
+  println("  ${m.name} (${m.planet}) — ${m.radiusKm} km")
+}
+
+// findOne / updateOne / deleteOne.
+println("one: " + moons.findOne({name: "Titan"}, {projection: {_id: 0, name: 1, discovered: 1}}).discovered)
+val upd = moons.updateOne({name: "Mimas"}, {"$set": {nickname: "the Death Star moon"}})
+println("update matched ${upd.matchedCount}, modified ${upd.modifiedCount}")
+moons.deleteOne({name: "Triton"})
+
+// The streaming cursor walks batches without loading everything.
+val names = []
+moons.findIter({}, {sort: {name: 1}, batchSize: 2}).forEach((m) -> push(names, m.name))
+println("cursor walked: " + join(names, ", "))
+
+// Aggregation: group by planet.
+val perPlanet = moons.aggregate([
+  {"$group": {_id: "$planet", moons: {"$sum": 1}, biggest: {"$max": "$radiusKm"}}},
+  {"$sort": {_id: 1}}
+])
+for (p in perPlanet) {
+  println("  ${p._id}: ${p.moons} moon(s), biggest ${p.biggest} km")
+}
+
+// Indexes, and the BSON wrapper types where SFL has no native shape.
+println("index: " + moons.createIndex({planet: 1, radiusKm: -1}))
+val oid = newObjectId()
+println("an ObjectId: " + oid["$oid"] + " made at " + oidTimestamp(oid))
+moons.insertOne({name: "probe", planet: "none", radiusKm: 0, discovered: 2026,
+  seen: mongoDate(), raw: mongoBinary([1, 2, 3])})
+val probe = moons.findOne({name: "probe"})
+println("wrappers round trip: date ms " + probe.seen["$date"] + ", binary " +
+  jsonStringify(probe.raw["$binary"]))
+
+moons.drop()
+client.close()
+println("done")

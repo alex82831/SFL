@@ -1,0 +1,20 @@
+import "../src/main"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+check("ndarray fills", ndarray([2, 2], 7), [[7, 7], [7, 7]])
+check("shape", shape(ndarray([3, 4, 5], 0)), [3, 4, 5])
+val g = ndarray([2, 2], 0)
+g[0, 1] = 9
+check("index sugar writes", g, [[0, 9], [0, 0]])
+check("index sugar reads", g[0, 1], 9)
+check("matmul", matmul([[1, 2], [3, 4]], [[5, 6], [7, 8]]), [[19, 22], [43, 50]])
+check("identity", matmul([[2, 0], [0, 2]], identity(2)), [[2, 0], [0, 2]])
+val bad = attempt(() -> matmul([[1, 2]], [[1, 2]]))
+check("shape mismatch raises", bad.error != null, true)
+println("matrix: ok")

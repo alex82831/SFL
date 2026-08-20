@@ -1,0 +1,57 @@
+// Threads are real OS threads with no interpreter lock: spawn/await,
+// parallelMap, and the shared-state tools — mutex, atomics — that make
+// sharing deliberate instead of accidental.
+
+// spawn starts a function on a new thread; await joins it and returns its value.
+val t1 = spawn(() -> {
+  var s = 0
+  for (n in range(1, 5000001)) { s += n }
+  s
+})
+val t2 = spawn(() -> {
+  var s = 0
+  for (n in range(5000001, 10000001)) { s += n }
+  s
+})
+println("two halves, two threads: ${await(t1) + await(t2)}")
+
+// parallelMap fans work across workers and keeps order.
+def isPrime(n) {
+  if (n < 2) then return false
+  var d = 2
+  while (d * d <= n) {
+    if (n % d == 0) then return false
+    d += 1
+  }
+  true
+}
+val big = [1000003, 1000033, 1000037, 1000039, 1000081, 1000099]
+val t0 = timeMillis()
+val flags = parallelMap(big, isPrime, cpuCount())
+println("primality of ${length(big)} numbers on ${cpuCount()} cores: " +
+  jsonStringify(flags) + " (${timeMillis() - t0}ms)")
+
+// Unprotected shared writes lose updates; a mutex serialises them.
+var unsafe = 0
+var safe = 0
+val lock = mutex()
+val bump = () -> {
+  for (i in range(50000)) {
+    unsafe += 1
+    withLock(lock, () -> safe += 1)
+  }
+}
+awaitAll([spawn(bump), spawn(bump)])
+println("two threads x 50000 increments: unsafe=${unsafe} (lost some), safe=${safe}")
+
+// Atomics do small counters without a lock.
+val hits = atomic(0)
+awaitAll(map(range(4), (i) -> spawn(() -> {
+  for (j in range(25000)) { atomicAdd(hits, 1) }
+})))
+println("atomic counter: ${atomicGet(hits)}")
+
+// Threads fail independently; await surfaces the error, threadFailed asks.
+val doomed = spawn(() -> error("this thread dies"))
+val r = attempt(() -> await(doomed))
+println("a failed thread reports: " + r.error.message)

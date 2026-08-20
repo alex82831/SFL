@@ -1,0 +1,9 @@
+project({
+  "name": "hello-world",
+  "version": "0.1.0",
+  "main": "src/main.sfl"
+})
+
+// Tasks are plain SFL; the function receives the task's arguments.
+// `sfl build greet` runs this one:
+// task("greet", (args) -> println("hello from a task"), "say hello")

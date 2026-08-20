@@ -1,0 +1,39 @@
+// Server-sent events: one long response, one event per tick. The handler
+// passed to respondEvents blocks for the life of the subscription — which
+// is fine, because every connection has its own thread.
+
+import "httpd"
+import "template"
+
+val _page = tplCompile(join([
+  "<!doctype html>",
+  "<meta charset=\"utf-8\">",
+  "<title>{{title}}</title>",
+  "<style>body { font: 16px/1.6 system-ui, sans-serif; max-width: 30rem; margin: 2rem auto; }</style>",
+  "<h1>{{title}}</h1>",
+  "<p>value: <strong id=\"v\">–</strong> <small id=\"t\"></small></p>",
+  "<script>",
+  "  const es = new EventSource(\"/events\")",
+  "  es.addEventListener(\"tick\", (e) => {",
+  "    const m = JSON.parse(e.data)",
+  "    document.getElementById(\"v\").textContent = m.value",
+  "    document.getElementById(\"t\").textContent = \"tick \" + m.n",
+  "  })",
+  "</script>"
+], "\n"))
+
+// A deterministic "random" walk, so the demo and the tests agree.
+def tickerValue(n) = 100 + (n * 37) % 21 - 10
+
+def tickerApp(ticks, intervalMs) {
+  routes([
+    GET("/", (req) -> respondHtml(200, _page({title: "SFL ticker"}))),
+    GET("/events", (req) -> respondEvents((events) -> {
+      events.comment("stream opens")
+      for (n in range(1, ticks + 1)) {
+        events.send(jsonStringify({n: n, value: tickerValue(n)}), "tick", n)
+        if (intervalMs > 0) then sleep(intervalMs)
+      }
+    }))
+  ])
+}

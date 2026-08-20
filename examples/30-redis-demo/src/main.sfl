@@ -1,0 +1,92 @@
+// The redis package at work: cache-aside, a fixed-window rate limiter, a
+// pipeline round trip, the data-structure commands, and pub/sub across two
+// connections. REDIS_HOST/REDIS_PORT point it somewhere else.
+
+import "redis"
+
+val host = getEnv("REDIS_HOST") ?? "127.0.0.1"
+val port = parseInt(getEnv("REDIS_PORT") ?? "6379")
+
+val attemptConn = attempt(() -> redisConnect(host, port, {timeoutMs: 3000}))
+if (attemptConn?.error != null) {
+  eprintln("cannot reach Redis at ${host}:${port}: " + attemptConn.error.message)
+  eprintln("start one with:  docker run --rm -p 6379:6379 redis:7   (or redis-server)")
+  exit(1)
+}
+val r = attemptConn.value
+println("connected: " + r.ping())
+
+// Cache-aside: try the cache, compute on a miss, store with a TTL.
+var computed = 0
+def slowSquare(n) {
+  computed += 1
+  sleep(50)
+  n * n
+}
+def cachedSquare(n) {
+  val key = "demo:square:${n}"
+  val hit = r.get(key)
+  if (hit != null) then return parseInt(hit)
+  val value = slowSquare(n)
+  r.setEx(key, value, 60)
+  value
+}
+r.del("demo:square:12")
+val t0 = timeMillis()
+cachedSquare(12)
+val cold = timeMillis() - t0
+val t1 = timeMillis()
+cachedSquare(12)
+println("cache-aside: cold ${cold}ms, warm ${timeMillis() - t1}ms, computed ${computed} time(s)")
+
+// A fixed-window rate limiter: INCR + EXPIRE on first touch.
+def allow(who, limit, windowSec) {
+  val key = "demo:rate:${who}"
+  val n = r.incr(key)
+  if (n == 1) then r.expire(key, windowSec)
+  n <= limit
+}
+r.del("demo:rate:ada")
+val verdicts = map(range(5), (i) -> allow("ada", 3, 60))
+println("rate limiter (3 per minute): " + jsonStringify(verdicts))
+
+// The data structures, briefly.
+r.del("demo:tags", "demo:scores", "demo:user:1", "demo:queue")
+r.sAdd("demo:tags", "sfl", "redis", "sfl")
+println("set members: " + jsonStringify(sort(r.sMembers("demo:tags"))))
+r.zAdd("demo:scores", 3, "carol")
+r.zAdd("demo:scores", 1, "ada")
+r.zAdd("demo:scores", 2, "bo")
+println("leaderboard: " + jsonStringify(r.zRange("demo:scores", 0, -1)))
+r.hSet("demo:user:1", "name", "ada")
+r.hSet("demo:user:1", "lang", "sfl")
+println("hash: " + jsonStringify(r.hGetAll("demo:user:1")))
+r.rPush("demo:queue", "a", "b")
+r.lPush("demo:queue", "z")
+println("list: " + jsonStringify(r.lRange("demo:queue", 0, -1)))
+
+// A pipeline: several commands, one round trip, replies in order.
+println("pipeline: " + jsonStringify(r.pipeline([
+  ["INCRBY", "demo:counter", 5],
+  ["GET", "demo:counter"],
+  ["DEL", "demo:counter"]
+])))
+
+// Pub/sub: a second connection subscribes on a thread; this one publishes.
+val heard = channel()
+val sub = spawn(() -> {
+  val r2 = redisConnect(host, port)
+  r2.subscribe(["demo:news"], (chan, msg) -> {
+    send(heard, msg)
+    false                                 // one message is enough; unsubscribe
+  })
+  r2.close()
+})
+sleep(150)                                // let the subscription settle
+r.publish("demo:news", "extra! extra!")
+println("pub/sub delivered: '" + receive(heard, 3000) + "'")
+await(sub)
+
+r.del("demo:square:12", "demo:rate:ada", "demo:tags", "demo:scores", "demo:user:1", "demo:queue")
+r.close()
+println("done")

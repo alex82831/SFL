@@ -1,0 +1,45 @@
+// The HTTP client builtins — httpGet, httpPost, httpRequest — exercised
+// against a local server this same program starts, so the example works
+// offline and the demo is honest about both sides of the wire.
+//
+// The same calls reach the internet unchanged: httpGet("https://...") does
+// TLS through the system's OpenSSL.
+
+import "httpd"
+
+// A little API to talk to.
+val srv = httpServer({
+  quiet: true,
+  handler: routes([
+    GET("/hello", (req) -> respondText(200, "hello, client")),
+    GET("/users/:id", (req) -> respondJson(200, {id: parseInt(req.params.id), name: "user-" + req.params.id})),
+    POST("/echo", (req) -> respondJson(200, {youSent: jsonParse(req.body), method: req.method})),
+    GET("/headers", (req) -> respondJson(200, {agent: get(req.headers, "user-agent", "?")})),
+    GET("/teapot", (req) -> respondText(418, "short and stout"))
+  ])
+})
+srv.start()
+val base = "http://127.0.0.1:${srv.port()}"
+
+// httpGet: the one-liner. Returns the body as a string, raises on failure.
+println("GET /hello -> " + httpGet(base + "/hello"))
+
+// JSON APIs: fetch, parse, use.
+val user = jsonParse(httpGet(base + "/users/42"))
+println("GET /users/42 -> id=${user.id} name=${user.name}")
+
+// httpPost: body and content type.
+val reply = jsonParse(httpPost(base + "/echo", jsonStringify({n: 7}), "application/json"))
+println("POST /echo -> " + jsonStringify(reply.youSent) + " via ${reply.method}")
+
+// httpRequest: full control — method, body, content type, headers — and the
+// response back as {status, body}.
+val full = httpRequest("GET", base + "/headers", null, null, {"User-Agent": "sfl-example/1.0"})
+println("GET /headers -> status ${full.status}, agent seen: " + jsonParse(full.body).agent)
+
+// Non-2xx: httpRequest reports instead of raising.
+val teapot = httpRequest("GET", base + "/teapot")
+println("GET /teapot -> ${teapot.status} " + teapot.body)
+
+srv.stop()
+println("server stopped; the same client calls work against any host")

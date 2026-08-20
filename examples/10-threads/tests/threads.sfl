@@ -1,0 +1,28 @@
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got ${got}, want ${want}")
+    exit(1)
+  }
+}
+
+check("spawn/await round trip", await(spawn((a, b) -> a * b, 6, 7)), 42)
+check("parallelMap keeps order", parallelMap(range(10), (n) -> n * n, 4),
+  [0, 1, 4, 9, 16, 25, 36, 49, 64, 81])
+
+val lock = mutex()
+var n = 0
+awaitAll(map(range(4), (i) -> spawn(() -> {
+  for (j in range(10000)) { withLock(lock, () -> n += 1) }
+})))
+check("mutex-guarded counter is exact", n, 40000)
+
+val a = atomic(0)
+awaitAll(map(range(4), (i) -> spawn(() -> {
+  for (j in range(10000)) { atomicAdd(a, 1) }
+})))
+check("atomic counter is exact", atomicGet(a), 40000)
+
+val bad = attempt(() -> await(spawn(() -> error("boom"))))
+check("await surfaces thread errors", bad.error != null, true)
+
+println("threads: ok")

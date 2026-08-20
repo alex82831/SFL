@@ -1,0 +1,54 @@
+// The generator: posts are markdown files with a +++ TOML front matter
+// block; each becomes site/<slug>.html through templates/page.html, and the
+// index lists them newest first.
+
+import "markdown"
+import "template"
+import "toml"
+
+// Splits "+++\n<toml>\n+++\n<markdown>" into {meta, body}.
+def frontMatter(text) {
+  if (!startsWith(text, "+++")) then return {meta: {}, body: text}
+  val end = strFind(text, "\n+++", 3)
+  if (end < 0) then return {meta: {}, body: text}
+  {
+    meta: tomlParse(substring(text, 4, end)),
+    body: trimStart(substring(text, end + 4, length(text)))
+  }
+}
+
+// "2026-08-01-hello-sfl.md" -> "hello-sfl"
+def slugOf(filename) {
+  val stem = substring(filename, 0, length(filename) - 3)
+  regexReplace(stem, "^\\d{4}-\\d{2}-\\d{2}-", "")
+}
+
+def loadPosts(dir) {
+  val posts = []
+  for (f in sort(listFiles(dir))) {
+    if (!endsWith(f, ".md")) then continue
+    val fm = frontMatter(readFile(joinPath(dir, f)))
+    push(posts, {
+      slug: slugOf(f),
+      title: fm.meta?.title ?? slugOf(f),
+      date: fm.meta?.date ?? "",
+      tags: fm.meta?.tags ?? [],
+      html: mdToHtml(fm.body)
+    })
+  }
+  reverse(posts)                     // filename-dated: newest first
+}
+
+def buildSite(postsDir, templatesDir, outDir, siteName) {
+  val page = tplCompile(readFile(joinPath(templatesDir, "page.html")))
+  val index = tplCompile(readFile(joinPath(templatesDir, "index.html")))
+  mkdirs(outDir)
+  val posts = loadPosts(postsDir)
+  for (p in posts) {
+    writeFile(joinPath(outDir, p.slug + ".html"), page({
+      site: siteName, title: p.title, date: p.date, tags: p.tags, content: p.html
+    }))
+  }
+  writeFile(joinPath(outDir, "index.html"), index({site: siteName, posts: posts}))
+  posts
+}

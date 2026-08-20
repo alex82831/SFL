@@ -1,0 +1,81 @@
+// The mysql package against a real server: DDL, parameter binding, the type
+// mapping, transactions with rollback, and the client object's odds and ends.
+//
+// Point it at a server with MYSQL_HOST/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DB
+// (or one MYSQL_URL); see README.md for a one-line docker server.
+
+import "mysql"
+import "settings"
+
+val attemptConn = attempt(() -> mysqlConnect(mysqlSettings()))
+if (attemptConn?.error != null) {
+  eprintln("cannot reach MySQL: " + attemptConn.error.message)
+  eprintln("")
+  eprintln("start one and point the demo at it, e.g.:")
+  eprintln("  docker run --rm -e MYSQL_ROOT_PASSWORD=secret -e MYSQL_DATABASE=sfl_demo -p 3306:3306 mysql:8")
+  eprintln("  MYSQL_USER=root MYSQL_PASSWORD=secret sfl build run")
+  exit(1)
+}
+val db = attemptConn.value
+
+println("connected to MySQL ${db.serverVersion()} (thread ${db.threadId()})")
+
+// Schema. exec returns {affectedRows, lastInsertId, warnings, info}.
+db.exec("DROP TABLE IF EXISTS books")
+db.exec(join([
+  "CREATE TABLE books (",
+  "  id     INT AUTO_INCREMENT PRIMARY KEY,",
+  "  title  VARCHAR(200) NOT NULL,",
+  "  author VARCHAR(100) NOT NULL,",
+  "  price  DECIMAL(8,2) NOT NULL,",
+  "  pages  INT NOT NULL,",
+  "  cover  BLOB NULL",
+  ") CHARACTER SET utf8mb4"
+], "\n"))
+
+// Parameters bind with ? — strings escape, numbers pass, arrays make IN
+// lists, mysqlBinary() marks blobs.
+val first = db.exec("INSERT INTO books (title, author, price, pages, cover) VALUES (?, ?, ?, ?, ?)",
+  ["Structure and Interpretation", "Abelson & Sussman", "39.90", 657, mysqlBinary([137, 80, 78, 71])])
+println("inserted id ${first.lastInsertId}")
+db.exec("INSERT INTO books (title, author, price, pages) VALUES (?, ?, ?, ?), (?, ?, ?, ?)",
+  ["The Little Schemer", "Friedman & Felleisen", "24.50", 216,
+   "软件设计的哲学", "John Ousterhout", "31.00", 178])
+
+// query returns row objects; the type mapping is faithful: INT -> int,
+// DECIMAL -> string (exact), BLOB -> bytes, NULL -> null.
+val rows = db.query("SELECT * FROM books ORDER BY id")
+for (row in rows) {
+  println("  #${row.id} ${row.title} — ${row.author}, ${row.pages}p, $${row.price}" +
+    (if (row.cover != null) then " [cover: ${length(row.cover)} bytes]" else ""))
+}
+
+// queryOne and IN-list binding.
+val cheap = db.query("SELECT title FROM books WHERE id IN ? AND price < ?", [[1, 2, 3], "30.00"])
+println("under 30: " + join(map(cheap, (r) -> r.title), "; "))
+println("one row: " + jsonStringify(db.queryOne("SELECT COUNT(*) AS n FROM books")))
+
+// queryFull carries the column metadata.
+val full = db.queryFull("SELECT id, title, price FROM books WHERE id = ?", [1])
+println("columns: " + join(map(full.columns, (c) -> c.name + ":" + c.typeName), ", "))
+
+// Transactions: the failed one rolls back by itself.
+db.transaction(() -> {
+  db.exec("UPDATE books SET price = ? WHERE id = ?", ["19.90", 2])
+})
+val failed = attempt(() -> db.transaction(() -> {
+  db.exec("UPDATE books SET price = ? WHERE id = ?", ["0.01", 2])
+  error("changed my mind")
+}))
+println("after commit + rollback: price of #2 is " +
+  db.queryOne("SELECT price FROM books WHERE id = 2").price +
+  " (rollback reason: ${failed.error.message})")
+
+// Server errors carry the errno and sqlstate.
+val oops = attempt(() -> db.query("SELECT nope FROM books"))
+println("a server error reads: " + oops.error.message)
+
+println("status: " + jsonStringify(db.status()) + ", ping: ${db.ping()}ms")
+db.exec("DROP TABLE books")
+db.close()
+println("done")

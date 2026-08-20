@@ -1,0 +1,21 @@
+// TOML defaults + dotenv/environment overrides, resolved in one place.
+//
+// Try: APP_SERVER_PORT=6000 sfl build run
+
+import "toml"
+import "config"
+
+val cfg = configLoad("app.toml")
+
+println("app:    ${cfg.name}" + (if (cfg.debug) then " (debug)" else ""))
+println("server: ${cfg.server.host}:${cfg.server.port} " +
+  "(connect ${cfg.server.timeouts.connect}s, read ${cfg.server.timeouts.read}s)")
+println("db:     ${cfg.database.url} pool=${cfg.database.pool}")
+for (rule in cfg.rules) {
+  println("rule:   ${rule.path} -> " + join(rule.roles, ", "))
+}
+
+// The config also writes back out as TOML — handy for `--print-config`.
+println("")
+println("--- effective config ---")
+print(tomlStringify(cfg))

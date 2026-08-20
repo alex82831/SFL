@@ -1,0 +1,11 @@
+import "../src/generated"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+check("the generated module loads", WORDS, ["correct", "horse", "battery", "staple"])
+println("generated: ok")

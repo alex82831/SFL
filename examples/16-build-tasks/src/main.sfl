@@ -1,0 +1,11 @@
+// The program side is deliberately small — the point of this example is the
+// tasks in build.sfl. It uses the module that `sfl build gen` generates.
+
+import "generated"
+
+println("the generated word list has ${length(WORDS)} entries:")
+for ([i, w] in enumerate(WORDS)) {
+  println("  ${i + 1}. ${w}")
+}
+val seed = randomSeed(42)
+println("passphrase of the day: " + join(map(range(3), (i) -> WORDS[randomInt(length(WORDS))]), "-"))

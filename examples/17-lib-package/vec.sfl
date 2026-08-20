@@ -1,0 +1,22 @@
+// mathkit/vec — small fixed-length vector helpers.
+
+def vecAdd(a, b) {
+  _sameLength(a, b)
+  map(zip(a, b), (p) -> p[0] + p[1])
+}
+
+def vecScale(a, k) = map(a, (x) -> x * k)
+
+def vecDot(a, b) {
+  _sameLength(a, b)
+  sum(map(zip(a, b), (p) -> p[0] * p[1]))
+}
+
+def vecNorm(a) = sqrt(toFloat(vecDot(a, a)))
+
+def _sameLength(a, b) {
+  if (length(a) != length(b)) {
+    error("mathkit: vectors of length ${length(a)} and ${length(b)} do not fit")
+  }
+  null
+}

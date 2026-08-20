@@ -1,0 +1,103 @@
+// A REST API with authentication: login issues a JWT, a middleware verifies
+// it on every /api/notes route, and the notes live in a mutex-guarded
+// in-memory store keyed by uuid7 (time-ordered ids sort naturally).
+
+import "httpd"
+import "jwt"
+import "uuid"
+import "log"
+
+val _secret = getEnv("NOTES_SECRET") ?? "dev-secret-change-me"
+val _users = {ada: "lovelace"}
+
+// The store: id -> note, one mutex around every touch.
+val _notes = {}
+val _lock = mutex()
+
+def notesReset() {
+  withLock(_lock, () -> {
+    for (k in keys(_notes)) { remove(_notes, k) }
+  })
+  null
+}
+
+def _noteList() = withLock(_lock, () ->
+  sortBy(values(_notes), (n) -> n.id))
+
+// --------------------------------------------------------------- middleware
+
+// Logs every request with its outcome.
+def logging(req, next) {
+  val res = next(req)
+  logInfo("${req.method} ${req.path} -> ${res.status}")
+  res
+}
+
+// Requires a Bearer token on /api/notes*; puts the claims on req.user.
+def authRequired(req, next) {
+  if (!startsWith(req.path, "/api/notes")) then return next(req)
+  val header = get(req.headers, "authorization", "")
+  if (!startsWith(header, "Bearer ")) {
+    return respondJson(401, {error: "missing bearer token"})
+  }
+  val outcome = attempt(() -> jwtVerify(substring(header, 7, length(header)), _secret))
+  if (outcome?.error != null) {
+    return respondJson(401, {error: outcome.error.message})
+  }
+  req.user = outcome.value
+  next(req)
+}
+
+// -------------------------------------------------------------------- routes
+
+def api() {
+  use([logging, authRequired], routes([
+    POST("/api/login", (req) -> {
+      val body = jsonParse(req.body)
+      if (get(_users, body?.user ?? "", null) != body?.password) {
+        return respondJson(401, {error: "bad credentials"})
+      }
+      val token = jwtSign({
+        sub: body.user,
+        exp: timeMillis() / 1000 + 3600
+      }, _secret)
+      respondJson(200, {token: token})
+    }),
+
+    GET("/api/notes", (req) -> respondJson(200, _noteList())),
+
+    POST("/api/notes", (req) -> {
+      val body = jsonParse(req.body)
+      if ((body?.text ?? "") == "") then return respondJson(422, {error: "text is required"})
+      val note = {id: uuid7(), text: body.text, by: req.user.sub, done: false}
+      withLock(_lock, () -> _notes[note.id] = note)
+      respondJson(201, note)
+    }),
+
+    GET("/api/notes/:id", (req) -> {
+      val note = withLock(_lock, () -> get(_notes, req.params.id, null))
+      if (note == null) then respondJson(404, {error: "no such note"})
+      else respondJson(200, note)
+    }),
+
+    PUT("/api/notes/:id", (req) -> {
+      val body = jsonParse(req.body)
+      withLock(_lock, () -> {
+        val note = get(_notes, req.params.id, null)
+        if (note == null) then return respondJson(404, {error: "no such note"})
+        if (contains(body, "text")) then note.text = body.text
+        if (contains(body, "done")) then note.done = body.done
+        respondJson(200, note)
+      })
+    }),
+
+    DELETE("/api/notes/:id", (req) -> {
+      val had = withLock(_lock, () -> {
+        val hit = contains(_notes, req.params.id)
+        if (hit) then remove(_notes, req.params.id)
+        hit
+      })
+      if (had) then respond(204) else respondJson(404, {error: "no such note"})
+    })
+  ]))
+}

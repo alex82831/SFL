@@ -1,0 +1,5 @@
+{
+  "name": "toml-config",
+  "version": "0.1.0",
+  "deps": { "toml": "^0.1.0", "dotenv": "^0.1.0" }
+}

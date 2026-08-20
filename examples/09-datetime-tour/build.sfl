@@ -1,0 +1,19 @@
+project({
+  "name": "datetime-tour",
+  "version": "0.1.0",
+  "main": "src/main.sfl"
+})
+
+// The packages this example imports. `sfl build setup` installs them into
+// ./sfl_packages/ — from this repository's packages/ inside a checkout,
+// from the registry (`sfl install <name>`) anywhere else.
+task("setup", (args) -> {
+  for (name in ["datetime"]) {
+    val local = "../../packages/" + name
+    val code = if (isDir(local))
+      then passthrough(exePath(), ["pkg", "install", "--force", "--local", local])
+      else passthrough(exePath(), ["install", name])
+    if (code != 0) { return code }
+  }
+  0
+}, "Install the packages this example imports")

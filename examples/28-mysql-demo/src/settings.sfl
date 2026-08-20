@@ -1,0 +1,16 @@
+// Connection settings from the environment, with local-dev defaults.
+// MYSQL_HOST / MYSQL_PORT / MYSQL_USER / MYSQL_PASSWORD / MYSQL_DB —
+// or MYSQL_URL as one mysql:// string, which wins outright.
+
+def mysqlSettings() {
+  val url = getEnv("MYSQL_URL")
+  if (url != null) then return url
+  {
+    host: getEnv("MYSQL_HOST") ?? "127.0.0.1",
+    port: parseInt(getEnv("MYSQL_PORT") ?? "3306"),
+    user: getEnv("MYSQL_USER") ?? "root",
+    password: getEnv("MYSQL_PASSWORD") ?? "",
+    db: getEnv("MYSQL_DB") ?? "sfl_demo",
+    timeoutMs: 4000
+  }
+}

@@ -1,0 +1,27 @@
+// The message this example sends: text + HTML alternatives and a CSV
+// attachment, built by the smtp package's MIME builder.
+
+import "smtp"
+
+def demoMail(from, to) {
+  {
+    from: from,
+    to: to,
+    subject: "SFL delivery report — 你好",
+    text: join([
+      "Hello from SFL!",
+      "",
+      "This message has a plain-text body, an HTML body, and a CSV attached.",
+      "Whichever your reader prefers, the content is the same."
+    ], "\n"),
+    html: join([
+      "<h2>Hello from <em>SFL</em>!</h2>",
+      "<p>This message has a plain-text body, an <strong>HTML</strong> body,",
+      "and a CSV attached.</p>"
+    ], "\n"),
+    headers: {"X-Mailer": "sfl smtp example"},
+    attachments: [
+      {name: "report.csv", contentType: "text/csv", text: "day,sent\nmon,12\ntue,40\n"}
+    ]
+  }
+}

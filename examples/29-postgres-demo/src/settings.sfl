@@ -1,0 +1,16 @@
+// Connection settings from the environment, with local-dev defaults.
+// PG_HOST / PG_PORT / PG_USER / PG_PASSWORD / PG_DB — or PG_URL as one
+// postgres:// string, which wins outright.
+
+def pgSettings() {
+  val url = getEnv("PG_URL")
+  if (url != null) then return url
+  {
+    host: getEnv("PG_HOST") ?? "127.0.0.1",
+    port: parseInt(getEnv("PG_PORT") ?? "5432"),
+    user: getEnv("PG_USER") ?? "postgres",
+    password: getEnv("PG_PASSWORD") ?? "",
+    db: getEnv("PG_DB") ?? "postgres",
+    timeoutMs: 4000
+  }
+}

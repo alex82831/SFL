@@ -1,0 +1,33 @@
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+check("async/await", await(async((a, b) -> a + b, 40, 2)), 42)
+
+val quick = spawn(() -> "done")
+check("awaitAny finds the finisher", awaitAny([quick], 1000), 0)
+await(quick)
+
+check("race reports the winner", race([
+  spawn(() -> {
+    sleep(300)
+    "slow"
+  }),
+  spawn(() -> "instant")
+], 2000), [1, "instant"])
+
+val a = udpSocket()
+val b = udpSocket()
+udpSend(b, "127.0.0.1", udpPort(a), "hello")
+val got = udpReceive(a, 2000)
+check("udp payload arrives", got.data, "hello")
+udpSend(a, got.host, got.port, "back")
+check("udp reply arrives", udpReceive(b, 2000).data, "back")
+check("poll times out empty", poll([a], 30), [])
+closeUdp(a)
+closeUdp(b)
+
+println("async: ok")

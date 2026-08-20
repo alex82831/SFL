@@ -1,0 +1,42 @@
+// Reading, shaping and writing back: csvParseObjects gives one object per
+// row (cells are strings — deciding what is a number is the caller's job),
+// and the report goes out through csvStringifyObjects.
+
+import "csv"
+import "datetime"
+
+def loadSales(text) {
+  map(csvParseObjects(text), (row) -> {
+    date: row.date,
+    month: substring(row.date, 0, 7),
+    region: row.region,
+    product: row.product,
+    units: parseInt(row.units),
+    revenue: parseInt(row.units) * parseFloat(row.unit_price)
+  })
+}
+
+// Revenue by month and region, as rows ready for csvStringifyObjects.
+def summarise(sales) {
+  val byKey = groupBy(sales, (s) -> s.month + "|" + s.region)
+  val rows = map(keys(byKey), (k) -> {
+    val rowsOf = byKey[k]
+    val parts = split(k, "|")
+    {
+      month: parts[0],
+      region: parts[1],
+      units: rowsOf |> map((s) -> s.units) |> sum,
+      revenue: format("%.2f", rowsOf |> map((s) -> s.revenue) |> sum)
+    }
+  })
+  rows |> sortBy((r) -> r.region) |> sortBy((r) -> r.month)
+}
+
+def bestSeller(sales) {
+  val byProduct = groupBy(sales, (s) -> s.product)
+  val totals = map(keys(byProduct), (p) -> {
+    product: p,
+    units: byProduct[p] |> map((s) -> s.units) |> sum
+  })
+  maxBy(totals, (t) -> t.units)
+}

@@ -1,0 +1,16 @@
+project({
+  "name": "csv-report",
+  "version": "0.1.0",
+  "main": "src/main.sfl"
+})
+
+task("setup", (args) -> {
+  for (name in ["csv", "datetime"]) {
+    val local = "../../packages/" + name
+    val code = if (isDir(local))
+      then passthrough(exePath(), ["pkg", "install", "--force", "--local", local])
+      else passthrough(exePath(), ["install", name])
+    if (code != 0) { return code }
+  }
+  0
+}, "Install the packages this example imports")

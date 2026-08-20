@@ -1,0 +1,32 @@
+// Text processing: the string toolbox and the regex builtins, ending in a
+// small word-frequency report.
+
+import "words"
+
+val sample = readFile("data/moby.txt")
+
+// The string basics compose well.
+println("bytes: ${utf8Length(sample)}, chars: ${length(sample)}, lines: ${length(lines(sample))}")
+println("starts: " + substring(trim(sample), 0, 22) + "…")
+
+// split / join / replace / padStart cover most everyday reshaping.
+val csvish = "name;age;city"
+println(csvish |> split(";") |> join(" | "))
+println(replace("a-b-c", "-", "→"))
+println(padStart("7", 3, "0") + " " + padEnd("7", 3, ".") + " " + capitalize("whale"))
+
+// regexFind returns [whole, group1, ...]; regexFindAll every match.
+val m = regexFind("Call me Ishmael, chapter 1.", "([A-Z][a-z]+)[,.]")
+println("regexFind: whole='" + m[0] + "' group='" + m[1] + "'")
+val years = regexFindAll("in 1841 and again in 1851.", "\\d{4}")
+println("years: " + jsonStringify(map(years, (g) -> g[0])))
+
+// regexReplace and regexSplit; matches() answers yes or no.
+println(regexReplace("whale,  whale,   whale", ",\\s+", ", "))
+println(jsonStringify(regexSplit("one1two22three", "\\d+")))
+println("looks like a word? " + matches("Ishmael", "^[A-Za-z]+$"))
+
+println("--- top words ---")
+for ([word, n] in topWords(sample, 8)) {
+  printf("%4d  %s\n", n, word)
+}

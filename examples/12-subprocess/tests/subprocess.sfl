@@ -1,0 +1,27 @@
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+val r = execute("printf 'x\\ny\\n' | wc -l")
+check("execute captures stdout", trim(r.out), "2")
+check("execute reports the exit code", execute("exit 7").code, 7)
+check("stderr is separate", trim(execute("echo oops 1>&2").err), "oops")
+
+val p = processStart(["sort", "-r"])
+processWriteLine(p, "a")
+processWriteLine(p, "c")
+processWriteLine(p, "b")
+processCloseInput(p)
+val out = []
+while (true) {
+  val line = processReadLine(p)
+  if (line == null) then break
+  push(out, line)
+}
+check("a coprocess round trip", out, ["c", "b", "a"])
+check("wait returns its code", processWait(p), 0)
+
+println("subprocess: ok")

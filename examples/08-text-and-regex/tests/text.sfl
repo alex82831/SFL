@@ -1,0 +1,25 @@
+import "../src/words"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+check("split and join", "a;b;c" |> split(";") |> join("-"), "a-b-c")
+check("regexFind groups", regexFind("v1.2.3", "(\\d+)\\.(\\d+)\\.(\\d+)"),
+  ["1.2.3", "1", "2", "3"])
+check("regexFindAll", map(regexFindAll("a1b22c", "\\d+"), (g) -> g[0]), ["1", "22"])
+check("regexReplace", regexReplace("a   b  c", "\\s+", " "), "a b c")
+check("regexSplit", regexSplit("x1y22z", "\\d+"), ["x", "y", "z"])
+check("matches", [matches("abc", "^a.c$"), matches("abd!", "^[a-z]+$")], [true, false])
+
+check("topWords counts, ranks and cuts",
+  topWords("the whale, the whale, the SEA! a whale. boats and boats.", 2),
+  [["whale", 3], ["boats", 2]])
+check("topWords breaks ties alphabetically",
+  topWords("zebra apple zebra apple", 2),
+  [["apple", 2], ["zebra", 2]])
+
+println("text: ok")

@@ -1,0 +1,31 @@
+import "httpd"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+val srv = httpServer({
+  quiet: true,
+  handler: routes([
+    GET("/ping", (req) -> respondText(200, "pong")),
+    POST("/sum", (req) -> {
+      val ns = jsonParse(req.body)
+      respondJson(200, {sum: sum(ns)})
+    }),
+    GET("/q", (req) -> respondJson(200, {q: get(req.query, "name", null)}))
+  ])
+})
+srv.start()
+val base = "http://127.0.0.1:${srv.port()}"
+
+check("httpGet returns the body", httpGet(base + "/ping"), "pong")
+check("httpPost sends json", jsonParse(httpPost(base + "/sum", "[1, 2, 39]", "application/json")).sum, 42)
+check("query strings arrive", jsonParse(httpGet(base + "/q?name=ada")).q, "ada")
+val r = httpRequest("GET", base + "/nope")
+check("httpRequest reports status", r.status, 404)
+srv.stop()
+
+println("client: ok")

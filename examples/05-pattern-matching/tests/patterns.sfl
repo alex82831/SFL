@@ -1,0 +1,25 @@
+import "../src/main"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got ${got}, want ${want}")
+    exit(1)
+  }
+}
+
+check("literal", describe(0), "zero")
+check("guard", describe(-4), "negative -4")
+check("empty array", describe([]), "an empty array")
+check("rest", describe([1, 2, 3]), "starts 1, 2 more")
+check("tuple", describe((2, 40)), "a pair summing to 42")
+check("tag beats shorthand", describe({kind: "x", name: "y"}), "something tagged 'x'")
+check("type pattern", describe(2.5), "the float 2.5")
+check("fallthrough", describe(true), "something else")
+check("extractor", route("a@b"), "mail a at b")
+check("alternative", route("quit"), "goodbye")
+check("area dispatch", area(rect(3, 4)), 12)
+
+val failed = attempt(() -> area({kind: "circel"}))
+check("default raises on typos", failed.error != null, true)
+
+println("patterns: ok")

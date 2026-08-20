@@ -1,0 +1,31 @@
+import "../src/report"
+import "csv"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+val text = "date,region,product,units,unit_price\n" +
+  "2026-07-01,north,widget,2,10.00\n" +
+  "2026-07-02,north,\"widget, deluxe\",1,20.00\n" +
+  "2026-08-01,south,widget,3,10.00\n"
+
+val sales = loadSales(text)
+check("rows parse", length(sales), 3)
+check("quoted commas survive", sales[1].product, "widget, deluxe")
+check("numbers convert", [sales[0].units, sales[0].revenue], [2, 20.0])
+
+val sum1 = summarise(sales)
+check("summary groups by month and region", map(sum1, (r) -> r.month + "/" + r.region),
+  ["2026-07/north", "2026-08/south"])
+check("summary sums", [sum1[0].units, sum1[0].revenue], [3, "40.00"])
+
+check("best seller", bestSeller(sales).product, "widget")
+
+// Round trip through the csv package itself.
+val out = csvStringifyObjects(sum1, {columns: ["month", "region", "units", "revenue"]})
+check("report parses back", csvParseObjects(out)[0].month, "2026-07")
+println("report: ok")

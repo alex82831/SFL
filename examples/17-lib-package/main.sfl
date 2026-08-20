@@ -1,0 +1,13 @@
+// mathkit — a worked example of an installable SFL library.
+//
+//   import "mathkit"            // this module, via sfl.pkg's "main"
+//   import "mathkit/vec"        // any module by name
+//
+// The main module re-exports the everyday surface by importing the others:
+// their public names become available wherever mathkit is imported.
+
+import "stats"
+import "vec"
+
+// A name of mathkit's own.
+def clamp01(x) = clamp(x, 0.0, 1.0)

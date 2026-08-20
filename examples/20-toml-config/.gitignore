@@ -1,0 +1,4 @@
+build/
+sfl_packages/
+*.sflpkg
+.env

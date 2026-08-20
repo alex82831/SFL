@@ -1,0 +1,46 @@
+// The todo store: a JSON file of {id, text, done} items. Pure functions over
+// a path, so the tests can point them at a scratch file.
+
+def storeLoad(path) {
+  if (!isFile(path)) then return []
+  jsonParse(readFile(path))
+}
+
+def storeSave(path, items) {
+  writeFile(path, jsonStringify(items))
+  null
+}
+
+def storeAdd(path, text) {
+  val items = storeLoad(path)
+  val id = 1 + (items |> map((t) -> t.id) |> reduce(max, 0))
+  val item = {id: id, text: text, done: false}
+  push(items, item)
+  storeSave(path, items)
+  item
+}
+
+// Marks one item done; null when the id is unknown.
+def storeDone(path, id) {
+  val items = storeLoad(path)
+  val hit = find(items, (t) -> t.id == id)
+  if (hit == null) then return null
+  hit.done = true
+  storeSave(path, items)
+  hit
+}
+
+// Removes one item; true when something went.
+def storeRemove(path, id) {
+  val items = storeLoad(path)
+  val kept = filter(items, (t) -> t.id != id)
+  storeSave(path, kept)
+  length(kept) < length(items)
+}
+
+def storeClearDone(path) {
+  val items = storeLoad(path)
+  val kept = filter(items, (t) -> !t.done)
+  storeSave(path, kept)
+  length(items) - length(kept)
+}

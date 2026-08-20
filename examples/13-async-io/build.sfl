@@ -1,0 +1,5 @@
+project({
+  "name": "async-io",
+  "version": "0.1.0",
+  "main": "src/main.sfl"
+})

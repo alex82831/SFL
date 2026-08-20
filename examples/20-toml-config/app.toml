@@ -1,0 +1,20 @@
+# The application's checked-in defaults.
+name = "demo-app"
+debug = false
+
+[server]
+host = "127.0.0.1"
+port = 8080
+timeouts = { connect = 5.0, read = 30.0 }
+
+[database]
+url = "postgres://localhost/demo"
+pool = 4
+
+[[rules]]
+path = "/admin"
+roles = ["admin"]
+
+[[rules]]
+path = "/api"
+roles = ["user", "admin"]

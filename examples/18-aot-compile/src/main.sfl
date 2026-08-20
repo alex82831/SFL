@@ -1,0 +1,51 @@
+// The Mandelbrot set in ASCII — tight float loops, exactly what the
+// ahead-of-time compiler turns into bare machine arithmetic. The same file
+// runs under the interpreter and compiles with `sfl build`; output is
+// byte-identical either way (that property is what tests/differential.sh
+// holds the whole language to).
+
+val quiet = contains(args(), "--quiet")
+
+// How many iterations until |z| escapes 2, capped.
+def escape(cx, cy, maxIter) {
+  var x = 0.0
+  var y = 0.0
+  var i = 0
+  while (i < maxIter) {
+    val x2 = x * x
+    val y2 = y * y
+    if (x2 + y2 > 4.0) then return i
+    y = 2.0 * x * y + cy
+    x = x2 - y2 + cx
+    i += 1
+  }
+  maxIter
+}
+
+def render(width, height, maxIter) {
+  val shades = " .:-=+*#%@"
+  val out = []
+  for (row in range(height)) {
+    var line = ""
+    val cy = -1.1 + 2.2 * toFloat(row) / toFloat(height - 1)
+    for (col in range(width)) {
+      val cx = -2.2 + 3.0 * toFloat(col) / toFloat(width - 1)
+      val n = escape(cx, cy, maxIter)
+      val shade = if (n == maxIter) then 9 else min(n * 10 / maxIter, 9)
+      line += charAt(shades, shade)
+    }
+    push(out, line)
+  }
+  out
+}
+
+// A small picture for looking at; a heavy pass for timing.
+if (!quiet) {
+  for (line in render(78, 24, 96)) { println(line) }
+}
+
+var checksum = 0
+for (line in render(160, 96, 600)) {
+  for (ch in line) { checksum = (checksum * 31 + ord(ch)) % 1000000007 }
+}
+println("checksum of the heavy render: ${checksum}")

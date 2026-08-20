@@ -1,0 +1,29 @@
+import "../src/config"
+import "toml"
+
+def check(what, got, want) {
+  if (got != want) {
+    eprintln("FAIL ${what}: got " + jsonStringify(got) + ", want " + jsonStringify(want))
+    exit(1)
+  }
+}
+
+// Defaults straight from the toml.
+val plain = configLoad("app.toml", "no-such.env")
+check("toml defaults", [plain.server.port, plain.debug], [8080, false])
+check("nested inline tables", plain.server.timeouts.connect, 5.0)
+check("arrays of tables", map(plain.rules, (r) -> r.path), ["/admin", "/api"])
+
+// Environment overrides with type-faithful casting.
+setEnv("APP_SERVER_PORT", "6000")
+setEnv("APP_DEBUG", "true")
+setEnv("APP_SERVER_TIMEOUTS_READ", "2.5")
+val cfg = configLoad("app.toml", "no-such.env")
+check("int override", cfg.server.port, 6000)
+check("bool override", cfg.debug, true)
+check("float override", cfg.server.timeouts.read, 2.5)
+check("untouched keys stay", cfg.server.host, "127.0.0.1")
+
+// The effective config still round-trips as TOML.
+check("round trip", tomlParse(tomlStringify(cfg)).server.port, 6000)
+println("config: ok")
