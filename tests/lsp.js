@@ -240,6 +240,79 @@ async function main() {
   });
   check('completion after g. via trigger still members', div.result.every((i) => i.kind === 3 || i.kind === 6));
 
+  // -- semantic diagnostics: undefined names ------------------------------------
+  const undefUri = 'file://' + pathmod.join(dir, 'undef.sfl');
+  let diagsP2 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didOpen', {
+    textDocument: {
+      uri: undefUri, languageId: 'sfl', version: 1,
+      text: 'println(area(circle1))\nval ok = length("x")\n',
+    },
+  });
+  const undef1 = (await diagsP2).params.diagnostics;
+  const names1 = undef1.map((d) => /'([^']+)'/.exec(d.message)?.[1]).sort();
+  check('undefined names are flagged', names1.join(',') === 'area,circle1', JSON.stringify(undef1));
+  check('undefined has exact column', undef1.some((d) => d.range.start.character === 8));
+  check('builtins are not flagged', !names1.includes('println') && !names1.includes('length'));
+
+  diagsP2 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didChange', {
+    textDocument: { uri: undefUri, version: 2 },
+    contentChanges: [{
+      text: 'def area(r) = r * r\nval circle1 = 2\nprintln(area(circle1))\n',
+    }],
+  });
+  check('definitions clear the flags', (await diagsP2).params.diagnostics.length === 0);
+
+  // A typo close to a real name gets a suggestion.
+  diagsP2 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didChange', {
+    textDocument: { uri: undefUri, version: 3 },
+    contentChanges: [{ text: 'def area(r) = r * r\nprintln(aera(2))\n' }],
+  });
+  const typo = (await diagsP2).params.diagnostics;
+  check('typo gets a did-you-mean', typo.length === 1 && /did you mean 'area'/.test(typo[0].message),
+    JSON.stringify(typo));
+
+  // -- import failure: one diagnostic, no undefined spam --------------------------
+  diagsP2 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didChange', {
+    textDocument: { uri: undefUri, version: 4 },
+    contentChanges: [{ text: 'import "no_such_module_xyz"\nval x = mystery\n' }],
+  });
+  const impDiags = (await diagsP2).params.diagnostics;
+  check('broken import is one diagnostic', impDiags.length === 1, JSON.stringify(impDiags));
+  check('broken import names the module', /no_such_module_xyz/.test(impDiags[0].message));
+  check('undefined check suppressed while imports fail', !impDiags.some((d) => /mystery/.test(d.message)));
+
+  // -- plain import members reach completion and references/implementation --------
+  diagsP2 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didChange', {
+    textDocument: { uri: undefUri, version: 5 },
+    contentChanges: [{ text: 'import "geo"\nval r = area(2)\nval r2 = area(3)\n' }],
+  });
+  const geoDiags = (await diagsP2).params.diagnostics;
+  check('plain-import members are defined', geoDiags.length === 0, JSON.stringify(geoDiags));
+
+  const plainComp = await request('textDocument/completion', {
+    textDocument: { uri: undefUri }, position: { line: 2, character: 0 },
+  });
+  const areaItem = plainComp.result.find((i) => i.label === 'area');
+  check('plain-import member in completion', !!areaItem && /geo/.test(areaItem.detail),
+    JSON.stringify(areaItem));
+
+  const impl = await request('textDocument/implementation', {
+    textDocument: { uri: undefUri }, position: { line: 1, character: 9 },
+  });
+  check('implementation lands on the definition',
+    !!impl.result && impl.result.uri.endsWith('geo.sfl'), JSON.stringify(impl.result));
+
+  const refs = await request('textDocument/references', {
+    textDocument: { uri: undefUri }, position: { line: 1, character: 9 },
+    context: { includeDeclaration: true },
+  });
+  check('references finds both uses', refs.result.length === 2, JSON.stringify(refs.result));
+
   // -- shutdown ---------------------------------------------------------------------
   const bye = await request('shutdown', null);
   check('shutdown acknowledged', bye.result === null);

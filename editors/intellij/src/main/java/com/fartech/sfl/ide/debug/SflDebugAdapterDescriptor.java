@@ -48,7 +48,9 @@ final class SflDebugAdapterDescriptor extends DefaultDebugAdapterDescriptor {
                             + "or export SFL_PATH, or install sfl on PATH.");
         }
         GeneralCommandLine command =
-                new GeneralCommandLine(binary.getAbsolutePath(), "dap", "--socket");
+                new GeneralCommandLine(binary.getAbsolutePath(), "dap", "--socket")
+                        .withEnvironment(
+                                com.fartech.sfl.ide.settings.SflEnvironment.forChildProcesses());
         String workingDirectory = null;
         if (options instanceof WorkingDirectoryConfigurable configurable) {
             workingDirectory = configurable.getWorkingDirectory();

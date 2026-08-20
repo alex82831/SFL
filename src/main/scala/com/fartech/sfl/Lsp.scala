@@ -69,6 +69,10 @@ final class Lsp:
         case "textDocument/signatureHelp" => respond(id, signatureHelp(params))
         case "textDocument/documentSymbol" => respond(id, documentSymbols(params))
         case "textDocument/definition"    => respond(id, definition(params))
+        case "textDocument/declaration"   => respond(id, definition(params))
+        case "textDocument/implementation" => respond(id, definition(params))
+        case "textDocument/typeDefinition" => respond(id, definition(params))
+        case "textDocument/references"    => respond(id, references(params))
         case other => respondError(id, -32601, s"method '$other' is not supported")
     catch case e: Throwable =>
       // One bad request must not take the server down with it.
@@ -173,13 +177,67 @@ final class Lsp:
     val ref = SourceRef(path, text)
     val base = new File(path).getParentFile
     val importer = new Importer(if base != null then base else new File("."))
+    val intel = new ParseIntel
     try
-      new Parser(ref, new Globals, importer, false, mutable.HashMap.empty[String, String]).parseProgram()
-      Nil
+      new Parser(ref, new Globals, importer, false,
+        mutable.HashMap.empty[String, String], intel).parseProgram()
+      val out = mutable.ArrayBuffer.empty[Value]
+      for e <- intel.importErrors do out += lspDiagnostic(e, path, text)
+      // Undefined-name checking only when every import resolved: a missing
+      // module legitimately leaves its names undefined, and flagging each use
+      // would bury the one diagnostic that matters.
+      if intel.importErrors.isEmpty && undefinedCheckOn then
+        out ++= undefinedDiagnostics(intel, path, text)
+      out.toList
     catch
       case e: SflError         => List(lspDiagnostic(e, path, text))
       case e: IncompleteInput  => List(lspDiagnostic(Err.fromIncomplete(e, ref), path, text))
       case e: PkgTool.PkgError => List(plainDiagnostic(e.getMessage))
+
+  /** SFL_LSP_UNDEFINED=off silences the semantic pass; the plugins set it from
+    * their settings pages. */
+  private val undefinedCheckOn = !sys.env.get("SFL_LSP_UNDEFINED").contains("off")
+
+  /**
+   * Reads of globals that nothing defines: not this program (imports included —
+   * the collector saw their declarations while they were inlined), not the
+   * builtin table. Exactly the reads the interpreter would refuse at run time.
+   */
+  private def undefinedDiagnostics(intel: ParseIntel, path: String, text: String): Seq[Value] =
+    val builtins = Builtins.names.toSet
+    val seen = mutable.HashSet.empty[(String, Int)]
+    val out = mutable.ArrayBuffer.empty[Value]
+    for r <- intel.refs do
+      if out.length < 100 && r.file == path
+        && !builtins.contains(r.name) && !intel.isDefined(r.name)
+        && !Tok.reserved.contains(r.name) && seen.add((r.name, r.line))
+      then
+        val line0 = math.max(0, r.line - 1)
+        val col = columnOfWord(text, line0, r.name)
+        val hint = Err.suggest(r.name, intel.definedNames ++ Builtins.publicNames)
+          .map(sug => s"\nhelp: did you mean '$sug'?").getOrElse("")
+        out += diagnostic(line0, col, line0, col + r.name.length,
+          s"undefined variable '${r.name}'$hint", "Runtime error")
+    out.toSeq
+
+  /** First word-boundary occurrence of `word` in the given line, else column 0. */
+  private def columnOfWord(text: String, line0: Int, word: String): Int =
+    var i = 0
+    var l = 0
+    while l < line0 && i < text.length do
+      if text.charAt(i) == '\n' then l += 1
+      i += 1
+    var j = i
+    while j < text.length && text.charAt(j) != '\n' do j += 1
+    val lineText = text.substring(i, j)
+    var at = lineText.indexOf(word)
+    while at >= 0 do
+      val beforeOk = at == 0 || !isIdentChar(lineText.charAt(at - 1))
+      val end = at + word.length
+      val afterOk = end >= lineText.length || !isIdentChar(lineText.charAt(end))
+      if beforeOk && afterOk then return at
+      at = lineText.indexOf(word, at + 1)
+    0
 
   private def lspDiagnostic(e: SflError, path: String, text: String): Value =
     val local = e.source.name == path
@@ -260,9 +318,9 @@ final class Lsp:
           case None =>
             val prev = if off > 0 then text.charAt(off - 1) else ' '
             if prev == '.' || prev == '"' || prev == '/' then VArr.empty
-            else globalItems(text)
+            else globalItems(path, text)
 
-  private def globalItems(text: String): Value =
+  private def globalItems(path: String, text: String): Value =
     val items = mutable.LinkedHashMap.empty[String, Value]
     for m <- DefRe.findAllMatchIn(text) do
       val name = m.group(1)
@@ -270,6 +328,12 @@ final class Lsp:
     for m <- ValRe.findAllMatchIn(text) do
       val name = m.group(1)
       if !items.contains(name) then items(name) = completionItem(name, 6, name, "", "1")
+    // Plainly imported modules put their public names in scope, so completion
+    // owes them: mongodb's insertOne belongs in the list the moment the file
+    // says import "mongodb". One transitive level covers packages whose main
+    // re-exports submodules.
+    for (mod, m) <- plainSurfaces(path, text) if !items.contains(m.name) do
+      items(m.name) = completionItem(m.name, m.kind, s"${m.detail} — $mod", "", "1")
     for b <- Builtins.all if !items.contains(b.name) do
       items(b.name) = completionItem(b.name, 3, b.signature, b.doc, "2")
     for kw <- Tok.keywords.keys.toSeq.sorted if !items.contains(kw) do
@@ -440,6 +504,23 @@ final class Lsp:
             moduleCache(key) = (mtime, list)
             list
 
+  /** Public members of every plainly imported module, one transitive level deep. */
+  private def plainSurfaces(path: String, text: String): Seq[(String, Member)] =
+    val out = mutable.ArrayBuffer.empty[(String, Member)]
+    val visited = mutable.HashSet.empty[String]
+    def walk(fromPath: String, fromText: String, depth: Int): Unit =
+      if depth > 2 then return
+      for im <- plainImports(fromText) do
+        val mod = im.group(1)
+        resolveModule(fromPath, mod) match
+          case Some(file) if visited.add(file.getAbsolutePath) =>
+            for member <- moduleSurface(fromPath, fromText, mod) do out += ((mod, member))
+            val srcText = try FileUtil.read(file) catch case _: Throwable => ""
+            walk(file.getAbsolutePath, srcText, depth + 1)
+          case _ => ()
+    walk(path, text, 1)
+    out.toSeq
+
   private def lineOfOffset(text: String, off: Int): Int =
     var line = 0
     var i = 0
@@ -566,6 +647,40 @@ final class Lsp:
             return location(pathToUri(file.getAbsolutePath), src, member.line)
         case None => ()
     VNull
+
+  /**
+   * Word-boundary occurrences in the open document, declaration included. The
+   * language service rebuild will make this scope-aware; until then this is the
+   * same honest text-level answer an editor's own "highlight occurrences" gives.
+   */
+  private def references(params: Value): Value =
+    val uri = getStr(params, "textDocument", "uri")
+    val text = docs.getOrElse(uri, "")
+    val word = wordAt(text, getInt(params, "position", "line"), getInt(params, "position", "character"))
+    if word.isEmpty then return VArr.empty
+    val out = mutable.ArrayBuffer.empty[Value]
+    var line = 0
+    var lineStart = 0
+    var i = 0
+    while i <= text.length do
+      if i == text.length || text.charAt(i) == '\n' then
+        val lineText = text.substring(lineStart, i)
+        var at = lineText.indexOf(word)
+        while at >= 0 do
+          val beforeOk = at == 0 || !isIdentChar(lineText.charAt(at - 1))
+          val end = at + word.length
+          val afterOk = end >= lineText.length || !isIdentChar(lineText.charAt(end))
+          if beforeOk && afterOk then
+            out += VObj.of(Seq(
+              "uri" -> VStr(uri),
+              "range" -> VObj.of(Seq(
+                "start" -> VObj.of(Seq("line" -> VInt.of(line), "character" -> VInt.of(at))),
+                "end" -> VObj.of(Seq("line" -> VInt.of(line), "character" -> VInt.of(end)))))))
+          at = lineText.indexOf(word, at + 1)
+        line += 1
+        lineStart = i + 1
+      i += 1
+    VArr.of(out.toSeq)
 
   private def pathToUri(path: String): String =
     val sb = new StringBuilder("file://")
@@ -743,7 +858,13 @@ final class Lsp:
         "signatureHelpProvider" -> VObj.of(Seq(
           "triggerCharacters" -> VArr.of(Seq(VStr("("), VStr(","))))),
         "documentSymbolProvider" -> VBool.True,
-        "definitionProvider" -> VBool.True
+        "definitionProvider" -> VBool.True,
+        // SFL has no types or interfaces, so every flavour of "go to" the
+        // editors expose lands on the one definition there is.
+        "declarationProvider" -> VBool.True,
+        "implementationProvider" -> VBool.True,
+        "typeDefinitionProvider" -> VBool.True,
+        "referencesProvider" -> VBool.True
       )),
       "serverInfo" -> VObj.of(Seq("name" -> VStr("sfl"), "version" -> VStr(Sfl.version)))
     ))

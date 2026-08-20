@@ -7,10 +7,23 @@ SFL 语言支持，**Community 与 Ultimate 都能用**（LSP 客户端走 Red H
 | --- | --- |
 | 语法高亮、注释切换、括号配对 | 插件内置的小词法器（词表由 `sfl syntax` 生成） |
 | 诊断、补全、悬停、签名提示 | `sfl lsp`（通过 LSP4IJ 接入） |
-| `.` 成员补全 / `import "` 路径补全 / 跳转定义 / Structure 视图 | 同一个 `sfl lsp`——服务器声明触发字符与能力，插件零改动获得 |
+| `.` 成员补全 / `import "` 路径补全 / Structure 视图 | 同一个 `sfl lsp`——服务器声明触发字符与能力，插件零改动获得 |
+| Go to Definition / Implementation / Type Declaration / Find Usages | 全部可用（SFL 无类型层级，前三者同落定义处；Usages 为当前文件词边界匹配） |
+| 未定义变量标红 | 语义级诊断，含拼写建议；import 失败逐个报告且不遮蔽全文件 |
 | **新建项目向导**（New Project → SFL） | 生成与 `sfl build init` 相同的布局：build.sfl、src/、可选 tests/；可设版本号；src 与 tests 标为源码根 |
 | **运行/调试当前文件** | 行首 ▶、右键、以及工具栏 Current File 的 Run/Debug；SFL 脚本即程序，无需 main。断点、单步、变量走 `sfl dap`（LSP4IJ 的 DAP 客户端） |
 | **Build Project** | SFL 模块由插件接管（不进 JPS，不需要 JDK）：在模块根跑 `sfl build`，输出进 Build 工具窗 |
+
+## 设置（Settings → Tools → SFL）
+
+| 项 | 说明 |
+| --- | --- |
+| Path to the sfl binary | 二进制路径，空则自动探测 |
+| SFL_HOME | 包根与 libs 的家目录。**GUI 启动的 IDE 继承不到 shell 的 export**，已安装的包 import 标红就在这里填 |
+| Enable the language server | LSP 总开关 |
+| Flag undefined variables | 未定义变量标红（带 did-you-mean）开关 |
+
+改动 Apply 后语言服务器自动重启生效。
 
 ## 找到 sfl 二进制
 

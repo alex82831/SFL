@@ -24,5 +24,10 @@ public final class SflLanguageServer extends ProcessStreamConnectionProvider {
                             + "or export SFL_PATH, or install sfl on PATH.");
         }
         super.setCommands(List.of(binary.getAbsolutePath(), "lsp"));
+        // Settings ride in as environment: SFL_HOME so imports resolve installed
+        // packages, SFL_LSP_UNDEFINED to switch the semantic pass.
+        super.setUserEnvironmentVariables(
+                com.fartech.sfl.ide.settings.SflEnvironment.forChildProcesses());
+        super.setIncludeSystemEnvironmentVariables(true);
     }
 }

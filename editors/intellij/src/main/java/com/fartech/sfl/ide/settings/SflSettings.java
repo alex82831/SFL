@@ -18,7 +18,9 @@ public final class SflSettings implements PersistentStateComponent<SflSettings.S
 
     public static final class State {
         public String path = "";
+        public String home = "";
         public boolean serverEnabled = true;
+        public boolean undefinedCheck = true;
     }
 
     private State state = new State();
@@ -43,6 +45,22 @@ public final class SflSettings implements PersistentStateComponent<SflSettings.S
 
     public void setPath(String path) {
         state.path = path == null ? "" : path.trim();
+    }
+
+    public String getHome() {
+        return state.home == null ? "" : state.home;
+    }
+
+    public void setHome(String home) {
+        state.home = home == null ? "" : home.trim();
+    }
+
+    public boolean isUndefinedCheck() {
+        return state.undefinedCheck;
+    }
+
+    public void setUndefinedCheck(boolean on) {
+        state.undefinedCheck = on;
     }
 
     public boolean isServerEnabled() {

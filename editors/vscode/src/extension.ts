@@ -34,6 +34,21 @@ import {
 let client: LanguageClient | undefined;
 let terminal: Terminal | undefined;
 
+// SFL_HOME and diagnostic switches travel to every sfl child process as
+// environment — the same contract the IntelliJ plugin uses.
+function sflEnv(): NodeJS.ProcessEnv {
+  const cfg = workspace.getConfiguration('sfl');
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  const home = (cfg.get<string>('home') ?? '').trim();
+  if (home.length > 0) {
+    env.SFL_HOME = home.startsWith('~') ? path.join(os.homedir(), home.slice(1)) : home;
+  }
+  if (cfg.get<boolean>('diagnostics.undefinedNames') === false) {
+    env.SFL_LSP_UNDEFINED = 'off';
+  }
+  return env;
+}
+
 function sflBinary(): string {
   const configured = workspace.getConfiguration('sfl').get<string>('path');
   if (configured && configured.trim().length > 0) {
@@ -64,7 +79,11 @@ function sflBinary(): string {
 
 async function startClient(context: ExtensionContext): Promise<void> {
   const command = sflBinary();
-  const serverOptions: ServerOptions = { command, args: ['lsp'] };
+  const serverOptions: ServerOptions = {
+    command,
+    args: ['lsp'],
+    options: { env: sflEnv() },
+  };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: 'file', language: 'sfl' },
@@ -209,12 +228,12 @@ function provideSflTasks(): Task[] {
     const bin = quoted(sflBinary());
     const build = new Task(
       { type: 'sfl', task: 'build' }, folder, 'build', 'sfl',
-      new ShellExecution(`${bin} build`)
+      new ShellExecution(`${bin} build`, { env: sflEnv() as Record<string, string> })
     );
     build.group = TaskGroup.Build;
     const test = new Task(
       { type: 'sfl', task: 'test' }, folder, 'test', 'sfl',
-      new ShellExecution(`${bin} build test`)
+      new ShellExecution(`${bin} build test`, { env: sflEnv() as Record<string, string> })
     );
     test.group = TaskGroup.Test;
     out.push(build, test);
@@ -243,7 +262,8 @@ export async function activate(context: ExtensionContext): Promise<void> {
     }),
     // The debug adapter is the sfl binary itself; nothing to bundle or download.
     debug.registerDebugAdapterDescriptorFactory('sfl', {
-      createDebugAdapterDescriptor: () => new DebugAdapterExecutable(sflBinary(), ['dap']),
+      createDebugAdapterDescriptor: () =>
+        new DebugAdapterExecutable(sflBinary(), ['dap'], { env: sflEnv() as Record<string, string> }),
     }),
     // F5 with no launch.json: a script is its own program, so debugging the
     // current file needs no configuration at all.
@@ -275,7 +295,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
     }),
     workspace.onDidChangeConfiguration(async (e) => {
-      if (e.affectsConfiguration('sfl.path')) {
+      if (
+        e.affectsConfiguration('sfl.path') ||
+        e.affectsConfiguration('sfl.home') ||
+        e.affectsConfiguration('sfl.diagnostics')
+      ) {
         if (client) {
           await client.stop();
           client = undefined;

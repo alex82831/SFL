@@ -48,6 +48,28 @@ private final class FnCtx(val parent: FnCtx):
     while locals.nonEmpty && locals.last.blockDepth > blockDepth do locals.remove(locals.length - 1)
 
 /**
+ * Optional observer the language server hands to the parser: it records every
+ * global read, every global definition, and the import failures the parser
+ * tolerated instead of aborting. It is null everywhere else — the REPL, the CLI,
+ * the compiler — so nothing changes for them. Names and lines only, no nodes:
+ * the server diffs reads against definitions to flag undefined variables, and
+ * turns the tolerated import failures into one diagnostic each rather than
+ * letting the first of them mask the whole file.
+ */
+final class ParseIntel:
+  final case class GlobalRef(name: String, file: String, line: Int)
+  val refs = mutable.ArrayBuffer.empty[GlobalRef]
+  val importErrors = mutable.ArrayBuffer.empty[SflError]
+  private val defined = mutable.HashSet.empty[String]
+
+  def declare(name: String): Unit = defined += name
+  def ref(name: String, file: String, line: Int): Unit =
+    if !name.startsWith("__") && !name.contains('.') && !name.contains('#') then
+      refs += GlobalRef(name, file, line)
+  def isDefined(name: String): Boolean = defined.contains(name)
+  def definedNames: Iterable[String] = defined
+
+/**
  * Recursive-descent parser that emits already-resolved AST nodes.
  *
  * It replaces the `scala-parser-combinators` grammar, which backtracked heavily, ran
@@ -65,7 +87,13 @@ final class Parser(
      * The REPL parses each entry separately, so an alias bound by one entry has to
      * still be there for the next.
      */
-    val namespaces: mutable.Map[String, String] = mutable.HashMap.empty
+    val namespaces: mutable.Map[String, String] = mutable.HashMap.empty,
+    /**
+     * Language-server mode: when set, global reads and definitions are recorded
+     * and import failures become collected diagnostics instead of aborting the
+     * parse. Null in every other caller. See [[ParseIntel]].
+     */
+    val intel: ParseIntel = null
 ):
   private val toks: Array[Token] = Lexer.tokenize(src)
   private var p: Int = 0
@@ -255,6 +283,7 @@ final class Parser(
       val id = globals.id(key, globalDisplay(name))
       if const then globalConsts += key else globalConsts -= key
       globals.setConst(id, const)
+      if intel != null then intel.declare(name)
       TGlobal(id)
     else
       // Redeclaring in the same block is a mistake worth reporting.
@@ -318,12 +347,18 @@ final class Parser(
   private def getNode(t: Target, name: String, line: Int): Node = t match
     case TLocal(slot)        => new LocalGet(slot, name, line)
     case TOuter(depth, slot) => new OuterGet(depth, slot, name, line)
-    case TGlobal(id)         => new GlobalGet(id, name, line)
+    case TGlobal(id)         =>
+      if intel != null then intel.ref(name, src.name, line)
+      new GlobalGet(id, name, line)
 
-  private def setNode(t: Target, value: Node, line: Int): Node = t match
+  /** `name` is the assigned identifier where the call site knows it; a global
+    * assignment defines the name, and the intel collector needs to hear that. */
+  private def setNode(t: Target, value: Node, line: Int, name: String = ""): Node = t match
     case TLocal(slot)        => new LocalSet(slot, value, line)
     case TOuter(depth, slot) => new OuterSet(depth, slot, value, line)
-    case TGlobal(id)         => new GlobalSet(id, value, line)
+    case TGlobal(id)         =>
+      if intel != null && name.nonEmpty then intel.declare(name)
+      new GlobalSet(id, value, line)
 
   // -------------------------------------------------------------------------
   // Entry points
@@ -423,6 +458,7 @@ final class Parser(
         val key = globalKey(nameTok.text)
         val id = globals.id(key, globalDisplay(nameTok.text))
         globalConsts -= key
+        if intel != null then intel.declare(nameTok.text)
         TGlobal(id)
       else
         val existing = fn.find(nameTok.text)
@@ -523,6 +559,22 @@ final class Parser(
         Some(advance())
       else None
 
+    if intel == null then importResolved(kw, fileTok, alias)
+    else
+      // Language-server mode: one bad import becomes one diagnostic, and the
+      // rest of the file still parses — an editor is mostly looking at files
+      // whose imports are broken precisely while the user is typing them.
+      try importResolved(kw, fileTok, alias)
+      catch
+        case e: SflError =>
+          intel.importErrors += e
+          new Nop(kw.line)
+        case e: IncompleteInput =>
+          intel.importErrors += new ParseError(e.reason, fileTok.pos, src)
+          new Nop(kw.line)
+
+  /** The importing work itself; raises located errors exactly as before. */
+  private def importResolved(kw: Token, fileTok: Token, alias: Option[Token]): Node =
     val path = importer.pathOf(fileTok.text, src, fileTok.pos)
     importer.checkQualification(path, fileTok.text, alias.isDefined, fileTok.pos, src)
     for a <- alias do
@@ -537,7 +589,8 @@ final class Parser(
         // are visible, and inlined so it runs exactly once at the point of import.
         // A qualified import parses the module with its own keys instead.
         val block =
-          try new Parser(SourceRef(path, text), globals, importer, alias.isDefined).parseProgram()
+          try new Parser(SourceRef(path, text), globals, importer, alias.isDefined, intel = intel)
+            .parseProgram()
           finally importer.finish(path)
         // A plain import of a package module is tagged with its origin, so the
         // ahead-of-time compiler may link a prebuilt archive instead of emitting
@@ -755,7 +808,7 @@ final class Parser(
         if isDeclared(start.text) then
           if isConstTarget(start.text) then
             failAt(s"cannot assign to '${start.text}' because it is declared with 'val'", start)
-          return setNode(resolve(start.text), value, start.line)
+          return setNode(resolve(start.text), value, start.line, start.text)
         else
           return setNode(declare(start.text, const = false, start), value, start.line)
       if isCompoundAssign(nxt) then

@@ -63,7 +63,13 @@ libs + 已装包；平代码列内置 336 + 关键字 + 文件内 def/val + 片�
 （内置 + 用户函数 + `别名.函数`）、跳转定义（文件内 + 别名成员 + 普通导入模块，正则级）、
 大纲（documentSymbol，顶层 def/val）。触发字符 `.` `"` `/`，在无关位置（除法、普通字符串、
 浮点数点）应答空列表而非噪音。
-没有：重命名、查找引用、语义高亮、格式化——这些需要评估第二节说的语言服务层
+新增（语义层）：**未定义变量诊断**——Parser 挂可选 ParseIntel 收集器（默认 null 零开销），
+记录全局读/全局定义/容错化的 import 失败；LSP 端 refs−defined−builtins 得未定义集，
+仅在全部 import 成功时启用（防误报），带 Err.suggest 拼写建议；import 失败逐条成诊断，
+文件其余部分照常解析。四个导航 provider（declaration/implementation/typeDefinition 落
+definition，references 词边界匹配）。SFL_HOME/开关经环境变量传给 lsp/dap/build 子进程
+（SFL_LSP_UNDEFINED=off），两端设置页可配，IDEA 侧 Apply 即重启服务器。
+没有：重命名、语义高亮、格式化——这些需要评估第二节说的语言服务层
 （无损 CST、错误恢复、符号模型）。现有"跳转/成员补全"是正则与启发式级别，够用但
 不认作用域；语言服务层落地后按符号模型重做。
 RE2 注意：Scala Native 的正则是 RE2，**不支持前瞻/后顾断言**（JVM 上编译通过、

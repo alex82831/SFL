@@ -104,6 +104,16 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Path to the `sfl` binary. Leave empty to use `sfl` (or `sfl.exe` on Windows) from PATH."
+        },
+        "sfl.home": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "`SFL_HOME` for the language server, debugger and build tasks — the directory whose `libs/` and `packages/` imports search. GUI-launched editors do not inherit your shell's exports, so set it here if installed packages show as unresolved imports."
+        },
+        "sfl.diagnostics.undefinedNames": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Flag reads of variables that nothing defines (this file, its imports, or a builtin)."
         }
       }
     },
