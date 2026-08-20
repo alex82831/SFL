@@ -1,0 +1,22 @@
+// A variable that changes type is boxed rather than rejected; the compiler falls
+// back to the runtime representation exactly where it must and nowhere else.
+var x = 0
+x = 1
+println(x)
+
+var y = 1
+y = "now a string"
+y = [1, 2]
+println(y, typeOf(y))
+
+def describe(v) {
+  if (isNumber(v)) then "number:" + v
+  elsif (isString(v)) then "string:" + v
+  elsif (isArray(v)) then "array/" + size(v)
+  else typeOf(v)
+}
+println(describe(1), describe("s"), describe([1, 2]), describe(null))
+
+// Mixed arithmetic still keeps int and float distinct.
+println(1 + 1, 1 + 1.0, 3 / 2, 3.0 / 2, min(1, 2.5), max(1, 2.5))
+println(typeOf(1 + 1), typeOf(1 + 1.0))

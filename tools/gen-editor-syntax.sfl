@@ -1,0 +1,206 @@
+// Regenerates the editor-facing syntax assets from `sfl syntax`, so the TextMate
+// grammar, the language configuration and the IntelliJ word lists can never drift
+// from the lexer: they are all projections of the same dump.
+//
+//   sfl tools/gen-editor-syntax.sfl
+//
+// Written files:
+//   editors/vscode/syntaxes/sfl.tmLanguage.json
+//   editors/vscode/language-configuration.json
+//   editors/intellij/src/main/resources/syntax/sfl-keywords.txt
+//   editors/intellij/src/main/resources/syntax/sfl-builtins.txt
+
+val root = dirName(dirName(absPath(scriptPath())))
+val exe = exePath() ?? "sfl"
+
+val res = execute("\"" + exe + "\" syntax")
+if (res.code != 0) {
+  eprintln("cannot run 'sfl syntax': " + res.err)
+  exit(1)
+}
+val spec = jsonParse(res.out)
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+// Escapes a literal for use inside an Oniguruma regex.
+def escRe(s) {
+  var r = ""
+  for (ch in split(s, "")) {
+    r = r + (if (contains(r'\^$.|?*+()[]{}', ch)) then r'\' + ch else ch)
+  }
+  r
+}
+
+// Longest spelling first, so the alternation matches |> before |, ?. before ?.
+def altOf(items) {
+  join(map(sortBy(items, (s) -> 0 - length(s)), escRe), "|")
+}
+
+def wordAlt(items) { join(items, "|") }
+
+// ---------------------------------------------------------------------------
+// Classify the keyword list once; the grammar and future assets share it.
+// ---------------------------------------------------------------------------
+
+val constants = filter(spec.keywords, (k) -> contains(["true", "false", "null", "none"], k))
+val decls     = filter(spec.keywords, (k) -> contains(["val", "var", "def"], k))
+val control   = filter(spec.keywords, (k) ->
+  !contains(constants, k) && !contains(decls, k) && k != "import")
+
+val builtinNames = map(spec.builtins, (b) -> b.name)
+
+// Punctuation reads better uncoloured; everything else is an operator.
+val operators = filter(spec.operators, (o) -> !contains([",", ";", ":", "."], o))
+
+// ---------------------------------------------------------------------------
+// TextMate grammar
+// ---------------------------------------------------------------------------
+
+val escapePattern = { "name": "constant.character.escape.sfl", "match": r'\\.' }
+
+val interpolation = {
+  "name": "meta.interpolation.sfl",
+  "begin": r'\$\{',
+  "end": r'\}',
+  "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.sfl" } },
+  "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.sfl" } },
+  "patterns": [ { "include": "$self" } ]
+}
+
+val grammar = {
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "SFL",
+  "scopeName": "source.sfl",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    // Definitions before keywords: the def rule captures both the `def` and the
+    // name, and would never fire if the bare keyword rule consumed `def` first.
+    { "include": "#function-definition" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
+    { "include": "#function-call" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.block.sfl", "begin": r'/\*', "end": r'\*/' },
+        { "name": "comment.line.double-slash.sfl", "match": r'//.*$' }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        // r-strings first: without this, r"..." would match as ident + string.
+        { "name": "string.quoted.raw.sfl", "begin": r'r"', "end": r'"' },
+        { "name": "string.quoted.raw.sfl", "begin": "r'", "end": "'" },
+        {
+          "name": "string.quoted.triple.sfl",
+          "begin": "\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [ escapePattern, interpolation ]
+        },
+        {
+          "name": "string.quoted.double.sfl",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [ escapePattern, interpolation ]
+        },
+        {
+          "name": "string.quoted.single.sfl",
+          "begin": "'",
+          "end": "'",
+          "patterns": [ escapePattern ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.sfl", "match": r'\b0[xX][0-9a-fA-F_]+\b' },
+        { "name": "constant.numeric.binary.sfl", "match": r'\b0[bB][01_]+\b' },
+        { "name": "constant.numeric.octal.sfl", "match": r'\b0[oO][0-7_]+\b' },
+        { "name": "constant.numeric.sfl",
+          "match": r'\b\d[\d_]*(\.[\d_]+)?([eE][+-]?\d+)?\b|(?<![\w$])\.\d[\d_]*\b' }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        { "name": "constant.language.sfl", "match": r'\b(?:' + wordAlt(constants) + r')\b' },
+        { "name": "storage.type.sfl", "match": r'\b(?:' + wordAlt(decls) + r')\b' },
+        { "name": "keyword.control.import.sfl", "match": r'\bimport\b' },
+        { "name": "keyword.control.sfl", "match": r'\b(?:' + wordAlt(control) + r')\b' }
+      ]
+    },
+    "function-definition": {
+      "match": r'\b(def)\s+([A-Za-z_$][A-Za-z0-9_$]*)',
+      "captures": {
+        "1": { "name": "storage.type.sfl" },
+        "2": { "name": "entity.name.function.sfl" }
+      }
+    },
+    "builtins": {
+      "name": "support.function.builtin.sfl",
+      "match": r'\b(?:' + wordAlt(builtinNames) + r')\b'
+    },
+    "function-call": {
+      "name": "entity.name.function.call.sfl",
+      "match": r'\b([A-Za-z_$][A-Za-z0-9_$]*)\s*(?=\()'
+    },
+    "operators": {
+      "name": "keyword.operator.sfl",
+      "match": altOf(operators)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// VSCode language configuration
+// ---------------------------------------------------------------------------
+
+val langCfg = {
+  "comments": { "lineComment": spec.lineComment, "blockComment": spec.blockComment },
+  "brackets": spec.brackets,
+  "autoClosingPairs": [
+    { "open": "{", "close": "}" },
+    { "open": "[", "close": "]" },
+    { "open": "(", "close": ")" },
+    { "open": "\"\"\"", "close": "\"\"\"", "notIn": ["string"] },
+    { "open": "\"", "close": "\"", "notIn": ["string"] },
+    { "open": "'", "close": "'", "notIn": ["string", "comment"] },
+    { "open": "/*", "close": " */", "notIn": ["string"] }
+  ],
+  "surroundingPairs": [
+    ["{", "}"], ["[", "]"], ["(", ")"], ["\"", "\""], ["'", "'"]
+  ],
+  "wordPattern": r'[A-Za-z_$][A-Za-z0-9_$]*',
+  "indentationRules": {
+    "increaseIndentPattern": r'^.*[\{\[\(]\s*(//.*)?$',
+    "decreaseIndentPattern": r'^\s*[\}\]\)]'
+  },
+  "folding": {
+    "markers": {
+      "start": r'^\s*//\s*region\b',
+      "end": r'^\s*//\s*endregion\b'
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Write everything
+// ---------------------------------------------------------------------------
+
+def emit(path, content) {
+  mkdirs(dirName(path))
+  writeFile(path, content)
+  println("wrote " + path)
+}
+
+emit(root + "/editors/vscode/syntaxes/sfl.tmLanguage.json", jsonStringify(grammar, true) + "\n")
+emit(root + "/editors/vscode/language-configuration.json", jsonStringify(langCfg, true) + "\n")
+
+val ijSyntax = root + "/editors/intellij/src/main/resources/syntax"
+emit(ijSyntax + "/sfl-keywords.txt", join(spec.keywords, "\n") + "\n")
+emit(ijSyntax + "/sfl-builtins.txt", join(builtinNames, "\n") + "\n")

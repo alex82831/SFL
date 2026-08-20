@@ -1,0 +1,11 @@
+// A module: `dist` and `origin` are its surface, `_square` and `_origin` are not.
+def _square(n) = n * n
+val _origin = {"x": 0, "y": 0}
+
+def dist(p) = sqrt(_square(p.x) + _square(p.y))
+def origin() = _origin
+def scaleBy(p, k) = {"x": p.x * k, "y": p.y * k}
+
+// A closure inside a module still reaches the module's private names.
+def scaler(k) = (p) -> {"x": p.x * k, "y": p.y * k}
+def squares(ns) = map(ns, (n) -> _square(n))

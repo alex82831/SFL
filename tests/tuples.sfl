@@ -1,0 +1,81 @@
+// Tuples: an immutable, fixed-length kind of its own.
+
+import "lib/assert"
+
+val t = (1, "two", 3.0)
+check("typeOf", typeOf(t), "tuple")
+check("isTuple", [isTuple(t), isTuple([1, 2]), isTuple("x")], [true, false, false])
+check("size", size(t), 3)
+check("index", [t[0], t[1], t[2]], [1, "two", 3.0])
+check("negative index", t[-1], 3.0)
+check("render", toString(t), "(1, \"two\", 3.0)")
+check("nested render", toString((1, (2, 3))), "(1, (2, 3))")
+
+// Equality: element-wise, tuples only.
+check("equal", (1, 2) == (1, 2), true)
+check("unequal element", (1, 2) == (1, 3), false)
+check("unequal length", (1, 2) == (1, 2, 3), false)
+check("tuple is not an array", (1, 2) == [1, 2], false)
+check("numeric equality inside", (1, 2.0) == (1.0, 2), true)
+
+// Comparison: lexicographic, length breaks ties.
+check("compare lt", (1, 2) < (1, 3), true)
+check("compare first wins", (2, 0) > (1, 99), true)
+check("compare prefix shorter", (1, 2) < (1, 2, 0), true)
+check("sortable", sort([(2, "b"), (1, "z"), (1, "a")]),
+  [(1, "a"), (1, "z"), (2, "b")])
+checkFails("tuple vs int is incomparable", () -> (1, 2) < 3, "cannot compare")
+
+// Immutability.
+checkFails("assignment is refused", () -> { val p = (1, 2); p[0] = 9; p }, "immutable")
+
+// Iteration and conversion.
+var acc = 0
+for (x in (10, 20, 30)) { acc += x }
+check("iteration", acc, 60)
+check("toArray via iter", toArray(iter((1, 2))), [1, 2])
+
+// deepCopy copies mutable elements inside.
+val inner = [1]
+val dt = (inner, 2)
+val dc = deepCopy(dt)
+push(inner, 99)
+check("deepCopy recurses into elements", [size(dt[0]), size(dc[0])], [2, 1])
+
+// Grouping is untouched: (x) is not a one-tuple.
+check("parens still group", (5) + 1, 6)
+check("trailing comma tolerated", size((1, 2,)), 2)
+
+// JSON: no JSON form, by decision — the message says what to do instead.
+checkFails("jsonStringify refuses tuples", () -> jsonStringify((1, 2)), "cannot convert tuple")
+check("the refusal says what to do instead",
+  contains(join(attempt(() -> jsonStringify((1, 2))).error.help, " "), "toArray"), true)
+checkFails("out of bounds names the tuple", () -> (1, 2)[5], "tuple index 5")
+
+// tupleOf errors carry the signature help line in BOTH engines — the interpreter
+// appends it in runNative, the C primitive must do so by hand (a divergence the
+// differential check caught once; this pins the fix).
+checkFails("tupleOf rejects one element", () -> tupleOf([1]), "at least two")
+check("tupleOf error carries the signature",
+  contains(join(attempt(() -> tupleOf([1])).error.help, " "), "tupleOf(arr)"), true)
+check("tupleOf round trip", tupleOf(toArray(iter((1, 2, 3)))), (1, 2, 3))
+
+// Functions returning several values, destructured at the call site.
+def divmod(a, b) = (a / b, a % b)
+val (q, r) = divmod(17, 5)
+check("divmod destructure", [q, r], [3, 2])
+
+// Multidimensional sugar and the nd builtins.
+val g = ndarray([2, 3], 0)
+g[0, 0] = 1
+g[1, 2] = 7
+g[0, 1] += 5
+check("multi-index write and read", [g[0, 0], g[0, 1], g[1, 2], g[1, 0]], [1, 5, 7, 0])
+check("shape", shape(g), [2, 3])
+check("shape of deep ndarray", shape(ndarray([2, 2, 2], "x")), [2, 2, 2])
+check("isRectangular", [isRectangular(g), isRectangular([[1, 2], [3]])], [true, false])
+check("rows are independent", { g[0, 2] = 9; g[1, 2] }, 7)
+checkFails("ndarray rejects a bad dim", () -> ndarray([2, -1], 0), "non-negative")
+check("multi-index on literals", [[1, 2], [3, 4]][1, 0], 3)
+
+report("tuples")

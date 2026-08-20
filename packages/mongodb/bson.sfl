@@ -1,0 +1,402 @@
+// mongodb/bson — BSON encoding and decoding between SFL values and byte arrays.
+//
+// The mapping is the natural one: objects <-> documents, arrays <-> arrays,
+// string/int/float/bool/null <-> their BSON counterparts. An int encodes as
+// int32 when it fits and int64 otherwise, the way most drivers write ints;
+// both decode back to a plain int.
+//
+// BSON types SFL has no native shape for travel as single-key wrapper objects,
+// readable and constructible by hand:
+//
+//   {"$oid": "663d..."}                     ObjectId       (newObjectId() makes one)
+//   {"$date": 1723972000000}                UTC datetime, ms since epoch
+//   {"$binary": [1, 2, 3], "$subtype": 0}   binary          (mongoBinary() makes one)
+//   {"$regex": "^a", "$options": "i"}       regular expression
+//   {"$timestamp": {"t": sec, "i": n}}      internal timestamp
+//   {"$decimal128": "<32 hex chars>"}       decimal128, raw bits
+//   {"$code": "function(){}"}               JavaScript code
+//   {"$minKey": true} / {"$maxKey": true}   min/max key
+//   {"$int32": n} / {"$int64": n}           force a specific int width
+//
+// Everything else — functions, handles, iterators — has no BSON form and is
+// refused with an error naming the offending key.
+
+import "bytes"
+
+// ---------------------------------------------------------------- encoding
+
+// Encodes a document (an object) as BSON bytes.
+def bsonEncode(doc) {
+  if (!isObject(doc)) then error("bson: expected an object at the top level, got " + typeOf(doc))
+  val out = []
+  _encDoc(out, doc, "<root>")
+  out
+}
+
+def _encDoc(out, doc, where) {
+  val start = length(out)
+  pushI32le(out, 0) // patched once the end is known
+  for (k in doc) {
+    _encElem(out, k, doc[k], where)
+  }
+  push(out, 0)
+  patchI32le(out, start, length(out) - start)
+}
+
+def _encArray(out, arr, where) {
+  val start = length(out)
+  pushI32le(out, 0)
+  var i = 0
+  while (i < length(arr)) {
+    _encElem(out, toString(i), arr[i], where)
+    i += 1
+  }
+  push(out, 0)
+  patchI32le(out, start, length(out) - start)
+}
+
+// One element: type byte, name as a cstring, then the value.
+def _encElem(out, key, v, where) {
+  val here = where + "." + key
+  val ext = _extKind(v)
+  if (ext != null) {
+    _encExt(out, key, v, ext, here)
+    return null
+  }
+  if (isNull(v)) {
+    push(out, 0x0a)
+    _encCString(out, key, here)
+  } elsif (isBool(v)) {
+    push(out, 0x08)
+    _encCString(out, key, here)
+    push(out, if (v) then 1 else 0)
+  } elsif (isInt(v)) {
+    if (v >= -2147483648 && v <= 2147483647) {
+      push(out, 0x10)
+      _encCString(out, key, here)
+      pushI32le(out, v)
+    } else {
+      push(out, 0x12)
+      _encCString(out, key, here)
+      pushI64le(out, v)
+    }
+  } elsif (isFloat(v)) {
+    push(out, 0x01)
+    _encCString(out, key, here)
+    pushF64le(out, v)
+  } elsif (isString(v)) {
+    push(out, 0x02)
+    _encCString(out, key, here)
+    _encString(out, v)
+  } elsif (isArray(v) || isTuple(v)) {
+    push(out, 0x04)
+    _encCString(out, key, here)
+    _encArray(out, v, here)
+  } elsif (isObject(v)) {
+    push(out, 0x03)
+    _encCString(out, key, here)
+    _encDoc(out, v, here)
+  } else {
+    error("bson: cannot encode a " + typeOf(v) + " (at " + here + ")")
+  }
+}
+
+// The extended-type wrappers listed in the header. Returns the marker key when
+// v is exactly such a wrapper, and null for any ordinary object.
+def _extKind(v) {
+  if (!isObject(v)) then return null
+  val n = size(v)
+  if (n == 1 || n == 2) {
+    if (contains(v, "$binary")) {
+      if (n == 1 || contains(v, "$subtype")) then return "$binary"
+      return null
+    }
+    if (n == 2 && contains(v, "$regex") && contains(v, "$options")) then return "$regex"
+  }
+  if (n != 1) then return null
+  if (contains(v, "$oid")) then return "$oid"
+  if (contains(v, "$date")) then return "$date"
+  if (contains(v, "$regex")) then return "$regex"
+  if (contains(v, "$timestamp")) then return "$timestamp"
+  if (contains(v, "$decimal128")) then return "$decimal128"
+  if (contains(v, "$code")) then return "$code"
+  if (contains(v, "$minKey")) then return "$minKey"
+  if (contains(v, "$maxKey")) then return "$maxKey"
+  if (contains(v, "$int32")) then return "$int32"
+  if (contains(v, "$int64")) then return "$int64"
+  null
+}
+
+def _encExt(out, key, v, kind, here) {
+  if (kind == "$oid") {
+    val hex = v["$oid"]
+    if (!isString(hex) || length(hex) != 24) {
+      error("bson: $oid must be a 24-character hex string (at " + here + ")")
+    }
+    push(out, 0x07)
+    _encCString(out, key, here)
+    bytesAppend(out, _hexOrBad(hex, here))
+  } elsif (kind == "$date") {
+    val ms = v["$date"]
+    if (!isInt(ms)) then error("bson: $date must be an int of epoch milliseconds (at " + here + ")")
+    push(out, 0x09)
+    _encCString(out, key, here)
+    pushI64le(out, ms)
+  } elsif (kind == "$binary") {
+    val data = v["$binary"]
+    val sub = if (contains(v, "$subtype")) then v["$subtype"] else 0
+    if (!isArray(data)) then error("bson: $binary must hold a byte array (at " + here + ")")
+    if (!isInt(sub) || sub < 0 || sub > 255) {
+      error("bson: $subtype must be an int in 0..255 (at " + here + ")")
+    }
+    push(out, 0x05)
+    _encCString(out, key, here)
+    pushI32le(out, length(data))
+    push(out, sub)
+    bytesAppend(out, data)
+  } elsif (kind == "$regex") {
+    push(out, 0x0b)
+    _encCString(out, key, here)
+    _encCString(out, v["$regex"], here)
+    _encCString(out, if (contains(v, "$options")) then v["$options"] else "", here)
+  } elsif (kind == "$timestamp") {
+    val ts = v["$timestamp"]
+    if (!isObject(ts) || !isInt(ts?.t) || !isInt(ts?.i)) {
+      error("bson: $timestamp must be {t: seconds, i: increment} (at " + here + ")")
+    }
+    push(out, 0x11)
+    _encCString(out, key, here)
+    pushI32le(out, ts.i)
+    pushI32le(out, ts.t)
+  } elsif (kind == "$decimal128") {
+    val hex = v["$decimal128"]
+    if (!isString(hex) || length(hex) != 32) {
+      error("bson: $decimal128 must be a 32-character hex string (at " + here + ")")
+    }
+    push(out, 0x13)
+    _encCString(out, key, here)
+    bytesAppend(out, _hexOrBad(hex, here))
+  } elsif (kind == "$code") {
+    push(out, 0x0d)
+    _encCString(out, key, here)
+    _encString(out, v["$code"])
+  } elsif (kind == "$minKey") {
+    push(out, 0xff)
+    _encCString(out, key, here)
+  } elsif (kind == "$maxKey") {
+    push(out, 0x7f)
+    _encCString(out, key, here)
+  } elsif (kind == "$int32") {
+    val n = v["$int32"]
+    if (!isInt(n) || n < -2147483648 || n > 2147483647) {
+      error("bson: $int32 is out of range (at " + here + ")")
+    }
+    push(out, 0x10)
+    _encCString(out, key, here)
+    pushI32le(out, n)
+  } else { // $int64
+    val n = v["$int64"]
+    if (!isInt(n)) then error("bson: $int64 must be an int (at " + here + ")")
+    push(out, 0x12)
+    _encCString(out, key, here)
+    pushI64le(out, n)
+  }
+}
+
+def _hexOrBad(hex, here) {
+  val r = attempt(() -> hexDecodeBytes(toLower(hex)))
+  if (r?.error != null) then error("bson: invalid hex (at " + here + ")")
+  r.value
+}
+
+// A name: UTF-8 bytes with no NUL, then a terminating NUL.
+def _encCString(out, s, here) {
+  if (!isString(s)) then error("bson: key must be a string (at " + here + ")")
+  val b = utf8Encode(s)
+  for (x in b) {
+    if (x == 0) then error("bson: a key or pattern must not contain NUL (at " + here + ")")
+    push(out, x)
+  }
+  push(out, 0)
+  out
+}
+
+// A string value: int32 byte length including the NUL, bytes, NUL.
+def _encString(out, s) {
+  if (!isString(s)) then error("bson: expected a string value, got " + typeOf(s))
+  val b = utf8Encode(s)
+  pushI32le(out, length(b) + 1)
+  bytesAppend(out, b)
+  push(out, 0)
+  out
+}
+
+// ---------------------------------------------------------------- decoding
+
+// Decodes the BSON document starting at b[at] (default 0) back into an object.
+def bsonDecode(b, at = 0) {
+  if (!isArray(b)) then error("bson: expected a byte array, got " + typeOf(b))
+  val (doc, next) = _decDoc(b, at)
+  doc
+}
+
+def _need(b, at, n) {
+  if (at + n > length(b)) then error("bson: truncated document (at byte " + toString(at) + ")")
+  null
+}
+
+def _decDoc(b, at) {
+  _need(b, at, 5)
+  val total = readI32le(b, at)
+  if (total < 5 || at + total > length(b)) {
+    error("bson: document length " + toString(total) + " does not fit (at byte " + toString(at) + ")")
+  }
+  val doc = {}
+  var pos = at + 4
+  while (true) {
+    _need(b, pos, 1)
+    val t = b[pos]
+    pos += 1
+    if (t == 0) then break
+    val (key, afterKey) = _decCString(b, pos)
+    val (v, next) = _decValue(b, afterKey, t)
+    doc[key] = v
+    pos = next
+  }
+  if (pos != at + total) {
+    error("bson: document length disagrees with its contents (at byte " + toString(at) + ")")
+  }
+  (doc, pos)
+}
+
+def _decArrayDoc(b, at) {
+  // An array is a document with keys "0", "1", ...; the keys are trusted to be
+  // in order, which the server guarantees and re-encoding preserves.
+  val (doc, next) = _decDoc(b, at)
+  val out = []
+  for (k in doc) { push(out, doc[k]) }
+  (out, next)
+}
+
+def _decCString(b, at) {
+  var end = at
+  while (true) {
+    _need(b, end, 1)
+    if (b[end] == 0) then break
+    end += 1
+  }
+  (utf8Decode(bytesSlice(b, at, end)), end + 1)
+}
+
+def _readU32le(b, at) {
+  b[at] + shiftLeft(b[at + 1], 8) + shiftLeft(b[at + 2], 16) + shiftLeft(b[at + 3], 24)
+}
+
+def _decValue(b, at, t) {
+  if (t == 0x01) {
+    _need(b, at, 8)
+    (readF64le(b, at), at + 8)
+  } elsif (t == 0x02 || t == 0x0d || t == 0x0e) {
+    _need(b, at, 4)
+    val n = readI32le(b, at)
+    if (n < 1) then error("bson: bad string length (at byte " + toString(at) + ")")
+    _need(b, at + 4, n)
+    val s = utf8Decode(bytesSlice(b, at + 4, at + 4 + n - 1))
+    val v = if (t == 0x0d) then {"$code": s} else s
+    (v, at + 4 + n)
+  } elsif (t == 0x03) {
+    _decDoc(b, at)
+  } elsif (t == 0x04) {
+    _decArrayDoc(b, at)
+  } elsif (t == 0x05) {
+    _need(b, at, 5)
+    val n = readI32le(b, at)
+    val sub = b[at + 4]
+    _need(b, at + 5, n)
+    (({"$binary": bytesSlice(b, at + 5, at + 5 + n), "$subtype": sub}), at + 5 + n)
+  } elsif (t == 0x06) {
+    (null, at) // deprecated undefined
+  } elsif (t == 0x07) {
+    _need(b, at, 12)
+    (({"$oid": hexEncodeBytes(bytesSlice(b, at, at + 12))}), at + 12)
+  } elsif (t == 0x08) {
+    _need(b, at, 1)
+    (b[at] != 0, at + 1)
+  } elsif (t == 0x09) {
+    _need(b, at, 8)
+    (({"$date": readI64le(b, at)}), at + 8)
+  } elsif (t == 0x0a) {
+    (null, at)
+  } elsif (t == 0x0b) {
+    val (pat, afterPat) = _decCString(b, at)
+    val (opts, next) = _decCString(b, afterPat)
+    (({"$regex": pat, "$options": opts}), next)
+  } elsif (t == 0x0c) {
+    // deprecated DBPointer: a string then 12 oid bytes
+    _need(b, at, 4)
+    val n = readI32le(b, at)
+    _need(b, at + 4, n + 12)
+    val ref = utf8Decode(bytesSlice(b, at + 4, at + 4 + n - 1))
+    val oid = hexEncodeBytes(bytesSlice(b, at + 4 + n, at + 4 + n + 12))
+    (({"$dbPointer": {"$ref": ref, "$id": {"$oid": oid}}}), at + 4 + n + 12)
+  } elsif (t == 0x0f) {
+    // code with scope: int32 total, string, document
+    _need(b, at, 4)
+    val (code, afterCode) = _decValue(b, at + 4, 0x02)
+    val (scope, next) = _decDoc(b, afterCode)
+    (({"$code": code, "$scope": scope}), next)
+  } elsif (t == 0x10) {
+    _need(b, at, 4)
+    (readI32le(b, at), at + 4)
+  } elsif (t == 0x11) {
+    _need(b, at, 8)
+    (({"$timestamp": {"t": _readU32le(b, at + 4), "i": _readU32le(b, at)}}), at + 8)
+  } elsif (t == 0x12) {
+    _need(b, at, 8)
+    (readI64le(b, at), at + 8)
+  } elsif (t == 0x13) {
+    _need(b, at, 16)
+    (({"$decimal128": hexEncodeBytes(bytesSlice(b, at, at + 16))}), at + 16)
+  } elsif (t == 0x7f) {
+    (({"$maxKey": true}), at)
+  } elsif (t == 0xff) {
+    (({"$minKey": true}), at)
+  } else {
+    error("bson: unknown element type " + toString(t) + " (at byte " + toString(at) + ")")
+  }
+}
+
+// ---------------------------------------------------------------- ObjectId
+
+// The per-process 5 random bytes and counter the ObjectId spec asks for.
+val _oidRand = randomBytes(5)
+val _oidCounter = atomic(readI32le(bytesAppend(randomBytes(3), [0]), 0))
+
+// A fresh ObjectId wrapper: 4 bytes of seconds, 5 random-per-process bytes,
+// and a 3-byte counter, exactly the layout every driver writes.
+def newObjectId() {
+  val sec = timeMillis() / 1000
+  val n = bitAnd(atomicAdd(_oidCounter, 1), 0xffffff)
+  val b = []
+  push(b, bitAnd(shiftRightU(sec, 24), 0xff))
+  push(b, bitAnd(shiftRightU(sec, 16), 0xff))
+  push(b, bitAnd(shiftRightU(sec, 8), 0xff))
+  push(b, bitAnd(sec, 0xff))
+  bytesAppend(b, _oidRand)
+  push(b, bitAnd(shiftRightU(n, 16), 0xff))
+  push(b, bitAnd(shiftRightU(n, 8), 0xff))
+  push(b, bitAnd(n, 0xff))
+  {"$oid": hexEncodeBytes(b)}
+}
+
+// The creation time of an ObjectId wrapper, as epoch milliseconds.
+def oidTimestamp(oid) {
+  if (_extKind(oid) != "$oid") then error("mongodb: oidTimestamp expects an {\"$oid\": ...} wrapper")
+  val b = hexDecodeBytes(oid["$oid"])
+  (shiftLeft(b[0], 24) + shiftLeft(b[1], 16) + shiftLeft(b[2], 8) + b[3]) * 1000
+}
+
+// Convenience constructors for the wrapper types.
+def mongoDate(ms = null) = {"$date": ms ?? timeMillis()}
+def mongoBinary(bytes, subtype = 0) = {"$binary": bytes, "$subtype": subtype}
+def mongoRegex(pattern, options = "") = {"$regex": pattern, "$options": options}

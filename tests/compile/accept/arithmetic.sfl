@@ -1,0 +1,10 @@
+// Integer and float arithmetic, precedence, mixed operands.
+println(2 + 3 * 4, (2 + 3) * 4, 7 / 2, 7 % 3, -7 / 2, -7 % 3)
+println(7.0 / 2, 1 + 2.5, 2.5 * 4, 10.0 % 3.0)
+println(1 + 2 - 3 * 4 / 2 % 3)
+val big = 9007199254740993
+println(big, big + 1, big * 2)
+println(0 - 5, -(3 + 4))
+val f = 0.1
+println(f + 0.2, f * 3.0, 1.0 / 3.0)
+println(1e3, 1.5e-3)

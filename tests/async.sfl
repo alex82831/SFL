@@ -1,0 +1,231 @@
+// Asynchronous I/O and futures: poll() readiness, awaitAny() first-completion, and
+// the async module (async, andThen, race, withTimeout, allSettled) built on them.
+//
+// Nothing here decides pass or fail by racing the clock. Readiness is always forced
+// by this test's own writes before it is asserted, and every ordering assertion
+// keeps at least 100ms between the thread that must win and the next one, so a
+// slow machine reorders nothing.
+
+import "lib/assert"
+
+// ------------------------------------------------------------------ poll: sockets
+
+val srv = serverSocket(0)
+val port = serverPort(srv)
+val client = connect("127.0.0.1", port)
+val conn = accept(srv, 5000)
+
+check("a silent connection is not ready", poll([conn], 0), [])
+check("a bounded wait on silence times out to empty", poll([conn], 120), [])
+socketWriteLine(client, "wake up")
+check("a written-to connection polls ready", poll([conn], 5000), [conn])
+check("readiness is reported, never consumed", socketReadLine(conn, 5000), "wake up")
+check("consuming the only line consumes the readiness", poll([conn], 0), [])
+
+// The default timeout blocks until something is ready; a writer thread supplies it.
+val late = spawn(() -> { sleep(150); socketWriteLine(client, "later"); "wrote" })
+check("poll with no timeout blocks until data arrives", poll([conn]), [conn])
+check("the writer thread finished", await(late), "wrote")
+check("and the line it wrote is intact", socketReadLine(conn, 5000), "later")
+
+// A negative timeout is the same "forever" spelled out.
+socketWriteLine(client, "again")
+check("a negative timeout means block, not error", poll([conn], -5), [conn])
+check("draining after the negative-timeout poll", socketReadLine(conn, 5000), "again")
+
+// A partial line a timeout interrupted is held by the handle, and held bytes count
+// as ready: they can never arrive on the descriptor again.
+socketWrite(client, "half a line ")
+check("a timeout mid-line yields null", socketReadLine(conn, 150), null)
+check("but the held partial counts as ready", poll([conn], 0), [conn])
+socketWriteLine(client, "and the rest")
+check("the held partial is not lost", socketReadLine(conn, 5000), "half a line and the rest")
+
+// ------------------------------------------- poll: servers, order, and validation
+
+val srv2 = serverSocket(0)
+check("a server with nobody knocking is not ready", poll([srv2], 0), [])
+val client2 = connect("127.0.0.1", serverPort(srv2))
+check("a pending connection makes a server acceptable", poll([srv2], 5000), [srv2])
+val conn2 = accept(srv2, 5000)
+
+// Input order is preserved, whatever order things became ready in. Each handle is
+// confirmed ready on its own first — poll answers the moment anything is ready, so
+// only a probe over two already-ready handles is guaranteed to list both.
+socketWriteLine(client2, "b")
+socketWriteLine(client, "a")
+check("each connection becomes ready on its own",
+  [poll([conn], 5000), poll([conn2], 5000)], [[conn], [conn2]])
+check("the ready subset keeps input order", poll([conn, conn2], 0), [conn, conn2])
+check("draining conn", socketReadLine(conn, 5000), "a")
+check("draining conn2", socketReadLine(conn2, 5000), "b")
+
+check("empty input returns empty at once, never blocking", poll([]), [])
+check("empty input ignores the timeout too", poll([], 5000), [])
+
+checkFails("a non-handle element is refused", () -> poll([42]), "element 1 is int, not a pollable handle")
+checkFails("the first offender wins", () -> poll([conn, "socket"]), "element 2 is string")
+checkFails("a thread handle is not pollable", () -> poll([late]), "element 1 is thread")
+checkFails("handles must arrive in an array", () -> poll(conn), "must be an array")
+checkFails("the timeout must be an integer", () -> poll([conn], "soon"), "must be an integer")
+
+// ------------------------------------------------------------- poll: plain files
+
+val path = tempFile(".sfl-async")
+writeFile(path, "line one\nline two\n")
+val f = openFile(path)
+check("a disk file is always ready", poll([f], 0), [f])
+check("a file at end of stream still polls ready", { fileReadLine(f); fileReadLine(f); fileReadLine(f); poll([f], 0) }, [f])
+
+val wf = openFile(path, "w")
+checkFails("a file open for writing cannot be polled", () -> poll([wf]), "is open for writing")
+fileClose(wf)
+checkFails("a closed file raises what its read would", () -> poll([f, wf]), "Stream closed")
+fileClose(f)
+
+// ------------------------------------------------------------- poll: subprocesses
+
+// cat stays silent until fed, so not-ready is not a race.
+val child = processStart(["cat"])
+check("a silent child's stdout is not ready", poll([child], 0), [])
+processWriteLine(child, "echoed")
+check("output makes the child pollable", poll([child], 5000), [child])
+check("and the output is what was echoed", processReadLine(child), "echoed")
+processCloseInput(child)
+check("end of stream counts as ready, as POSIX says", poll([child], 5000), [child])
+check("the stream really is over", processReadLine(child), null)
+check("the child exits cleanly", processWait(child), 0)
+
+// -------------------------------------------------- poll: closed socket handles
+
+val gone = connect("127.0.0.1", port)
+val goneServer = accept(srv, 5000)
+closeSocket(gone)
+checkFails("a closed connection raises what its read would", () -> poll([gone]), "Socket closed")
+closeSocket(goneServer)
+closeServer(srv2)
+checkFails("a closed server raises the same", () -> poll([srv2], 0), "Socket closed")
+
+// --------------------------------------------------------------------- awaitAny
+
+// The margins are wide: the winner is done 350ms before anyone else can be.
+val slowA = spawn(() -> { sleep(400); "slowA" })
+val quick = spawn(() -> { sleep(50); "quick" })
+val slowB = spawn(() -> { sleep(800); "slowB" })
+check("awaitAny picks the first completion", awaitAny([slowA, quick, slowB]), 1)
+check("the winner's value is intact", await(quick), "quick")
+
+// Once everything is done, the lowest index wins the scan.
+awaitAll([slowA, slowB])
+check("the lowest finished index wins", awaitAny([slowA, quick, slowB]), 0)
+check("a finished thread satisfies a zero-timeout probe", awaitAny([slowA], 0), 0)
+check("a negative timeout means block, and it is already done", awaitAny([slowA], -7), 0)
+
+val sluggish = spawn(() -> { sleep(1200); "eventually" })
+check("nobody done within the timeout gives -1", awaitAny([sluggish], 100), -1)
+check("empty input gives -1 at once, never blocking", awaitAny([]), -1)
+check("empty input ignores the timeout too", awaitAny([], -1), -1)
+check("the straggler can still be awaited", await(sluggish), "eventually")
+
+// A failed thread counts as complete; the failure stays await's to report.
+val doomed = spawn(() -> error("doom arrived"))
+check("a failed thread completes awaitAny", awaitAny([doomed], 5000), 0)
+checkFails("await still reports the failure afterwards", () -> await(doomed), "doom arrived")
+
+checkFails("a non-thread element is refused", () -> awaitAny([slowA, 9]), "element 2 is int, not a thread")
+checkFails("threads must arrive in an array", () -> awaitAny(slowA), "must be an array")
+checkFails("the timeout must be an integer", () -> awaitAny([slowA], []), "must be an integer")
+
+// ----------------------------------------------------------------- async module
+
+check("async runs the function on a thread", await(async(() -> 6 * 7)), 42)
+check("async passes arguments through", await(async((a, b) -> a + b, 40, 2)), 42)
+check("an async thread is a real thread", startsWith(threadName(async(() -> null)), "thread-"), true)
+
+checkFails("async wants a function first", () -> async(42), "must be a function")
+checkFails("async has apply's 16-argument ceiling",
+  () -> async((...xs) -> xs, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17),
+  "more than 16 arguments")
+
+check("andThen chains a computation", await(andThen(async(() -> 6), (x) -> x * 7)), 42)
+check("andThen chains onto andThen",
+  await(andThen(andThen(async(() -> 1), (x) -> x + 1), (x) -> x * 10)), 20)
+checkFails("a failure travels down the chain",
+  () -> await(andThen(async(() -> error("first stage failed")), (x) -> x)), "first stage failed")
+checkFails("andThen wants a thread first", () -> andThen(42, (x) -> x), "must be a thread")
+checkFails("andThen wants a function second", () -> andThen(async(() -> 1), 42), "must be a function")
+
+// race: the winner is done 350ms before the loser can be.
+check("race hands back [index, value]",
+  race([async(() -> { sleep(400); "tortoise" }), async(() -> { sleep(50); "hare" })]), [1, "hare"])
+check("race on a finished thread is immediate", race([quick]), [0, "quick"])
+check("race times out to null", race([async(() -> { sleep(1200); "late" })], 100), null)
+checkFails("a winner that failed re-raises", () -> race([async(() -> error("winner blew up"))]), "winner blew up")
+checkFails("race wants an array", () -> race(42), "must be an array")
+checkFails("race's element errors are awaitAny's", () -> race([7]), "awaitAny: element 1 is int")
+
+check("withTimeout inside the limit", withTimeout(async(() -> { sleep(50); "made it" }), 5000), [true, "made it"])
+check("withTimeout past the limit", withTimeout(async(() -> { sleep(1200); "too late" }), 100), [false, null])
+checkFails("withTimeout wants a thread", () -> withTimeout("soon", 100), "must be a thread")
+checkFails("withTimeout's timeout errors are awaitAny's", () -> withTimeout(quick, "soon"), "awaitAny: argument 2")
+
+// allSettled: every outcome, in input order, no failure hiding the rest.
+val settled = allSettled([
+  async(() -> { sleep(150); "waited for" }),
+  async(() -> error("bad luck")),
+  async(() -> 3)
+])
+check("allSettled keeps input order", settled[0], {"ok": true, "value": "waited for"})
+check("a success is ok/value", settled[2], {"ok": true, "value": 3})
+check("a failure is ok/error", settled[1].ok, false)
+checkTrue("the error is the message await would raise", contains(settled[1].error, "bad luck"))
+check("keys arrive in a fixed order", keys(settled[0]), ["ok", "value"])
+check("the failed entry's keys too", keys(settled[1]), ["ok", "error"])
+check("allSettled of nothing is nothing", allSettled([]), [])
+
+val oddSettled = allSettled([42])
+check("a non-thread element settles as an error", oddSettled[0].ok, false)
+checkTrue("and says what it wanted", contains(oddSettled[0].error, "must be a thread"))
+checkFails("allSettled wants an array", () -> allSettled("threads"), "must be an array")
+
+// ------------------------------------------------- everything used together
+
+// A tiny fan-out: three sockets served by threads, multiplexed with poll until
+// every reply arrives, then the workers collected with allSettled.
+val hub = serverSocket(0)
+val hubPort = serverPort(hub)
+val workers = map(range(3), (i) -> async((n) -> {
+  val c = connect("127.0.0.1", hubPort)
+  socketWriteLine(c, toString(n * 111))
+  closeSocket(c)
+  n
+}, i))
+var conns = []
+while (length(conns) < 3) {
+  val readySrv = poll([hub], 5000)
+  if (length(readySrv) == 1) {
+    push(conns, accept(hub, 5000))
+  }
+}
+var got = []
+while (length(got) < 3) {
+  for (c in poll(conns, 5000)) {
+    val line = socketReadLine(c, 5000)
+    if (!isNull(line)) {
+      push(got, toInt(line))
+    }
+  }
+}
+check("three multiplexed replies, one poll loop", sort(got), [0, 111, 222])
+check("the workers all settled cleanly", allSettled(workers),
+  [{"ok": true, "value": 0}, {"ok": true, "value": 1}, {"ok": true, "value": 2}])
+for (c in conns) { closeSocket(c) }
+closeServer(hub)
+closeSocket(client)
+closeSocket(client2)
+closeSocket(conn)
+closeSocket(conn2)
+closeServer(srv)
+removeFile(path)
+
+report("async")

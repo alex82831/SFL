@@ -1,0 +1,70 @@
+// Multidimensional arrays, represented as nested rectangular arrays. The syntax
+// a[i, j] is parser sugar for a[i][j], so nothing here is a new kind of value —
+// these builders and probes are all the support the representation needs.
+
+// A dims-array-first signature, because a trailing fill would be ambiguous with a
+// third dimension: ndarray([2, 3], 0) is a 2×3 grid of zeros.
+def ndarray(dims, fill = null) {
+  _ndArgArr(dims, 1, "ndarray")
+  if (size(dims) == 0) { error("ndarray: dims must name at least one dimension") }
+  for (d in dims) {
+    if (!isInt(d) || d < 0) {
+      error("ndarray: every dimension must be a non-negative integer, got ${_ndShow(d)}")
+    }
+  }
+  _ndBuild(dims, 0, fill)
+}
+
+def _ndBuild(dims, at, fill) {
+  val n = dims[at]
+  if (at == size(dims) - 1) then newArray(n, fill)
+  else {
+    val out = newArray(n, null)
+    for (i in range(n)) { out[i] = _ndBuild(dims, at + 1, fill) }
+    out
+  }
+}
+
+// The dimensions of a nested-array value, walking first elements: shape([[1,2],[3,4]])
+// is [2, 2]. Stops where nesting stops, so a ragged array reports its outer shape only.
+def shape(a) {
+  val out = []
+  var cur = a
+  while (isArray(cur)) {
+    push(out, size(cur))
+    if (size(cur) == 0) { return out }
+    cur = cur[0]
+  }
+  out
+}
+
+// True when every row of every level has the length shape() reports — the property
+// ndarray() guarantees and hand-built nests may lack.
+def isRectangular(a) {
+  if (!isArray(a)) { return false }
+  _ndRect(a, shape(a), 0)
+}
+
+def _ndRect(a, dims, at) {
+  if (at >= size(dims)) { return true }
+  if (!isArray(a) || size(a) != dims[at]) { return false }
+  if (at == size(dims) - 1) { return true }
+  var ok = true
+  for (row in a) {
+    if (!_ndRect(row, dims, at + 1)) { ok = false; break }
+  }
+  ok
+}
+
+// The interpreter renders the offending dimension with repr, unshortened. toString
+// is that repr for everything except strings, which it passes through bare;
+// jsonStringify is that repr for strings, so between them every value comes out
+// exactly as the native prints it.
+def _ndShow(v) = if (isString(v)) then jsonStringify(v) else toString(v)
+
+def _ndArgArr(v, i, fn) {
+  if (!isArray(v)) {
+    error("${fn}: argument ${i} must be an array, got ${typeOf(v)}")
+  }
+  v
+}

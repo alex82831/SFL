@@ -1,0 +1,89 @@
+// mongodb/wire — the OP_MSG wire protocol over a TCP connection.
+//
+// Every exchange since MongoDB 3.6 is one opcode: a 16-byte header, a flags
+// word, and a single BSON body section. This module frames commands, reads
+// replies whole, and turns {ok: 0} into a raised error. One request is in
+// flight per connection at a time, guarded by a mutex, so a client can be
+// shared between threads.
+
+import "bson"
+import "bytes"
+
+val _OP_MSG = 2013
+val _requestId = atomic(0)
+
+// Sends one command document and returns the reply document. `state` is the
+// connection state object mongoConnect builds: {sock, timeoutMs, lock}.
+def wireCommand(state, doc) {
+  withLock(state.lock, () -> {
+    _send(state, doc)
+    _receive(state)
+  })
+}
+
+def _send(state, doc) {
+  val body = bsonEncode(doc)
+  val id = atomicAdd(_requestId, 1)
+  val msg = []
+  pushI32le(msg, 16 + 4 + 1 + length(body)) // header + flagBits + section kind
+  pushI32le(msg, id)
+  pushI32le(msg, 0)
+  pushI32le(msg, _OP_MSG)
+  pushI32le(msg, 0) // flagBits: no checksum, no moreToCome
+  push(msg, 0)      // section kind 0: body
+  bytesAppend(msg, body)
+  socketWriteBytes(state.sock, msg)
+}
+
+// Reads exactly n bytes, or raises: the server never leaves a frame half sent,
+// so a short read means the connection died or the deadline passed.
+def _readN(state, n) {
+  val out = []
+  while (length(out) < n) {
+    val chunk = socketReadBytes(state.sock, n - length(out), state.timeoutMs)
+    if (chunk == null) {
+      error("mongodb: timed out after " + toString(state.timeoutMs) + "ms waiting for the server")
+    }
+    if (length(chunk) == 0) then error("mongodb: the server closed the connection")
+    bytesAppend(out, chunk)
+  }
+  out
+}
+
+def _receive(state) {
+  val head = _readN(state, 4)
+  val total = readI32le(head, 0)
+  if (total < 21 || total > 48000000) {
+    error("mongodb: malformed reply (length " + toString(total) + ")")
+  }
+  val rest = _readN(state, total - 4)
+  val opCode = readI32le(rest, 8)
+  if (opCode != _OP_MSG) {
+    error("mongodb: unexpected opcode " + toString(opCode) + " in the reply")
+  }
+  // rest[12..15] flagBits, rest[16] section kind; both fixed for plain replies.
+  if (rest[16] != 0) then error("mongodb: unexpected reply section kind " + toString(rest[16]))
+  bsonDecode(rest, 17)
+}
+
+// Runs a command against a database and checks the outcome: a reply with
+// {ok: 0} raises with the server's message and code, and write errors from
+// insert/update/delete raise with the first offender.
+def wireRun(state, db, doc) {
+  doc["$db"] = db
+  val r = wireCommand(state, doc)
+  if (!contains(r, "ok") || r.ok != 1) {
+    val msg = if (contains(r, "errmsg")) then r.errmsg else "command failed"
+    val code = if (contains(r, "code")) then " (code " + toString(r.code) + ")" else ""
+    error("mongodb: " + msg + code)
+  }
+  if (contains(r, "writeErrors") && length(r.writeErrors) > 0) {
+    val e = r.writeErrors[0]
+    error("mongodb: write error at index " + toString(e.index) + ": " + e.errmsg +
+      " (code " + toString(e.code) + ")")
+  }
+  if (contains(r, "writeConcernError")) {
+    error("mongodb: write concern error: " + r.writeConcernError.errmsg)
+  }
+  r
+}

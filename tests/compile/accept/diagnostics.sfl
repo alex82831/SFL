@@ -1,0 +1,18 @@
+// A compiled program reports failures the way the interpreter does: the same
+// message, the same source excerpt with a caret, the same help, the same traceback.
+// The program's own text is linked into the binary so it can quote the line.
+def middle(xs) = inner(xs)
+def inner(xs) = xs[10]
+
+println(attempt(() -> middle([1, 2])).error.message)
+println(attempt(() -> middle([1, 2])).error.line)
+println(attempt(() -> middle([1, 2])).error.help)
+println(attempt(() -> middle([1, 2])).error.trace)
+println(attempt(() -> undefinedName).error.message)
+println(attempt(() -> "a" - 1).error.message)
+println(attempt(() -> toInt("nope")).error.message)
+println(attempt(() -> upper()).error.message)
+println(attempt(() -> ([1])(2)).error.message)
+
+// And the last one goes uncaught, so stderr is compared too.
+middle([1, 2])

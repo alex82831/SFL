@@ -1,0 +1,214 @@
+// Part of the SFL standard library: the object builtins, compiled ahead of time and
+// linked from the archive instead of living in the runtime's C.
+//
+// These are the copy-on-write helpers. assoc, assocIn, updateIn, dissoc and merge
+// build a new container and leave the one they were given untouched; only the
+// containers along the path are copied, every other branch is shared.
+
+// ---------------------------------------------------------------- internal helpers
+
+// Values quoted in error messages are rendered the way the interpreter renders them:
+// their JSON form, cut short so a huge structure cannot flood the message.
+def _show(v) {
+  val s = jsonStringify(v)
+  if (length(s) <= 48) then s else substring(s, 0, 45) + "..."
+}
+
+// The caller's name is passed in so getIn's complaint never mentions assocIn.
+def _pathCheck(path, fn) {
+  if (!isArray(path)) {
+    error("${fn}: argument 2 must be an array, got ${typeOf(path)} ${_show(path)}")
+  }
+}
+
+// An index is an integer, or a float that sits exactly on one -- 1.0 indexes as 1,
+// while 1.5, an infinity and a NaN do not (x % 1 is 0 only for the whole finite ones).
+// Indices are machine ints: a whole float past that range saturates the way the
+// runtime's conversion does, while an integer that far out is reported instead.
+def _index(k, what) {
+  if (isInt(k)) {
+    if (k > 2147483647 || k < -2147483648) { error("${what} out of range: ${k}") }
+    return k
+  }
+  if (isFloat(k) && k % 1 == 0) {
+    if (k > 2147483647) { return 2147483647 }
+    if (k < -2147483648) { return -2147483648 }
+    return toInt(k)
+  }
+  error("${what} must be an integer, got ${typeOf(k)}")
+}
+
+// --------------------------------------------------------------------------- copies
+
+def copy(v) {
+  if (isArray(v)) { return slice(v, 0) }
+  if (!isObject(v)) { return v }
+  val out = object()
+  for (k in v) { set(out, k, v[k]) }
+  out
+}
+
+// The depth limit is what stops a structure that contains itself from recurring until
+// the stack runs out.
+def _deepCopy(v, depth) {
+  if (depth > 200) { error("deepCopy: structure is nested too deeply") }
+  if (isArray(v)) {
+    val items = []
+    for (x in v) { push(items, _deepCopy(x, depth + 1)) }
+    return items
+  }
+  // The tuple itself is immutable, but its elements may not be.
+  if (isTuple(v)) {
+    val copied = []
+    for (x in v) { push(copied, _deepCopy(x, depth + 1)) }
+    return tupleOf(copied)
+  }
+  if (!isObject(v)) { return v }
+  val out = object()
+  for (k in v) { set(out, k, _deepCopy(v[k], depth + 1)) }
+  out
+}
+
+def deepCopy(v) = _deepCopy(v, 0)
+
+// ------------------------------------------------------------------ building objects
+
+def fromEntries(pairs) {
+  if (!isArray(pairs)) {
+    error("fromEntries: argument 1 must be an array, got ${typeOf(pairs)} ${_show(pairs)}")
+  }
+  val out = object()
+  var pos = 1
+  for (p in pairs) {
+    if (!isArray(p) || size(p) != 2) {
+      error("fromEntries: element ${pos} is not a two-element array")
+    }
+    // p[0]/p[1] stay direct: this loop runs per element of user data, and a
+    // destructuring pattern costs isArray+size+index on every pair.
+    set(out, toString(p[0]), p[1])
+    pos += 1
+  }
+  out
+}
+
+def merge(first, ...rest) {
+  val out = object()
+  var pos = 1
+  for (o in [first] + rest) {
+    if (!isObject(o)) {
+      error("merge: argument ${pos} must be an object, got ${typeOf(o)} ${_show(o)}")
+    }
+    for (k in o) { set(out, k, o[k]) }
+    pos += 1
+  }
+  out
+}
+
+// ---------------------------------------------------------- copy-on-write updates
+
+// An object insists on a string key, an array on an index; anything else has no key
+// space at all. Writing into the copy reuses the interpreter's own index checks, so
+// an out-of-range index reads exactly as `a[i] = v` would.
+def assoc(v, key, value) {
+  if (isObject(v)) {
+    if (!isString(key)) {
+      error("assoc: argument 2 must be a string, got ${typeOf(key)} ${_show(key)}")
+    }
+    val out = copy(v)
+    set(out, key, value)
+    return out
+  }
+  if (isArray(v)) {
+    val out = copy(v)
+    set(out, key, value)
+    return out
+  }
+  error("assoc: expected an object or array, got ${typeOf(v)}")
+}
+
+// At least one key is required. Keys are rendered the way the language renders them,
+// so dissoc(o, 1) drops "1"; a key the object does not have is simply not there.
+def dissoc(o, key, ...rest) {
+  if (!isObject(o)) {
+    error("dissoc: argument 1 must be an object, got ${typeOf(o)} ${_show(o)}")
+  }
+  val out = copy(o)
+  remove(out, toString(key))
+  for (k in rest) { remove(out, toString(k)) }
+  out
+}
+
+def getIn(v, path, fallback = null) {
+  _pathCheck(path, "getIn")
+  var cur = v
+  var ok = true
+  var i = 0
+  val n = size(path)
+  while (ok && i < n) {
+    val k = path[i]
+    if (isObject(cur)) {
+      val ks = toString(k)
+      if (has(cur, ks)) { cur = cur[ks] } else { ok = false }
+    } elsif (isArray(cur)) {
+      val len = size(cur)
+      var idx = _index(k, "path index")
+      if (idx < 0) { idx = len + idx }
+      if (idx >= 0 && idx < len) { cur = cur[idx] } else { ok = false }
+    } else {
+      // A string, a number or a function has nothing to step into: the path stops here
+      // and the fallback stands in for it.
+      ok = false
+    }
+    i += 1
+  }
+  if (ok) then cur else fallback
+}
+
+// Rebuilds only the containers along the path, sharing every other branch. `update`
+// receives the old value at the end of the path and returns the new one, which is
+// what lets assocIn and updateIn share this walk. `fn` names the caller in errors.
+def _assocPath(target, path, i, update, fn) {
+  if (i >= size(path)) { return update(target) }
+  val key = path[i]
+  if (isObject(target)) {
+    val k = toString(key)
+    val child = if (has(target, k)) then target[k] else null
+    val out = copy(target)
+    set(out, k, _assocPath(child, path, i + 1, update, fn))
+    return out
+  }
+  if (isArray(target)) {
+    val len = size(target)
+    // Built on every array descend, not just on failure, so it stays a plain concat:
+    // a leading-${} interpolation would desugar to ("" + fn + ...), one concat more.
+    var idx = _index(key, fn + " path index")
+    if (idx < 0) { idx = len + idx }
+    if (idx < 0 || idx >= len) {
+      error("${fn}: index ${toString(key)} is out of bounds (length ${len})")
+    }
+    val out = copy(target)
+    set(out, idx, _assocPath(target[idx], path, i + 1, update, fn))
+    return out
+  }
+  if (isNull(target)) {
+    // An absent branch, or one holding null, grows into an object, so a single call
+    // can write a whole path into an empty structure.
+    val out = object()
+    set(out, toString(key), _assocPath(null, path, i + 1, update, fn))
+    return out
+  }
+  error("${fn}: cannot descend into ${typeOf(target)}")
+}
+
+def assocIn(v, path, value) {
+  _pathCheck(path, "assocIn")
+  _assocPath(v, path, 0, old -> value, "assocIn")
+}
+
+def updateIn(v, path, f) {
+  if (!isFunction(f)) {
+    error("updateIn: argument 3 must be a function, got ${typeOf(f)} ${_show(f)}")
+  }
+  _pathCheck(path, "updateIn")
+  _assocPath(v, path, 0, f, "updateIn")
+}

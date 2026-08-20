@@ -1,0 +1,68 @@
+// The standard-library hot paths: what the modernization must not slow down.
+// Run it before and after any stdlib change, interpreted and compiled.
+
+def bench(name, f) {
+  val t0 = timeNanos()
+  val r = f()
+  println(padEnd(name, 22) + padStart(toString((timeNanos() - t0) / 1000000), 6) + " ms  " + r)
+}
+
+// regex: the matcher's kind-dispatch runs per node per position
+bench("regex match", () -> {
+  var hits = 0
+  for (i in range(4000)) {
+    if (matches("user-" + i + "@host" + i + ".example", r"[a-z]+-\d+@[a-z]+\d+\.[a-z]+")) { hits += 1 }
+  }
+  hits
+})
+bench("regex findAll", () -> {
+  var total = 0
+  for (i in range(800)) {
+    total += size(regexFindAll("a1 bb22 ccc333 dddd4444 e5", r"[a-z]+\d+"))
+  }
+  total
+})
+bench("regex replace", () -> {
+  var n = 0
+  for (i in range(800)) {
+    n += length(regexReplace("2026-08-18 and 2027-01-02", r"(\d+)-(\d+)-(\d+)", "$3/$2/$1"))
+  }
+  n
+})
+
+// coll: sort's comparator plumbing and the map/filter loops
+val data = []
+for (i in range(3000)) { push(data, (i * 7919) % 3000) }
+bench("sort", () -> first(sort(data)))
+bench("sortBy", () -> first(sortBy(data, x -> -x)))
+bench("map+filter+reduce", () -> {
+  var acc = 0
+  for (i in range(40)) {
+    acc += reduce(filter(map(data, x -> x + 1), x -> x % 3 == 0), (a, b) -> a + b, 0)
+  }
+  acc
+})
+bench("groupBy", () -> size(groupBy(data, x -> x % 17)))
+
+// codec: per-character loops
+val payload = repeat("The quick brown fox jumps over 13 lazy dogs! ", 40)
+bench("base64 round trip", () -> {
+  var ok = 0
+  for (i in range(60)) { if (base64Decode(base64Encode(payload)) == payload) { ok += 1 } }
+  ok
+})
+bench("hex round trip", () -> {
+  var ok = 0
+  for (i in range(60)) { if (hexDecode(hexEncode(payload)) == payload) { ok += 1 } }
+  ok
+})
+
+// obj: the copy-on-write helpers
+val tree = {"a": {"b": {"c": [1, 2, 3], "d": "x"}}, "e": [4, 5]}
+bench("assocIn/getIn", () -> {
+  var v = 0
+  for (i in range(20000)) {
+    v = getIn(assocIn(tree, ["a", "b", "c"], i), ["a", "b", "c"])
+  }
+  v
+})

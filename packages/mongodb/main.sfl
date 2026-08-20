@@ -1,0 +1,452 @@
+// mongodb — a MongoDB driver in pure SFL, speaking OP_MSG over TCP.
+//
+//   import "mongodb"
+//
+//   val client = mongoConnect("mongodb://localhost:27017/app")
+//   val users  = client.db("app").coll("users")
+//   users.insertOne({name: "ada", age: 36})
+//   val grown  = users.find({age: {"$gte": 18}}, {sort: {age: -1}, limit: 10})
+//   users.updateOne({name: "ada"}, {"$set": {age: 37}})
+//   client.close()
+//
+// The client is an object of functions; db() and coll() hand out views over the
+// same connection, which one mutex serialises, so it is safe to share across
+// threads. Values map to BSON naturally (see mongodb/bson for the wrapper
+// spellings of ObjectId, dates, binary and friends).
+//
+// Authentication: SCRAM-SHA-256 and SCRAM-SHA-1, negotiated from the server's
+// saslSupportedMechs. TLS is not offered yet — connect to localhost, a private
+// network, or through a tunnel.
+
+import "wire"
+import "scram"
+
+// ---------------------------------------------------------------- connect
+
+// Opens a connection. `target` is a mongodb:// URL or a host name; recognised
+// options (URL query or the options object, the object winning): db, user,
+// password, authSource, authMechanism, appName, timeoutMs.
+def mongoConnect(target = "mongodb://localhost:27017", options = {}) {
+  val u = _parseTarget(target)
+  val opt = merge(u.options, options)
+  val timeoutMs = _optInt(opt, "timeoutMs", 10000)
+  val user = _optStr(opt, "user", u.user)
+  val password = _optStr(opt, "password", u.password)
+  val defaultDb = _optStr(opt, "db", if (u.db != "") then u.db else "test")
+  val authSource = _optStr(opt, "authSource", if (u.db != "") then u.db else "admin")
+
+  val sock = connect(u.host, u.port, timeoutMs)
+  val state = {sock: sock, timeoutMs: timeoutMs, lock: mutex()}
+
+  val hello = {hello: 1, client: {
+    driver: {name: "sfl-mongodb", version: "0.1.0"},
+    os: {type: osName()}
+  }}
+  if (contains(opt, "appName")) then hello.client.application = {name: opt.appName}
+  if (user != null) then hello.saslSupportedMechs = authSource + "." + user
+  val helloReply = wireRun(state, "admin", hello)
+  if ((helloReply?.maxWireVersion ?? 0) < 6) {
+    closeSocket(sock)
+    error("mongodb: server is too old (wire version " +
+      toString(helloReply?.maxWireVersion ?? 0) + "; OP_MSG needs 6+, MongoDB 3.6)")
+  }
+
+  if (user != null) {
+    val mech = _optStr(opt, "authMechanism", _pickMechanism(helloReply))
+    scramAuth(state, user, password ?? "", authSource, mech)
+  }
+
+  var closed = false
+  def guard() {
+    if (closed) then error("mongodb: the client is closed")
+    null
+  }
+  def runCommand(dbName, cmd) {
+    guard()
+    wireRun(state, dbName, cmd)
+  }
+
+  {
+    defaultDb: defaultDb,
+    hello: helloReply,
+    db: (name) -> _dbApi(state, name, () -> guard()),
+    coll: (name) -> _dbApi(state, defaultDb, () -> guard()).coll(name),
+    runCommand: runCommand,
+    ping: () -> {
+      val t0 = timeMillis()
+      runCommand("admin", {ping: 1})
+      timeMillis() - t0
+    },
+    serverVersion: () -> runCommand("admin", {buildInfo: 1}).version,
+    listDatabases: () -> map(runCommand("admin", {listDatabases: 1}).databases, (d) -> d.name),
+    close: () -> {
+      if (!closed) {
+        closed = true
+        closeSocket(state.sock)
+      }
+      null
+    }
+  }
+}
+
+def _pickMechanism(helloReply) {
+  val mechs = helloReply?.saslSupportedMechs ?? []
+  if (contains(mechs, "SCRAM-SHA-256")) then "SCRAM-SHA-256"
+  elsif (contains(mechs, "SCRAM-SHA-1")) then "SCRAM-SHA-1"
+  else "SCRAM-SHA-256"
+}
+
+// ---------------------------------------------------------------- databases
+
+def _dbApi(state, dbName, guard) {
+  def run(cmd) {
+    guard()
+    wireRun(state, dbName, cmd)
+  }
+  {
+    name: dbName,
+    coll: (collName) -> _collApi(state, dbName, collName, guard),
+    runCommand: run,
+    listCollections: (filter = {}) -> {
+      val r = run({listCollections: 1, filter: filter})
+      _drainCursor(state, dbName, r.cursor, 0)
+    },
+    collectionNames: () -> {
+      val r = run({listCollections: 1, filter: {}, nameOnly: true})
+      map(_drainCursor(state, dbName, r.cursor, 0), (c) -> c.name)
+    },
+    createCollection: (collName, opts = {}) -> {
+      run(merge({create: collName}, opts))
+      null
+    },
+    dropDatabase: () -> {
+      run({dropDatabase: 1})
+      null
+    }
+  }
+}
+
+// ---------------------------------------------------------------- cursors
+
+// getMore-loops a command cursor to completion; limit 0 means everything.
+def _drainCursor(state, dbName, cursor, limit) {
+  val out = []
+  for (d in cursor.firstBatch) { push(out, d) }
+  var id = cursor.id
+  val ns = cursor.ns
+  val collName = substring(ns, indexOf(ns, ".") + 1, length(ns))
+  while (id != 0 && (limit == 0 || length(out) < limit)) {
+    val r = wireRun(state, dbName, {getMore: {"$int64": id}, collection: collName})
+    for (d in r.cursor.nextBatch) { push(out, d) }
+    id = r.cursor.id
+  }
+  if (id != 0) {
+    attempt(() -> wireRun(state, dbName, {killCursors: collName, cursors: [{"$int64": id}]}))
+  }
+  if (limit > 0 && length(out) > limit) then slice(out, 0, limit) else out
+}
+
+// A pull-style cursor over find/aggregate batches: next()/hasNext() stream one
+// document at a time, fetching batches as needed; close() kills a live cursor.
+def _liveCursor(state, dbName, collName, cursor) {
+  var batch = cursor.firstBatch
+  var pos = 0
+  var id = cursor.id
+
+  def fetch() {
+    if (pos < length(batch)) then return true
+    while (id != 0) {
+      val r = wireRun(state, dbName, {getMore: {"$int64": id}, collection: collName})
+      batch = r.cursor.nextBatch
+      pos = 0
+      id = r.cursor.id
+      if (length(batch) > 0) then return true
+    }
+    false
+  }
+
+  {
+    hasNext: () -> fetch(),
+    next: () -> {
+      if (!fetch()) then error("mongodb: the cursor is exhausted")
+      val d = batch[pos]
+      pos += 1
+      d
+    },
+    close: () -> {
+      if (id != 0) {
+        attempt(() -> wireRun(state, dbName, {killCursors: collName, cursors: [{"$int64": id}]}))
+        id = 0
+      }
+      batch = []
+      pos = 0
+      null
+    },
+    toArray: () -> {
+      val out = []
+      while (fetch()) {
+        push(out, batch[pos])
+        pos += 1
+      }
+      out
+    },
+    forEach: (f) -> {
+      while (fetch()) {
+        f(batch[pos])
+        pos += 1
+      }
+      null
+    }
+  }
+}
+
+// ---------------------------------------------------------------- collections
+
+val _findOptions = ["sort", "projection", "skip", "limit", "batchSize", "hint",
+  "collation", "maxTimeMS", "min", "max", "allowDiskUse"]
+
+def _collApi(state, dbName, collName, guard) {
+  def run(cmd) {
+    guard()
+    wireRun(state, dbName, cmd)
+  }
+
+  def findCmd(filter, opts) {
+    val cmd = {find: collName, filter: filter}
+    for (k in _findOptions) {
+      if (contains(opts, k)) then cmd[k] = opts[k]
+    }
+    cmd
+  }
+
+  def find(filter = {}, opts = {}) {
+    val r = run(findCmd(filter, opts))
+    _drainCursor(state, dbName, r.cursor, _optInt(opts, "limit", 0))
+  }
+
+  def insertMany(docs, opts = {}) {
+    if (!isArray(docs) || length(docs) == 0) {
+      error("mongodb: insertMany expects a non-empty array of documents")
+    }
+    val withIds = []
+    val ids = []
+    for (d in docs) {
+      if (!isObject(d)) then error("mongodb: cannot insert a " + typeOf(d))
+      val doc = if (contains(d, "_id")) then d else merge({_id: newObjectId()}, d)
+      push(withIds, doc)
+      push(ids, doc._id)
+    }
+    val cmd = {insert: collName, documents: withIds}
+    if (contains(opts, "ordered")) then cmd.ordered = opts.ordered
+    val r = run(cmd)
+    {insertedCount: r.n, insertedIds: ids}
+  }
+
+  def updateWith(filter, update, multi, opts) {
+    val u = {q: filter, u: update, multi: multi}
+    if (contains(opts, "upsert")) then u.upsert = opts.upsert
+    if (contains(opts, "collation")) then u.collation = opts.collation
+    if (contains(opts, "arrayFilters")) then u.arrayFilters = opts.arrayFilters
+    val r = run({update: collName, updates: [u]})
+    val out = {matchedCount: r.n, modifiedCount: r?.nModified ?? 0}
+    if (contains(r, "upserted") && length(r.upserted) > 0) {
+      out.upsertedId = r.upserted[0]._id
+      out.matchedCount = out.matchedCount - length(r.upserted)
+    }
+    out
+  }
+
+  def deleteWith(filter, limit) {
+    val r = run({delete: collName, deletes: [{q: filter, limit: limit}]})
+    {deletedCount: r.n}
+  }
+
+  {
+    name: collName,
+
+    insertOne: (doc, opts = {}) -> {
+      if (!isObject(doc)) then error("mongodb: cannot insert a " + typeOf(doc))
+      val r = insertMany([doc], opts)
+      {insertedId: r.insertedIds[0]}
+    },
+    insertMany: insertMany,
+
+    find: find,
+    findOne: (filter = {}, opts = {}) -> {
+      val r = find(filter, merge(opts, {limit: 1}))
+      if (length(r) > 0) then r[0] else null
+    },
+    findIter: (filter = {}, opts = {}) -> {
+      val r = run(findCmd(filter, opts))
+      _liveCursor(state, dbName, collName, r.cursor)
+    },
+
+    updateOne: (filter, update, opts = {}) -> updateWith(filter, update, false, opts),
+    updateMany: (filter, update, opts = {}) -> updateWith(filter, update, true, opts),
+    replaceOne: (filter, doc, opts = {}) -> updateWith(filter, doc, false, opts),
+
+    deleteOne: (filter, opts = {}) -> deleteWith(filter, 1),
+    deleteMany: (filter, opts = {}) -> deleteWith(filter, 0),
+
+    countDocuments: (filter = {}) -> {
+      val r = run({aggregate: collName, pipeline: [{"$match": filter}, {"$count": "n"}],
+        cursor: {}})
+      val rows = _drainCursor(state, dbName, r.cursor, 0)
+      if (length(rows) > 0) then rows[0].n else 0
+    },
+    estimatedCount: () -> run({count: collName}).n,
+
+    aggregate: (pipeline, opts = {}) -> {
+      val cmd = {aggregate: collName, pipeline: pipeline, cursor: {}}
+      if (contains(opts, "batchSize")) then cmd.cursor = {batchSize: opts.batchSize}
+      if (contains(opts, "allowDiskUse")) then cmd.allowDiskUse = opts.allowDiskUse
+      val r = run(cmd)
+      _drainCursor(state, dbName, r.cursor, 0)
+    },
+
+    distinct: (key, filter = {}) -> run({distinct: collName, key: key, query: filter}).values,
+
+    createIndex: (keySpec, opts = {}) -> {
+      var name = _optStr(opts, "name", null)
+      if (name == null) {
+        val parts = []
+        for (k in keySpec) { push(parts, k + "_" + toString(keySpec[k])) }
+        name = join(parts, "_")
+      }
+      run({createIndexes: collName, indexes: [merge({key: keySpec, name: name}, opts)]})
+      name
+    },
+    dropIndex: (name) -> {
+      run({dropIndexes: collName, index: name})
+      null
+    },
+    listIndexes: () -> {
+      val r = run({listIndexes: collName})
+      _drainCursor(state, dbName, r.cursor, 0)
+    },
+
+    drop: () -> {
+      val r = attempt(() -> run({drop: collName}))
+      if (r?.error != null) {
+        // "ns not found" means there was nothing to drop.
+        if (contains(r.error.message, "ns not found")) then return false
+        error(r.error.message)
+      }
+      true
+    }
+  }
+}
+
+// ---------------------------------------------------------------- URL parsing
+
+def _optInt(o, k, dflt) = if (contains(o, k) && o[k] != null) then o[k] else dflt
+def _optStr(o, k, dflt) = if (contains(o, k) && o[k] != null) then o[k] else dflt
+
+// mongodb://[user[:password]@]host[:port][/db][?option=value&...]
+// A bare "host" or "host:port" is accepted too.
+def _parseTarget(target) {
+  if (!isString(target)) then error("mongodb: the connection target must be a string")
+  var rest = target
+  if (startsWith(rest, "mongodb://")) {
+    rest = substring(rest, 10, length(rest))
+  } elsif (contains(rest, "://")) {
+    error("mongodb: unsupported URL scheme in '" + target + "' (only mongodb:// works)")
+  }
+
+  var options = {}
+  val qmark = indexOf(rest, "?")
+  if (qmark >= 0) {
+    for (pair in split(substring(rest, qmark + 1, length(rest)), "&")) {
+      val eq = indexOf(pair, "=")
+      if (eq > 0) {
+        val k = _urlKey(substring(pair, 0, eq))
+        val v = _pctDecode(substring(pair, eq + 1, length(pair)))
+        if (k == "timeoutMs") then options[k] = parseInt(v)
+        else options[k] = v
+      }
+    }
+    rest = substring(rest, 0, qmark)
+  }
+
+  var user = null
+  var password = null
+  val at = _lastIndexOf(rest, "@")
+  if (at >= 0) {
+    val cred = substring(rest, 0, at)
+    rest = substring(rest, at + 1, length(rest))
+    val colon = indexOf(cred, ":")
+    if (colon >= 0) {
+      user = _pctDecode(substring(cred, 0, colon))
+      password = _pctDecode(substring(cred, colon + 1, length(cred)))
+    } else {
+      user = _pctDecode(cred)
+    }
+  }
+
+  var db = ""
+  val slash = indexOf(rest, "/")
+  if (slash >= 0) {
+    db = substring(rest, slash + 1, length(rest))
+    rest = substring(rest, 0, slash)
+  }
+  if (contains(rest, ",")) {
+    error("mongodb: replica-set host lists are not supported yet; give one host")
+  }
+
+  var host = rest
+  var port = 27017
+  val colon = _lastIndexOf(rest, ":")
+  if (colon >= 0) {
+    host = substring(rest, 0, colon)
+    val p = attempt(() -> parseInt(substring(rest, colon + 1, length(rest))))
+    if (p?.error != null) then error("mongodb: bad port in '" + target + "'")
+    port = p.value
+  }
+  if (host == "") then error("mongodb: no host in '" + target + "'")
+
+  {host: host, port: port, user: user, password: password, db: db, options: options}
+}
+
+// The URL option spellings the drivers use, folded onto ours.
+def _urlKey(k) {
+  val low = toLower(k)
+  if (low == "authsource") then "authSource"
+  elsif (low == "authmechanism") then "authMechanism"
+  elsif (low == "appname") then "appName"
+  elsif (low == "connecttimeoutms" || low == "sockettimeoutms" || low == "timeoutms") then "timeoutMs"
+  else k
+}
+
+def _lastIndexOf(s, needle) {
+  var found = 0 - 1
+  var from = 0
+  while (true) {
+    val i = indexOf(s, needle, from)
+    if (i < 0) then break
+    found = i
+    from = i + 1
+  }
+  found
+}
+
+// Byte-accurate %XX decoding; '+' stays '+', which is what MongoDB URLs mean.
+def _pctDecode(s) {
+  if (!contains(s, "%")) then return s
+  val bytes = []
+  var i = 0
+  while (i < length(s)) {
+    val c = charAt(s, i)
+    if (c == "%") {
+      if (i + 3 > length(s)) then error("mongodb: bad percent escape in '" + s + "'")
+      val hx = substring(s, i + 1, i + 3)
+      val r = attempt(() -> hexDecodeBytes(hx))
+      if (r?.error != null) then error("mongodb: bad percent escape in '" + s + "'")
+      push(bytes, r.value[0])
+      i += 3
+    } else {
+      bytesAppend(bytes, utf8Encode(c))
+      i += 1
+    }
+  }
+  utf8Decode(bytes)
+}

@@ -1,0 +1,29 @@
+// Arrays and objects: literals, indexing, mutation, nesting, iteration, equality.
+val a = [3, 1, 2]
+push(a, 9)
+a[0] = 30
+a[-1] += 1
+println(a, size(a), a[0], a[-1])
+
+val nested = {"a": {"b": [1, 2, {"c": "deep"}]}}
+println(nested.a.b[2].c)
+nested["a"]["b"][0] = 99
+println(nested)
+
+val o = object()
+o["x"] = 1
+o.y = 2
+println(o, keys(o), values(o), has(o, "x"), size(o))
+remove(o, "x")
+println(o)
+
+println([1, 2] == [1, 2], {"a": 1} == {"a": 1}, [1] == [2])
+println([1, 2] + [3], {"a": 1} + {"b": 2})
+
+var total = 0
+for (v in [10, 20, 30]) { total += v }
+for (k in {"p": 1, "q": 2}) { total += length(k) }
+println(total)
+
+val empty = []
+println(size(empty), empty == [])

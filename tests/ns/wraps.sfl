@@ -1,0 +1,5 @@
+// A qualified module may itself import; its own surface stays behind its alias.
+import "geo" as g
+
+def far(p) = g.dist(p) > 4
+def viaModule(p) = g.dist(p)

@@ -1,0 +1,3 @@
+// EXPECT: module 'g' has no 'dst'
+import "ns/geo" as g
+println(g.dst({"x": 1, "y": 1}))

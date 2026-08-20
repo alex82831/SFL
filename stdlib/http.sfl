@@ -1,0 +1,465 @@
+// Part of the SFL standard library: the HTTP client, written in SFL over the
+// socket, buffer and TLS primitives. The runtime neither links nor loads libcurl
+// any more; everything above the transport — URLs, request assembly, response
+// framing, redirects, proxies — lives in this file.
+//
+// Unlike the rest of the standard library this module has no native twin: the
+// interpreter evaluates this same source (see StdlibModules in Builtins.scala),
+// so the two engines share one implementation and the parity burden rests on the
+// primitives beneath, which tests/ipc.sfl pins down.
+//
+// The behaviour contract, kept from the libcurl days:
+//   - one call has a 60 second budget, redirects included, and follows at most
+//     32 redirects; 301/302/303 turn a body-carrying method into GET, 307/308
+//     keep method and body;
+//   - every request says `Connection: close`; there is no connection reuse,
+//     exactly as one curl_easy handle per call had none;
+//   - proxies come from an explicit argument (httpGetProxy) or from curl's
+//     environment variables: all_proxy/ALL_PROXY, https_proxy/HTTPS_PROXY, the
+//     lowercase-only http_proxy, filtered by no_proxy/NO_PROXY. An http target
+//     goes through a proxy as an absolute-URI request; an https target opens a
+//     CONNECT tunnel and runs TLS through it;
+//   - no Accept-Encoding is advertised, so a conforming server sends the body
+//     identity-encoded (libcurl asked for gzip and inflated it in private);
+//   - TLS verifies the certificate chain and the host name, no opt-out. The
+//     trust store is the TLS library's default, which also honours the
+//     SSL_CERT_FILE and SSL_CERT_DIR environment variables;
+//   - a user:password@ in the URL becomes Basic authentication, dropped when a
+//     redirect changes host, as curl drops it.
+
+// ---------------------------------------------------------------- argument checks
+
+// The wording of Builtins.bad, including Err.show's shortening (see coll.sfl).
+def _bad(fn, pos, want, v) {
+  val text = jsonStringify(v)
+  val shown = if (length(text) <= 48) then text else "${substring(text, 0, 45)}..."
+  error("${fn}: argument ${pos} must be ${want}, got ${typeOf(v)} ${shown}")
+}
+
+def _str(fn, pos, v) = if (isString(v)) then v else _bad(fn, pos, "a string", v)
+
+def _obj(fn, pos, v) = if (isObject(v)) then v else _bad(fn, pos, "an object", v)
+
+// "This argument was not passed": functions compare by identity, so no caller can
+// forge it, and the arity the module reports stays exact — async.sfl's trick.
+val _absent = () -> null
+
+// ------------------------------------------------------------------ small helpers
+
+def _fail(detail) = error("HTTP request failed: ${detail}")
+
+// Milliseconds left of the call's budget; expiry is the one timeout wording.
+def _left(deadline) {
+  val left = deadline - timeMillis()
+  if (left <= 0) { error("HTTP request failed: timed out") }
+  left
+}
+
+// ---------------------------------------------------------------------------- URLs
+
+def _port(url, text) {
+  val p = try(() -> parseInt(text), e -> -1)
+  if (p == null || p < 0 || p > 65535) { _fail("unsupported URL '${url}'") }
+  p
+}
+
+// {scheme, user, host, port, path} — path keeps the query, the fragment is
+// dropped, and user is the raw user:password from the authority or null.
+def _parseUrl(url) {
+  val si = indexOf(url, "://")
+  if (si <= 0) { _fail("unsupported URL '${url}'") }
+  val scheme = toLower(substring(url, 0, si))
+  if (scheme != "http" && scheme != "https") { _fail("unsupported protocol '${scheme}'") }
+  var rest = substring(url, si + 3)
+  val hash = indexOf(rest, "#")
+  if (hash >= 0) { rest = substring(rest, 0, hash) }
+  // The authority ends at the first '/' or '?'.
+  var cut = length(rest)
+  val sl = indexOf(rest, "/")
+  if (sl >= 0 && sl < cut) { cut = sl }
+  val qm = indexOf(rest, "?")
+  if (qm >= 0 && qm < cut) { cut = qm }
+  var authority = substring(rest, 0, cut)
+  var path = substring(rest, cut)
+  if (path == "") { path = "/" }
+  if (startsWith(path, "?")) { path = "/${path}" }
+  var user = null
+  val at = lastIndexOf(authority, "@")
+  if (at >= 0) {
+    user = substring(authority, 0, at)
+    authority = substring(authority, at + 1)
+  }
+  var host = authority
+  var port = if (scheme == "https") then 443 else 80
+  if (startsWith(authority, "[")) {
+    // An IPv6 literal: the brackets hold the colons of the address itself.
+    val close = indexOf(authority, "]")
+    if (close < 0) { _fail("unsupported URL '${url}'") }
+    host = substring(authority, 1, close)
+    val after = substring(authority, close + 1)
+    if (startsWith(after, ":")) { port = _port(url, substring(after, 1)) }
+    else if (after != "") { _fail("unsupported URL '${url}'") }
+  } else {
+    val ci = lastIndexOf(authority, ":")
+    if (ci >= 0) {
+      host = substring(authority, 0, ci)
+      port = _port(url, substring(authority, ci + 1))
+    }
+  }
+  if (host == "") { _fail("unsupported URL '${url}'") }
+  {"scheme": scheme, "user": user, "host": host, "port": port, "path": path}
+}
+
+// host[:port] — brackets back around an IPv6 literal, the default port left off
+// unless `always`, which is what a Host header wants and a CONNECT target needs.
+def _hostPort(u, always) {
+  val h = if (contains(u.host, ":")) then "[${u.host}]" else u.host
+  val fallback = if (u.scheme == "https") then 443 else 80
+  if (!always && u.port == fallback) then h else "${h}:${u.port}"
+}
+
+// A Location header against the URL it arrived on, RFC 3986's common cases.
+def _resolve(u, loc) {
+  if (startsWith(loc, "http://") || startsWith(loc, "https://")) { return loc }
+  if (startsWith(loc, "//")) { return "${u.scheme}:${loc}" }
+  val origin = "${u.scheme}://${_hostPort(u, true)}"
+  if (startsWith(loc, "/")) { return "${origin}${loc}" }
+  var base = u.path
+  val q = indexOf(base, "?")
+  if (q >= 0) { base = substring(base, 0, q) }
+  val slash = lastIndexOf(base, "/")
+  base = if (slash >= 0) then substring(base, 0, slash + 1) else "/"
+  "${origin}${base}${loc}"
+}
+
+// --------------------------------------------------------------------------- proxy
+
+def _noProxy(host) {
+  var np = getEnv("no_proxy")
+  if (np == null || np == "") { np = getEnv("NO_PROXY") }
+  if (np == null || np == "") { return false }
+  if (trim(np) == "*") { return true }
+  val h = toLower(host)
+  for (raw in split(np, ",")) {
+    var e = trim(toLower(raw))
+    if (e != "") {
+      if (startsWith(e, ".")) { e = substring(e, 1) }
+      if (h == e || endsWith(h, ".${e}")) { return true }
+    }
+  }
+  false
+}
+
+// The proxy the environment prescribes for this target, or null — curl's rules:
+// the scheme-specific variable first (http_proxy only in lowercase), then
+// all_proxy/ALL_PROXY, and no_proxy/NO_PROXY exempts hosts and their subdomains.
+def _envProxy(scheme, host) {
+  if (_noProxy(host)) { return null }
+  var p = null
+  if (scheme == "https") {
+    p = getEnv("https_proxy")
+    if (p == null || p == "") { p = getEnv("HTTPS_PROXY") }
+  } else {
+    p = getEnv("http_proxy")
+  }
+  if (p == null || p == "") { p = getEnv("all_proxy") }
+  if (p == null || p == "") { p = getEnv("ALL_PROXY") }
+  if (p == null || p == "") then null else p
+}
+
+// {host, port, auth} from "host:port", "http://host:port" or with user:pass@;
+// auth is the ready-made Basic credential or null. curl's default port is 1080.
+def _parseProxy(p) {
+  var rest = trim(p)
+  val si = indexOf(rest, "://")
+  if (si >= 0) {
+    val scheme = toLower(substring(rest, 0, si))
+    if (scheme != "http") { _fail("unsupported proxy protocol '${scheme}'") }
+    rest = substring(rest, si + 3)
+  }
+  if (endsWith(rest, "/")) { rest = substring(rest, 0, length(rest) - 1) }
+  var auth = null
+  val at = lastIndexOf(rest, "@")
+  if (at >= 0) {
+    auth = base64Encode(substring(rest, 0, at))
+    rest = substring(rest, at + 1)
+  }
+  var host = rest
+  var port = 1080
+  if (startsWith(rest, "[")) {
+    val close = indexOf(rest, "]")
+    if (close < 0) { _fail("unsupported proxy '${p}'") }
+    host = substring(rest, 1, close)
+    val after = substring(rest, close + 1)
+    if (startsWith(after, ":")) { port = _port(p, substring(after, 1)) }
+  } else {
+    val ci = lastIndexOf(rest, ":")
+    if (ci >= 0) {
+      host = substring(rest, 0, ci)
+      port = _port(p, substring(rest, ci + 1))
+    }
+  }
+  if (host == "") { _fail("unsupported proxy '${p}'") }
+  {"host": host, "port": port, "auth": auth}
+}
+
+// ------------------------------------------------------------------ wire reading
+
+// One line of the response, with the budget applied; null from the primitive is
+// either the peer closing or the clock running out, and the clock says which.
+def _line(c, deadline) {
+  val line = socketReadLine(c, _left(deadline))
+  if (line == null) {
+    _left(deadline)
+    _fail("the connection was closed before the response arrived")
+  }
+  line
+}
+
+def _status(line) {
+  if (!startsWith(line, "HTTP/")) { _fail("malformed status line '${line}'") }
+  val parts = split(line, " ", 3)
+  if (length(parts) < 2) { _fail("malformed status line '${line}'") }
+  val code = try(() -> parseInt(trim(parts[1])), e -> -1)
+  if (code == null || code < 100 || code > 999) { _fail("malformed status line '${line}'") }
+  code
+}
+
+// Response headers into an object keyed by lowercase name, repeats joined with
+// ", " as RFC 9110 folds them; stops at the blank line.
+def _headers(c, deadline) {
+  val out = {}
+  while (true) {
+    val line = _line(c, deadline)
+    if (line == "") { break }
+    val ci = indexOf(line, ":")
+    if (ci > 0) {
+      val name = toLower(trim(substring(line, 0, ci)))
+      val value = trim(substring(line, ci + 1))
+      if (has(out, name)) { out[name] = "${out[name]}, ${value}" }
+      else { out[name] = value }
+    }
+  }
+  out
+}
+
+// Exactly n more body bytes into the buffer, or the reasons there cannot be.
+def _exactly(c, b, n, deadline) {
+  var left = n
+  while (left > 0) {
+    val got = socketReadToBuf(c, b, min(left, 65536), _left(deadline))
+    if (got == null) { error("HTTP request failed: timed out") }
+    if (got == 0) { _fail("the connection was closed before the whole body arrived") }
+    left = left - got
+  }
+  null
+}
+
+// The message body, framed as the headers say: none for HEAD/204/304, chunked,
+// Content-Length, or everything until the peer closes. Bytes accumulate in a
+// buffer and are decoded once at the end, so a multi-byte character split across
+// chunks or reads cannot decode as two broken halves.
+def _readBody(c, method, status, hdrs, deadline) {
+  if (method == "HEAD" || status == 204 || status == 304) { return "" }
+  val b = bufNew()
+  if (contains(toLower(get(hdrs, "transfer-encoding", "")), "chunked")) {
+    while (true) {
+      val sizeLine = _line(c, deadline)
+      val semi = indexOf(sizeLine, ";")
+      val hexs = trim(if (semi >= 0) then substring(sizeLine, 0, semi) else sizeLine)
+      val n = try(() -> parseInt(hexs, 16), e -> -1)
+      if (n == null || n < 0) { _fail("malformed chunk size '${sizeLine}'") }
+      if (n == 0) { break }
+      _exactly(c, b, n, deadline)
+      _line(c, deadline) // the CRLF that closes the chunk
+    }
+    // Trailers, up to the blank line that ends the message.
+    while (true) {
+      if (_line(c, deadline) == "") { break }
+    }
+  } else {
+    val cl = get(hdrs, "content-length", null)
+    if (cl != null) {
+      val n = try(() -> parseInt(trim(split(cl, ",")[0])), e -> -1)
+      if (n == null || n < 0) { _fail("malformed Content-Length '${cl}'") }
+      _exactly(c, b, n, deadline)
+    } else {
+      // No framing given: the body is everything until the peer closes.
+      while (true) {
+        val got = socketReadToBuf(c, b, 65536, _left(deadline))
+        if (got == null) { error("HTTP request failed: timed out") }
+        if (got == 0) { break }
+      }
+    }
+  }
+  val text = bufString(b)
+  bufClear(b)
+  text
+}
+
+// ---------------------------------------------------------------- request sending
+
+// Replace-or-append with case-insensitive names, the way one curl_slist ended up
+// after hdr_set: a caller's Content-Type wins over the computed one.
+def _setHeader(hdrs, name, value) {
+  val low = toLower(name)
+  for (i in range(length(hdrs))) {
+    if (toLower(hdrs[i][0]) == low) {
+      hdrs[i] = [name, value]
+      return null
+    }
+  }
+  push(hdrs, [name, value])
+  null
+}
+
+def _send(c, u, m, body, ctype, userHdr, absolute, proxyAuth, dropAuth) {
+  val target = if (absolute) then "${u.scheme}://${_hostPort(u, true)}${u.path}" else u.path
+  val hdrs = []
+  _setHeader(hdrs, "Host", _hostPort(u, false))
+  _setHeader(hdrs, "Connection", "close")
+  _setHeader(hdrs, "Accept", "*/*")
+  if (ctype != null) { _setHeader(hdrs, "Content-Type", ctype) }
+  if (body != null) { _setHeader(hdrs, "Content-Length", "${utf8Length(body)}") }
+  if (u.user != null && !dropAuth) {
+    _setHeader(hdrs, "Authorization", "Basic ${base64Encode(u.user)}")
+  }
+  if (proxyAuth != null) { _setHeader(hdrs, "Proxy-Authorization", "Basic ${proxyAuth}") }
+  if (userHdr != null) {
+    for (k in keys(userHdr)) { _setHeader(hdrs, k, "${userHdr[k]}") }
+  }
+  var req = "${m} ${target} HTTP/1.1\r\n"
+  for (h in hdrs) { req = req + "${h[0]}: ${h[1]}\r\n" }
+  req = req + "\r\n"
+  try(() -> {
+    socketWrite(c, req)
+    if (body != null && body != "") { socketWrite(c, body) }
+  }, e -> _fail(e))
+  null
+}
+
+// --------------------------------------------------------------------- transport
+
+def _connectTo(host, port, deadline) {
+  val ms = _left(deadline)
+  try(() -> connect(host, port, ms), e -> _fail(e))
+}
+
+def _tls(c, host, deadline) {
+  try(() -> tlsWrap(c, host, null, _left(deadline)), e -> _fail(e))
+}
+
+// Opens the transport to the target, directly or through the proxy, and reports
+// how the request line must be spelled: {conn, absolute, proxyAuth}.
+def _open(u, proxy, deadline) {
+  if (proxy == null) {
+    val c = _connectTo(u.host, u.port, deadline)
+    if (u.scheme == "https") {
+      try(() -> _tls(c, u.host, deadline), e -> { closeSocket(c); error(e) })
+    }
+    return {"conn": c, "absolute": false, "proxyAuth": null}
+  }
+  val pp = _parseProxy(proxy)
+  val c = _connectTo(pp.host, pp.port, deadline)
+  if (u.scheme != "https") {
+    return {"conn": c, "absolute": true, "proxyAuth": pp.auth}
+  }
+  // An https target through a proxy: a CONNECT tunnel, then TLS inside it.
+  try(() -> {
+    val hp = _hostPort(u, true)
+    var req = "CONNECT ${hp} HTTP/1.1\r\nHost: ${hp}\r\n"
+    if (pp.auth != null) { req = req + "Proxy-Authorization: Basic ${pp.auth}\r\n" }
+    socketWrite(c, "${req}\r\n")
+    val status = _status(_line(c, deadline))
+    _headers(c, deadline)
+    if (status < 200 || status > 299) { _fail("the proxy refused the CONNECT: status ${status}") }
+    _tls(c, u.host, deadline)
+  }, e -> { closeSocket(c); error(e) })
+  {"conn": c, "absolute": false, "proxyAuth": null}
+}
+
+// -------------------------------------------------------------------- the request
+
+// One whole call: open, send, read, follow redirects, within one 60 s budget.
+def _request(method, url, body, ctype, userHdr, proxyArg) {
+  val deadline = timeMillis() + 60000
+  var m = method
+  var b = body
+  var ct = ctype
+  var cur = url
+  var dropAuth = false
+  var hops = 0
+  while (true) {
+    val u = _parseUrl(cur)
+    var proxy = proxyArg
+    if (proxy == null) { proxy = _envProxy(u.scheme, u.host) }
+    val opened = _open(u, proxy, deadline)
+    val c = opened.conn
+    val answer = try(() -> {
+      _send(c, u, m, b, ct, userHdr, opened.absolute, opened.proxyAuth, dropAuth)
+      var status = _status(_line(c, deadline))
+      var hdrs = _headers(c, deadline)
+      // 1xx interim responses precede the real one; curl reads past them too.
+      while (status >= 100 && status <= 199) {
+        status = _status(_line(c, deadline))
+        hdrs = _headers(c, deadline)
+      }
+      val loc = get(hdrs, "location", null)
+      if (status >= 300 && status <= 399 && loc != null && loc != "") {
+        ["redirect", status, loc]
+      } else {
+        ["done", status, _readBody(c, m, status, hdrs, deadline)]
+      }
+    }, e -> { closeSocket(c); error(e) })
+    closeSocket(c)
+    if (answer[0] == "done") {
+      return {"status": answer[1], "body": answer[2]}
+    }
+    hops = hops + 1
+    if (hops > 32) { _fail("maximum (32) redirects followed") }
+    val status = answer[1]
+    // 301/302/303 turn a body-carrying method into GET; 307/308 keep everything.
+    if ((status == 301 || status == 302 || status == 303) && m != "GET" && m != "HEAD") {
+      m = "GET"
+      b = null
+      ct = null
+    }
+    val next = _resolve(u, answer[2])
+    val to = _parseUrl(next)
+    // Credentials do not travel to another host, as curl drops them.
+    if (toLower(to.host) != toLower(u.host) || to.port != u.port) { dropAuth = true }
+    cur = next
+  }
+}
+
+// ------------------------------------------------------------------------ builtins
+
+def httpGet(url, headers = _absent) {
+  _str("httpGet", 1, url)
+  val hdr = if (headers == _absent) then null else _obj("httpGet", 2, headers)
+  _request("GET", url, null, null, hdr, null).body
+}
+
+def httpPost(url, body, contentType = _absent, headers = _absent) {
+  _str("httpPost", 1, url)
+  val ct = if (contentType == _absent) then "text/plain; charset=utf-8"
+           else _str("httpPost", 3, contentType)
+  val hdr = if (headers == _absent) then null else _obj("httpPost", 4, headers)
+  _request("POST", url, "${body}", ct, hdr, null).body
+}
+
+def httpRequest(method, url, body = _absent, contentType = _absent, headers = _absent) {
+  val m = toUpper(_str("httpRequest", 1, method))
+  _str("httpRequest", 2, url)
+  val b = if (body == _absent || body == null) then null else "${body}"
+  val ct = if (contentType == _absent || contentType == null) then null
+           else _str("httpRequest", 4, contentType)
+  val hdr = if (headers == _absent) then null else _obj("httpRequest", 5, headers)
+  _request(m, url, b, ct, hdr, null)
+}
+
+def httpGetProxy(url, proxy) {
+  _str("httpGetProxy", 1, url)
+  _str("httpGetProxy", 2, proxy)
+  _request("GET", url, null, null, null, proxy).body
+}

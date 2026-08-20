@@ -1,0 +1,45 @@
+// if / elsif / else, while, for, break, continue, select.
+def classify(n) {
+  if (n < 0) then "neg"
+  elsif (n == 0) then "zero"
+  elsif (n < 10) then "small"
+  else "large"
+}
+println(classify(-5), classify(0), classify(5), classify(50))
+
+var total = 0
+var i = 0
+while (i < 10) {
+  i = i + 1
+  if (i % 2 == 0) { continue }
+  if (i > 7) { break }
+  total = total + i
+}
+println(total, i)
+
+var forSum = 0
+for (k in range(1, 11)) { forSum = forSum + k }
+println(forSum)
+
+var down = 0
+for (k in range(10, 0, -2)) { down = down + k }
+println(down)
+
+var nested = 0
+for (x in range(4)) {
+  for (y in range(4)) {
+    if (y == 2) { break }
+    nested = nested + 1
+  }
+}
+println(nested)
+
+def name(n) {
+  select (n) {
+    case 1: "one"
+    case 2: "two"
+    case 3: "three"
+    default: "many"
+  }
+}
+println(name(1), name(2), name(3), name(9))

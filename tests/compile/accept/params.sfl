@@ -1,0 +1,19 @@
+// Defaults, rest parameters and arity checking.
+def greet(name, greeting = "hello") = greeting + ", " + name
+println(greet("a"), greet("a", "hi"))
+
+def total(first, ...rest) {
+  var n = first
+  for (v in rest) { n += v }
+  n
+}
+println(total(1), total(1, 2, 3))
+
+def defaulted(a, b = 2, c = 3) = a + b + c
+println(defaulted(1), defaulted(1, 20), defaulted(1, 20, 300))
+
+println(attempt(() -> greet()).error.message)
+println(attempt(() -> total()).error.message)
+
+val lam = (a, b = 10) -> a * b
+println(lam(2), lam(2, 3))

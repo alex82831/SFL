@@ -1,0 +1,64 @@
+// uuid — RFC 4122 identifiers.
+//
+//   import "uuid"
+//
+//   uuid4()               // "8f14e45f-ceea-467f-a0e6-6ffbc0eafd6a"
+//   uuid7()               // time-ordered, for database keys
+//   uuidValidate(s)       // true for any well-formed UUID
+//   uuidVersion(s)        // 4, 7, ...
+
+// A random (version 4) UUID.
+def uuid4() {
+  val b = randomBytes(16)
+  b[6] = bitOr(bitAnd(b[6], 0x0f), 0x40)
+  b[8] = bitOr(bitAnd(b[8], 0x3f), 0x80)
+  _format(b)
+}
+
+// A time-ordered (version 7) UUID: 48 bits of epoch milliseconds, then random.
+// Sorts by creation time, which keeps database indexes happy.
+def uuid7() {
+  val b = randomBytes(16)
+  val t = timeMillis()
+  b[0] = bitAnd(shiftRightU(t, 40), 0xff)
+  b[1] = bitAnd(shiftRightU(t, 32), 0xff)
+  b[2] = bitAnd(shiftRightU(t, 24), 0xff)
+  b[3] = bitAnd(shiftRightU(t, 16), 0xff)
+  b[4] = bitAnd(shiftRightU(t, 8), 0xff)
+  b[5] = bitAnd(t, 0xff)
+  b[6] = bitOr(bitAnd(b[6], 0x0f), 0x70)
+  b[8] = bitOr(bitAnd(b[8], 0x3f), 0x80)
+  _format(b)
+}
+
+// The all-zero UUID.
+def uuidNil() = "00000000-0000-0000-0000-000000000000"
+
+// True when s is a well-formed 8-4-4-4-12 hex UUID (any version, any case).
+def uuidValidate(s) {
+  isString(s) && matches(toLower(s),
+    "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+}
+
+// The version digit of a well-formed UUID, or an error for anything else.
+def uuidVersion(s) {
+  if (!uuidValidate(s)) then error("uuid: '" + toString(s) + "' is not a UUID")
+  parseInt(charAt(s, 14), 16)
+}
+
+// The 16 bytes of a UUID string; uuidFromBytes is its inverse.
+def uuidToBytes(s) {
+  if (!uuidValidate(s)) then error("uuid: '" + toString(s) + "' is not a UUID")
+  hexDecodeBytes(replace(toLower(s), "-", ""))
+}
+
+def uuidFromBytes(b) {
+  if (!isArray(b) || length(b) != 16) then error("uuid: expected 16 bytes")
+  _format(b)
+}
+
+def _format(b) {
+  val hex = hexEncodeBytes(b)
+  substring(hex, 0, 8) + "-" + substring(hex, 8, 12) + "-" + substring(hex, 12, 16) +
+    "-" + substring(hex, 16, 20) + "-" + substring(hex, 20, 32)
+}

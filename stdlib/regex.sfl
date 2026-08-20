@@ -1,0 +1,852 @@
+// Part of the SFL standard library: the regular-expression builtins, written in SFL
+// because a compiled program links no regex engine.
+//
+// The interpreter's engine is the RE2 port that ships with the runtime, so this is a
+// reimplementation of *that* engine's syntax, not of Java's: the pattern is parsed
+// into a tree by the same rules, and every rejected pattern is rejected with the same
+// words, the same fragment of the pattern and the same index.
+//
+// Matching is by backtracking. Every matching step takes a continuation `k`: it is
+// handed the position after the step and answers with the end of the whole match, or
+// -1 to ask the step for another way to match. That is what makes alternation,
+// quantifiers and group captures backtrack correctly. RE2 runs an NFA instead, but the
+// two agree because RE2 orders its threads exactly as backtracking orders its choices.
+//
+// Two constructs of the engine are out of reach here, because reproducing them means
+// reproducing a Unicode database rather than an algorithm, and a wrong answer would be
+// worse than a refusal. Both raise an error naming themselves:
+//   \p{...} and \P{...}  — needs the engine's category, script and block tables.
+//   the (?i) flag        — needs the engine's case-fold orbit and case-mapping tables.
+// The other inline flags, (?m), (?s) and (?U), are supported.
+//
+// Two inputs make the engine throw an exception that nothing catches, taking the whole
+// process with it: a pattern ending in \x followed by a single hex digit, and a ${name}
+// in a replacement that names no group or is left unterminated. Nothing written in SFL
+// can end a process that way, so both raise an ordinary error here instead; the calls
+// are marked where they occur.
+
+// ------------------------------------------------------------------- parser flags
+
+// The same bits the engine uses, so that the (?-imsU) sign trick below can be copied
+// verbatim. Only the four that change what this module does are given names; a fresh
+// pattern starts one-line, as the engine's PERL flag set does.
+val _FOLD = 0x01
+val _DOTNL = 0x08
+val _ONELINE = 0x10
+val _UNGREEDY = 0x20
+
+// --------------------------------------------------------------- character sets
+
+// Shorthand classes as sorted, disjoint [low, high] code point ranges, and their
+// negations over the whole rune space, which is what the engine stores for \D, \S
+// and \W: a negation flag would be wrong inside a class that is itself negated.
+val _MAXRUNE = 0x10ffff
+
+val _D = [[0x30, 0x39]]
+val _ND = [[0x0, 0x2f], [0x3a, _MAXRUNE]]
+val _S = [[0x9, 0xa], [0xc, 0xd], [0x20, 0x20]]
+val _NS = [[0x0, 0x8], [0xb, 0xb], [0xe, 0x1f], [0x21, _MAXRUNE]]
+val _W = [[0x30, 0x39], [0x41, 0x5a], [0x5f, 0x5f], [0x61, 0x7a]]
+val _NW = [[0x0, 0x2f], [0x3a, 0x40], [0x5b, 0x5e], [0x60, 0x60],
+               [0x7b, _MAXRUNE]]
+
+def _inSet(rs, c) {
+  for (r in rs) {
+    if (r[0] <= c && c <= r[1]) { return true }
+  }
+  false
+}
+
+// The engine's own idea of a word character, ASCII only, shared by \w and \b.
+def _isWord(c) = (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) ||
+  c == 0x5f || (c >= 0x61 && c <= 0x7a)
+
+def _isAlnum(c) = (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5a) ||
+  (c >= 0x61 && c <= 0x7a)
+
+def _unhex(c) {
+  if (c >= 0x30 && c <= 0x39) { return c - 0x30 }
+  if (c >= 0x61 && c <= 0x66) { return c - 0x61 + 10 }
+  if (c >= 0x41 && c <= 0x46) { return c - 0x41 + 10 }
+  return -1
+}
+
+// ---------------------------------------------------------------------- parsing
+
+// Both error forms carry a fragment of the pattern and a caret, exactly as the
+// engine's PatternSyntaxException renders itself. The fragment is not always the
+// whole pattern and the index is not always inside it, so neither is assumed here.
+def _bad(ps, what, shown, at) {
+  error("${ps.fn}: invalid regular expression: ${what} near index ${at}" +
+    "\n" + shown + "\n" + (if (at > 0) then repeat(" ", at) else "") + "^")
+}
+
+def _no(ps, what, shown, at) {
+  error("${ps.fn}: unsupported regular expression: ${what} near index ${at}" +
+    "\n" + shown + "\n" + (if (at > 0) then repeat(" ", at) else "") + "^")
+}
+
+def _invalidEscape(ps) {
+  _bad(ps, "Illegal/unsupported escape sequence", ps.p, ps.i - 1)
+}
+
+// The cursor moves over UTF-16 code units but reads whole code points, so that a
+// quantifier or a class range applies to a character rather than to half of one.
+def _cpAt(s, i, n) {
+  val o = ord(s[i])
+  if (o < 0xd800 || o > 0xdbff || i + 1 >= n) { return o }
+  val d = ord(s[i + 1])
+  if (d < 0xdc00 || d > 0xdfff) then o else ord(substring(s, i, i + 2))
+}
+
+def _peek(ps) = _cpAt(ps.p, ps.i, ps.n)
+
+def _pop(ps) {
+  val r = _cpAt(ps.p, ps.i, ps.n)
+  ps.i += if (r > 0xffff) then 2 else 1
+  r
+}
+
+def _from(ps, at) = substring(ps.p, at, ps.i)
+
+// \Q...\E may push the cursor past the end, and the engine lets it, so the rest of
+// the pattern is always taken defensively.
+def _rest(ps) = if (ps.i >= ps.n) then "" else substring(ps.p, ps.i, ps.n)
+
+// One escape sequence, as a code point. Shared by atoms and class items.
+def _escape(ps) {
+  ps.i += 1
+  if (ps.i >= ps.n) { _bad(ps, "Trailing Backslash", ps.p, ps.i) }
+  val c = _pop(ps)
+  // A single non-zero digit would be a back reference, which the engine has not got;
+  // two or more are an octal escape.
+  if (c >= 0x31 && c <= 0x37) {
+    if (ps.i >= ps.n || _peek(ps) < 0x30 || _peek(ps) > 0x37) {
+      _invalidEscape(ps)
+    }
+    return _octal(ps, c - 0x30)
+  }
+  if (c == 0x30) { return _octal(ps, 0) }
+  if (c == 0x78) { return _hex(ps) }
+  if (c == 0x61) { return 7 }
+  if (c == 0x66) { return 0xc }
+  if (c == 0x6e) { return 0xa }
+  if (c == 0x72) { return 0xd }
+  if (c == 0x74) { return 0x9 }
+  if (c == 0x76) { return 0xb }
+  // Escaped non-word characters always stand for themselves; escaped letters and
+  // digits that mean nothing are refused rather than quietly accepted.
+  if (!_isAlnum(c)) { return c }
+  _invalidEscape(ps)
+}
+
+// Up to three octal digits in all, one of which the caller has already read.
+def _octal(ps, first) {
+  var r = first
+  var i = 1
+  while (i < 3 && ps.i < ps.n && _peek(ps) >= 0x30 && _peek(ps) <= 0x37) {
+    r = r * 8 + (_peek(ps) - 0x30)
+    ps.i += 1
+    i += 1
+  }
+  r
+}
+
+def _hex(ps) {
+  if (ps.i >= ps.n) { _invalidEscape(ps) }
+  var c = _pop(ps)
+  if (c == 0x7b) {
+    var r = 0
+    var nhex = 0
+    var more = true
+    while (more) {
+      if (ps.i >= ps.n) { _invalidEscape(ps) }
+      c = _pop(ps)
+      if (c == 0x7d) { more = false }
+      else {
+        val v = _unhex(c)
+        if (v < 0) { _invalidEscape(ps) }
+        r = r * 16 + v
+        if (r > _MAXRUNE) { _invalidEscape(ps) }
+        nhex += 1
+      }
+    }
+    if (nhex == 0) { _invalidEscape(ps) }
+    return r
+  }
+  val x = _unhex(c)
+  // The engine reads the second digit without checking that there is one, so a
+  // pattern ending in \xH kills it outright; there is no way to reproduce that, and
+  // the escape is malformed either way.
+  if (ps.i >= ps.n) { _invalidEscape(ps) }
+  val y = _unhex(_pop(ps))
+  if (x < 0 || y < 0) { _invalidEscape(ps) }
+  x * 16 + y
+}
+
+// \d \D \s \S \w \W, wherever they may appear. Answers null when what follows the
+// cursor is not one of them, having moved the cursor an unspecified distance.
+def _perlClass(ps) {
+  if (ps.i >= ps.n) { return null }
+  if (_pop(ps) != 0x5c) { return null }
+  if (ps.i >= ps.n) { return null }
+  val c = _pop(ps)
+  if (c == 0x64) { return _D }
+  if (c == 0x44) { return _ND }
+  if (c == 0x73) { return _S }
+  if (c == 0x53) { return _NS }
+  if (c == 0x77) { return _W }
+  if (c == 0x57) { return _NW }
+  null
+}
+
+// \p{...} and \P{...} are recognised and then refused: matching them means carrying
+// the engine's Unicode tables, and answering from a smaller table would be a lie.
+def _unicodeClass(ps, at) {
+  val rest = _rest(ps)
+  if (!startsWith(rest, "\\p") && !startsWith(rest, "\\P")) { return false }
+  _no(ps, "Unicode property '\\" + rest[1] + "{...}'", ps.p, at)
+}
+
+def _classChar(ps) {
+  if (ps.i >= ps.n) { _bad(ps, "Unclosed character class", ps.p, ps.i - 1) }
+  if (ps.p[ps.i] == "\\") then _escape(ps) else _pop(ps)
+}
+
+// `[`, `&` and a leading `]` are ordinary characters here: the engine has neither
+// nested classes nor class intersection, and it lets a class open with `]`.
+def _class(ps) {
+  ps.i += 1
+  var neg = false
+  if (ps.i < ps.n && ps.p[ps.i] == "^") { neg = true; ps.i += 1 }
+  val rs = []
+  var first = true
+  // Running off the end enters the body once more, so that the class item reports
+  // the unclosed class rather than the loop reporting nothing.
+  while (ps.i >= ps.n || ps.p[ps.i] != "]" || first) {
+    first = false
+    val at = ps.i
+    _unicodeClass(ps, at)
+    ps.i = at
+    val set = _perlClass(ps)
+    if (!isNull(set)) {
+      for (r in set) { push(rs, r) }
+    } else {
+      ps.i = at
+      val lo = _classChar(ps)
+      var hi = lo
+      if (ps.i < ps.n && ps.p[ps.i] == "-") {
+        ps.i += 1
+        // [a-] is (a|-), so a `-` just before the `]` is a character of its own.
+        if (ps.i < ps.n && ps.p[ps.i] == "]") { ps.i -= 1 }
+        else {
+          hi = _classChar(ps)
+          if (hi < lo) { _bad(ps, "Illegal character range", ps.p, ps.i - 1) }
+        }
+      }
+      push(rs, [lo, hi])
+    }
+  }
+  ps.i += 1
+  {"kind": "cls", "neg": neg, "rs": rs}
+}
+
+// A capture name is any run of letters, digits and underscores.
+def _validName(name) {
+  if (length(name) == 0) { return false }
+  for (c in name) {
+    if (c != "_" && !_isAlnum(ord(c))) { return false }
+  }
+  true
+}
+
+// What follows "(?": a named capture, a plain group, or a flag setting that is not a
+// group at all. Answers {"cap": n} for the first two and null for the last, having
+// left the new flags in ps.fl.
+def _perlFlags(ps) {
+  val open = ps.i
+  val s = _rest(ps)
+  var nameAt = -1
+  var nameSkip = 0
+  if (startsWith(s, "(?<")) { nameAt = 3; nameSkip = 4 }
+  elsif (startsWith(s, "(?P<")) { nameAt = 4; nameSkip = 5 }
+
+  if (nameAt > 0) {
+    val badName = "capturing group name does not start with a Latin letter"
+    val end = indexOf(s, ">")
+    if (end < 0) { _bad(ps, badName, s, 0) }
+    val name = substring(s, nameAt, end)
+    ps.i += length(name) + nameSkip
+    if (!_validName(name)) { _bad(ps, badName, s, end) }
+    ps.ng += 1
+    if (has(ps.names, name)) {
+      _bad(ps, "Named capturing group <" + name + "> is already defined", s, end)
+    }
+    ps.names[name] = ps.ng
+    return {"cap": ps.ng}
+  }
+
+  ps.i += 2
+  var flags = ps.fl
+  var sign = 1
+  var sawFlag = false
+  var group = false
+  var done = false
+  var completed = false
+  while (ps.i < ps.n && !done) {
+    val c = _pop(ps)
+    if (c == 0x69) { flags = bitOr(flags, _FOLD); sawFlag = true }
+    elsif (c == 0x6d) { flags = bitAnd(flags, bitNot(_ONELINE)); sawFlag = true }
+    elsif (c == 0x73) { flags = bitOr(flags, _DOTNL); sawFlag = true }
+    elsif (c == 0x55) { flags = bitOr(flags, _UNGREEDY); sawFlag = true }
+    elsif (c == 0x2d) {
+      // Negation: the flags are inverted so that the settings above turn into
+      // clearings, and inverted again once the group opens.
+      if (sign < 0) { done = true }
+      else { sign = -1; flags = bitNot(flags); sawFlag = false }
+    }
+    elsif (c == 0x3a || c == 0x29) {
+      if (sign < 0) {
+        if (!sawFlag) { done = true }
+        if (!done) { flags = bitNot(flags) }
+      }
+      if (!done) {
+        group = c == 0x3a
+        completed = true
+        done = true
+      }
+    }
+    else { done = true }
+  }
+  if (!completed) {
+    _bad(ps, "Unknown inline modifier", substring(ps.p, open, ps.n), ps.i - 1)
+  }
+  if (bitAnd(flags, _FOLD) != bitAnd(ps.fl, _FOLD)) {
+    _no(ps, "case-insensitive flag '(?i)'", ps.p, open)
+  }
+  ps.fl = flags
+  if (group) then {"cap": 0} else null
+}
+
+// A group, or null when "(?...)" only set flags. Numbered from the left parenthesis,
+// which is what the engine does too.
+def _group(ps) {
+  val saved = ps.fl
+  var idx = 0
+  if (startsWith(_rest(ps), "(?")) {
+    val g = _perlFlags(ps)
+    if (isNull(g)) { return null }
+    idx = g.cap
+  } else {
+    ps.i += 1
+    ps.ng += 1
+    idx = ps.ng
+  }
+  val opts = _alts(ps)
+  if (ps.i >= ps.n || ps.p[ps.i] != ")") { _bad(ps, "Unclosed group", ps.p, ps.i) }
+  ps.i += 1
+  ps.fl = saved
+  {"kind": "grp", "idx": idx, "opts": opts}
+}
+
+// A run of decimal digits: -1 when there is none or it has a leading zero, -2 when it
+// is too long to be a bound.
+def _int(ps) {
+  val start = ps.i
+  while (ps.i < ps.n && ps.p[ps.i] >= "0" && ps.p[ps.i] <= "9") { ps.i += 1 }
+  val digits = substring(ps.p, start, ps.i)
+  val len = length(digits)
+  if (len == 0 || (len > 1 && digits[0] == "0")) { return -1 }
+  if (len > 8) { return -2 }
+  toInt(digits)
+}
+
+// {n}, {n,} or {n,m}, or null. A `{` that starts no valid repetition is a literal to
+// this engine, so the caller rewinds; a `{` that starts a bad one is an error.
+def _repeatSpec(ps) {
+  val start = ps.i
+  if (ps.i >= ps.n || ps.p[ps.i] != "{") { return null }
+  ps.i += 1
+  val lo = _int(ps)
+  if (lo == -1 || ps.i >= ps.n) { return null }
+  var hi = lo
+  if (ps.p[ps.i] != ",") { hi = lo }
+  else {
+    ps.i += 1
+    if (ps.i >= ps.n) { return null }
+    if (ps.p[ps.i] == "}") { hi = -1 }
+    else {
+      hi = _int(ps)
+      if (hi == -1) { return null }
+    }
+  }
+  if (ps.i >= ps.n || ps.p[ps.i] != "}") { return null }
+  ps.i += 1
+  if (lo < 0 || lo > 1000 || hi == -2 || hi > 1000 || (hi >= 0 && lo > hi)) {
+    _bad(ps, "Dangling meta character '*'", _from(ps, start), 0)
+  }
+  {"lo": lo, "hi": hi}
+}
+
+def _char(cp) = {"kind": "char", "cp": cp}
+
+def _oneCharKind(k) = k == "char" || k == "any" || k == "anynl" || k == "cls"
+
+// Applies a repetition to the last thing in the sequence. The optional lazy marker is
+// read first, then stacked repetitions are refused, then an absent operand: that is
+// the engine's order, and each case names a different fragment of the pattern.
+def _repeat(ps, seq, lo, hi, at, lastAt) {
+  var lazy = bitAnd(ps.fl, _UNGREEDY) != 0
+  if (ps.i < ps.n && ps.p[ps.i] == "?") { lazy = !lazy; ps.i += 1 }
+  if (lastAt >= 0) {
+    _bad(ps, "Invalid nested repetition operator", _from(ps, lastAt), 0)
+  }
+  if (length(seq) == 0) {
+    _bad(ps, "Dangling meta character '*'", _from(ps, at), 0)
+  }
+  val atom = pop(seq)
+  push(seq, {"kind": "rep", "node": atom, "lo": lo, "hi": hi, "lazy": lazy,
+             "one": _oneCharKind(atom.kind)})
+}
+
+// \Q...\E: every UTF-16 unit up to the next \E becomes a literal of its own, and the
+// cursor is moved past both, whether or not the \E is really there.
+def _quoted(ps, seq) {
+  val rest = _rest(ps)
+  val cut = indexOf(rest, "\\E")
+  val lit = if (cut >= 0) then substring(rest, 0, cut) else rest
+  var i = 0
+  while (i < length(lit)) {
+    push(seq, _char(ord(lit[i])))
+    i += 1
+  }
+  ps.i += length(lit) + 2
+}
+
+// Everything after a backslash that is not simply a character.
+def _backslash(ps, seq) {
+  val at = ps.i
+  ps.i += 1
+  if (ps.i < ps.n) {
+    val c = _pop(ps)
+    if (c == 0x41) { push(seq, {"kind": "bot"}); return null }
+    if (c == 0x62) { push(seq, {"kind": "wb", "neg": false}); return null }
+    if (c == 0x42) { push(seq, {"kind": "wb", "neg": true}); return null }
+    if (c == 0x43) { _bad(ps, "Illegal/unsupported escape sequence", "\\C", 0) }
+    if (c == 0x51) { _quoted(ps, seq); return null }
+    if (c == 0x7a) { push(seq, {"kind": "eot"}); return null }
+    ps.i = at
+  }
+  _unicodeClass(ps, at)
+  val set = _perlClass(ps)
+  if (!isNull(set)) {
+    push(seq, {"kind": "cls", "neg": false, "rs": set})
+    return null
+  }
+  ps.i = at
+  push(seq, _char(_escape(ps)))
+}
+
+def _atom(ps, seq) {
+  val c = ps.p[ps.i]
+  if (c == "(") {
+    val g = _group(ps)
+    if (!isNull(g)) { push(seq, g) }
+  }
+  elsif (c == "[") { push(seq, _class(ps)) }
+  elsif (c == "\\") { _backslash(ps, seq) }
+  elsif (c == ".") {
+    ps.i += 1
+    push(seq, {"kind": if (bitAnd(ps.fl, _DOTNL) != 0) then "anynl" else "any"})
+  }
+  elsif (c == "^") {
+    ps.i += 1
+    push(seq, {"kind": if (bitAnd(ps.fl, _ONELINE) != 0) then "bot" else "bol"})
+  }
+  elsif (c == "$") {
+    ps.i += 1
+    push(seq, {"kind": if (bitAnd(ps.fl, _ONELINE) != 0) then "eot" else "eol"})
+  }
+  else { push(seq, _char(_pop(ps))) }
+}
+
+def _seq(ps) {
+  val seq = []
+  // Where the previous token's repetition operator began, so that a**, a{2}+ and even
+  // a{x}* — where the `{` was only a literal — are refused as stacked repetitions.
+  var lastAt = -1
+  while (ps.i < ps.n && ps.p[ps.i] != "|" && ps.p[ps.i] != ")") {
+    val c = ps.p[ps.i]
+    var at = -1
+    if (c == "*" || c == "+" || c == "?") {
+      at = ps.i
+      ps.i += 1
+      _repeat(ps, seq, if (c == "+") then 1 else 0, if (c == "?") then 1 else -1,
+                 at, lastAt)
+    } elsif (c == "{") {
+      at = ps.i
+      val spec = _repeatSpec(ps)
+      if (isNull(spec)) {
+        ps.i = at
+        push(seq, _char(_pop(ps)))
+      } else {
+        _repeat(ps, seq, spec.lo, spec.hi, at, lastAt)
+      }
+    } else {
+      _atom(ps, seq)
+    }
+    lastAt = at
+  }
+  seq
+}
+
+def _alts(ps) {
+  val opts = [_seq(ps)]
+  while (ps.i < ps.n && ps.p[ps.i] == "|") {
+    ps.i += 1
+    push(opts, _seq(ps))
+  }
+  opts
+}
+
+// A pattern whose every match must begin with one particular character lets the search
+// skip positions without entering the matcher.
+def _lead(opts) {
+  if (length(opts) != 1 || length(opts[0]) == 0) { return null }
+  val nd = opts[0][0]
+  if (_oneCharKind(nd.kind)) then nd else null
+}
+
+def _compile(p, fn) {
+  val ps = {"p": p, "i": 0, "n": length(p), "ng": 0, "fn": fn, "names": {},
+            "fl": _ONELINE}
+  val opts = _alts(ps)
+  if (ps.i < ps.n) { _bad(ps, "Unmatched closing ')'", p, ps.i - 1) }
+  {"opts": opts, "ng": ps.ng, "names": ps.names, "lead": _lead(opts)}
+}
+
+// --------------------------------------------------------------------- matching
+
+// Surrogate pairs count as one character, so that `.` and classes see whole code
+// points the way the engine does. A lone surrogate is a character of its own, which
+// is what makes a search that resumes inside a pair behave the same.
+def _width(st, pos) {
+  val c = ord(st.s[pos])
+  if (c < 0xd800 || c > 0xdbff) { return 1 }
+  if (pos + 1 >= st.n) { return 1 }
+  val d = ord(st.s[pos + 1])
+  if (d >= 0xdc00 && d <= 0xdfff) then 2 else 1
+}
+
+def _step(st, pos) = if (pos < st.n) then pos + _width(st, pos) else pos + 1
+
+// Width consumed by a single-character node, or 0 when it does not match.
+def _one(st, nd, pos) {
+  if (pos >= st.n) { return 0 }
+  val w = _width(st, pos)
+  val c = if (w == 1) then ord(st.s[pos]) else ord(substring(st.s, pos, pos + 2))
+  select (nd.kind) {
+    case "char":  if (c == nd.cp) then w else 0
+    case "any":   if (c == 0xa) then 0 else w
+    case "anynl": w
+    default:      if (_inSet(nd.rs, c) != nd.neg) then w else 0
+  }
+}
+
+// \b sits between a word character and something that is not one. Only ASCII letters,
+// digits and underscore count as word characters, as \w does.
+def _wordAt(st, pos) = pos >= 0 && pos < st.n && _isWord(ord(st.s[pos]))
+
+def _node(st, nd, pos, k) {
+  select (nd.kind) {
+    case "grp": _grp(st, nd, pos, k)
+    case "rep": _rep(st, nd, pos, k)
+    case "bot": if (pos == 0) then k(pos) else -1
+    case "eot": if (pos == st.n) then k(pos) else -1
+    case "bol": if (pos == 0 || ord(st.s[pos - 1]) == 0xa) then k(pos) else -1
+    case "eol": if (pos == st.n || ord(st.s[pos]) == 0xa) then k(pos) else -1
+    case "wb": {
+      val bound = _wordAt(st, pos - 1) != _wordAt(st, pos)
+      if (bound != nd.neg) then k(pos) else -1
+    }
+    default: {
+      val w = _one(st, nd, pos)
+      if (w > 0) then k(pos + w) else -1
+    }
+  }
+}
+
+def _chain(st, seq, at, pos, k) {
+  if (at == length(seq)) then k(pos)
+  else _node(st, seq[at], pos, p -> _chain(st, seq, at + 1, p, k))
+}
+
+def _opts(st, opts, pos, k) {
+  for (opt in opts) {
+    val r = _chain(st, opt, 0, pos, k)
+    if (r >= 0) { return r }
+  }
+  -1
+}
+
+// The capture is written only once the rest of the pattern is being tried, and taken
+// back if that fails, so a group keeps whatever the successful path gave it.
+def _grp(st, nd, pos, k) {
+  if (nd.idx == 0) { return _opts(st, nd.opts, pos, k) }
+  val gs = st.gs
+  val lo = nd.idx * 2
+  _opts(st, nd.opts, pos, { p ->
+    val wasStart = gs[lo]
+    val wasEnd = gs[lo + 1]
+    gs[lo] = pos
+    gs[lo + 1] = p
+    val r = k(p)
+    if (r < 0) { gs[lo] = wasStart; gs[lo + 1] = wasEnd }
+    r
+  })
+}
+
+def _rep(st, nd, pos, k) {
+  if (nd.one) then _repOne(st, nd, pos, k) else _repAny(st, nd, 0, pos, k)
+}
+
+// Repeating a single-character node: measure the run once, then hand the continuation
+// each stop in turn. This keeps a{1000} or .* off the call stack.
+def _repOne(st, nd, pos, k) {
+  val cap = if (nd.hi < 0) then st.n - pos else nd.hi
+  val stops = [pos]
+  var end = pos
+  var count = 0
+  while (count < cap) {
+    val w = _one(st, nd.node, end)
+    if (w == 0) { break }
+    end += w
+    count += 1
+    push(stops, end)
+  }
+  if (count < nd.lo) { return -1 }
+  var j = if (nd.lazy) then nd.lo else count
+  while (j >= nd.lo && j <= count) {
+    val r = k(stops[j])
+    if (r >= 0) { return r }
+    j = if (nd.lazy) then j + 1 else j - 1
+  }
+  -1
+}
+
+// What follows an iteration that consumed nothing, which is where engines differ. The
+// engine unrolls a bounded repetition into copies of the body, and those copies
+// happily match nothing, so only the loops need a guard.
+def _repMore(st, nd, count, pos, p, k) {
+  if (p != pos || nd.hi >= 0 || count < nd.lo - 1) {
+    return _repAny(st, nd, count + 1, p, k)
+  }
+  // The last required iteration of x+ (and of x{n,}) ends the loop when it matched
+  // nothing, keeping what it captured. Past the minimum the iteration is thrown away
+  // instead, so the body gets another chance and (a?)* cannot spin for ever.
+  if (count == nd.lo - 1) then k(pos) else -1
+}
+
+def _repAny(st, nd, count, pos, k) {
+  if (count < nd.lo) {
+    return _node(st, nd.node, pos, p -> _repMore(st, nd, count, pos, p, k))
+  }
+  val more = nd.hi < 0 || count < nd.hi
+  if (nd.lazy) {
+    val stop = k(pos)
+    if (stop >= 0 || !more) { return stop }
+    return _node(st, nd.node, pos, p -> _repMore(st, nd, count, pos, p, k))
+  }
+  if (more) {
+    val r = _node(st, nd.node, pos, p -> _repMore(st, nd, count, pos, p, k))
+    if (r >= 0) { return r }
+  }
+  k(pos)
+}
+
+// ------------------------------------------------------------------ the matcher
+
+def _state(prog, s) = {"s": s, "n": length(s), "gs": newArray((prog.ng + 1) * 2, -1)}
+
+// Tries the pattern at exactly `start`. `whole` demands it reach the end of the
+// string, which is what matches() wants.
+def _at(st, prog, start, whole) {
+  val gs = st.gs
+  var i = 0
+  while (i < length(gs)) { gs[i] = -1; i += 1 }
+  val end = _opts(st, prog.opts, start, p -> if (whole && p != st.n) then -1 else p)
+  if (end >= 0) { gs[0] = start; gs[1] = end }
+  end
+}
+
+// First match at or after `from`, recorded in st.gs.
+def _find(st, prog, from) {
+  val lead = prog.lead
+  var i = from
+  while (i <= st.n) {
+    if (isNull(lead) || _one(st, lead, i) > 0) {
+      if (_at(st, prog, i, false) >= 0) { return true }
+    }
+    i = _step(st, i)
+  }
+  false
+}
+
+// Where the next search starts. After an empty match the engine nudges forward by one
+// UTF-16 unit, not by one character, so a search can resume inside a surrogate pair.
+def _after(st) = if (st.gs[1] == st.gs[0]) then st.gs[1] + 1 else st.gs[1]
+
+def _groups(st, ng) {
+  val out = []
+  var i = 0
+  while (i <= ng) {
+    val start = st.gs[i * 2]
+    push(out, if (start < 0) then null else substring(st.s, start, st.gs[i * 2 + 1]))
+    i += 1
+  }
+  out
+}
+
+// The interpreter's own argument check, down to the way it shortens a long value, so
+// that a wrong type is reported in exactly the same words.
+def _str(v, at, fn) {
+  if (isString(v)) { return v }
+  val shown = toString(v)
+  error("${fn}: argument ${at} must be a string, got ${typeOf(v)} " +
+    (if (length(shown) <= 48) then shown else substring(shown, 0, 45) + "..."))
+}
+
+// A group reference is accumulated in a 32-bit int and is allowed to wrap, because the
+// number the engine names in its complaint is the wrapped one.
+def _wrap32(v) {
+  val m = ((v % 0x100000000) + 0x100000000) % 0x100000000
+  if (m >= 0x80000000) then m - 0x100000000 else m
+}
+
+def _groupText(st, g) = if (st.gs[g * 2] < 0) then null
+  else substring(st.s, st.gs[g * 2], st.gs[g * 2 + 1])
+
+// $0..$n insert a group and a backslash escapes the next character; the final
+// character of the replacement is never either of those, so a trailing $ or \ stands
+// for itself. A group that took no part in the match inserts nothing.
+def _expand(st, prog, rep, fn) {
+  val out = []
+  val m = length(rep)
+  var last = 0
+  var i = 0
+  while (i < m - 1) {
+    val c = rep[i]
+    if (c == "\\") {
+      if (last < i) { push(out, substring(rep, last, i)) }
+      i += 1
+      last = i
+    } elsif (c == "$") {
+      val d = rep[i + 1]
+      if (d >= "0" && d <= "9") {
+        if (last < i) { push(out, substring(rep, last, i)) }
+        var g = ord(d) - 0x30
+        i += 2
+        var more = true
+        while (more && i < m) {
+          val e = rep[i]
+          if (e < "0" || e > "9") { more = false }
+          else {
+            g = _wrap32(g * 10 + (ord(e) - 0x30))
+            i += 1
+          }
+        }
+        if (g > prog.ng) {
+          error("${fn}: bad group reference: n > number of groups: ${g}")
+        }
+        if (g < 0) { error("${fn}: bad group reference: No group ${g}") }
+        val text = _groupText(st, g)
+        if (!isNull(text)) { push(out, text) }
+        last = i
+        i -= 1
+      } elsif (d == "{") {
+        if (last < i) { push(out, substring(rep, last, i)) }
+        i += 2
+        val off = i
+        while (i < m && rep[i] != "}" && rep[i] != " ") { i += 1 }
+        // The engine throws IllegalStateException here, which nothing in SFL can
+        // catch and which stops the process; an error is the closest this can get.
+        if (i == m || rep[i] == " ") {
+          error("${fn}: bad replacement: No match available")
+        }
+        val name = substring(rep, off, i)
+        if (!has(prog.names, name)) {
+          error("${fn}: bad replacement: No match available")
+        }
+        push(out, toString(_groupText(st, prog.names[name])))
+        last = i + 1
+      }
+    }
+    i += 1
+  }
+  if (last < m) { push(out, substring(rep, last, m)) }
+  join(out)
+}
+
+// ------------------------------------------------------------------- the builtins
+
+// The pattern is checked and compiled before the subject string is checked, which is
+// the order the interpreter reports argument errors in.
+
+def matches(s, pattern) {
+  val prog = _compile(_str(pattern, 2, "matches"), "matches")
+  val st = _state(prog, _str(s, 1, "matches"))
+  _at(st, prog, 0, true) >= 0
+}
+
+def regexFind(s, pattern) {
+  val prog = _compile(_str(pattern, 2, "regexFind"), "regexFind")
+  val st = _state(prog, _str(s, 1, "regexFind"))
+  if (_find(st, prog, 0)) then _groups(st, prog.ng) else null
+}
+
+def regexFindAll(s, pattern) {
+  val prog = _compile(_str(pattern, 2, "regexFindAll"), "regexFindAll")
+  val st = _state(prog, _str(s, 1, "regexFindAll"))
+  val out = []
+  var from = 0
+  while (_find(st, prog, from)) {
+    push(out, _groups(st, prog.ng))
+    from = _after(st)
+  }
+  out
+}
+
+def regexSplit(s, pattern) {
+  val prog = _compile(_str(pattern, 2, "regexSplit"), "regexSplit")
+  val str = _str(s, 1, "regexSplit")
+  val st = _state(prog, str)
+  val out = []
+  var index = 0
+  var from = 0
+  while (_find(st, prog, from)) {
+    push(out, substring(str, index, st.gs[0]))
+    index = st.gs[1]
+    from = _after(st)
+  }
+  // The field after the last separator is always kept, empty or not.
+  push(out, substring(str, index, st.n))
+  out
+}
+
+def regexReplace(s, pattern, replacement) {
+  val prog = _compile(_str(pattern, 2, "regexReplace"), "regexReplace")
+  val str = _str(s, 1, "regexReplace")
+  val rep = _str(replacement, 3, "regexReplace")
+  val st = _state(prog, str)
+  val out = []
+  var index = 0
+  var from = 0
+  while (_find(st, prog, from)) {
+    push(out, substring(str, index, st.gs[0]))
+    push(out, _expand(st, prog, rep, "regexReplace"))
+    index = st.gs[1]
+    from = _after(st)
+  }
+  push(out, substring(str, index, st.n))
+  join(out)
+}

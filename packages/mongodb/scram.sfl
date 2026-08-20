@@ -1,0 +1,134 @@
+// mongodb/scram — SCRAM-SHA-256 and SCRAM-SHA-1 authentication (RFC 5802,
+// as MongoDB speaks it: the conversation rides in saslStart/saslContinue
+// commands, and the SHA-1 variant keys PBKDF2 with the legacy MONGODB-CR
+// digest md5("user:mongo:password")).
+//
+// Passwords for SCRAM-SHA-256 pass through a pragmatic subset of SASLprep
+// (RFC 4013): ASCII is untouched, the non-ASCII space code points map to a
+// plain space, the "commonly mapped to nothing" set disappears, and control
+// characters are refused. Exotic passwords beyond that subset should be
+// changed rather than trusted to survive normalisation differences.
+
+import "wire"
+
+// Runs the whole conversation on an open connection, or raises.
+def scramAuth(state, user, password, authDb, mechanism) {
+  val alg = if (mechanism == "SCRAM-SHA-1") then "sha1" else "sha256"
+  val nonce = base64EncodeBytes(randomBytes(24))
+  val bare = "n=" + _saslName(user) + ",r=" + nonce
+
+  val first = wireRun(state, authDb, {
+    saslStart: 1,
+    mechanism: mechanism,
+    payload: mongoBinary(utf8Encode("n,," + bare)),
+    options: {skipEmptyExchange: true}
+  })
+  val serverFirst = utf8Decode(first.payload["$binary"])
+  val sf = _saslFields(serverFirst)
+  val rnonce = sf.r
+  if (!startsWith(rnonce, nonce)) {
+    error("mongodb: the server's SCRAM nonce does not extend the client's")
+  }
+  val salt = base64DecodeBytes(sf.s)
+  val iterations = parseInt(sf.i)
+
+  val prepared =
+    if (alg == "sha1") then utf8Encode(md5(user + ":mongo:" + password))
+    else utf8Encode(_saslprep(password))
+  val saltedPassword = pbkdf2(alg, prepared, salt, iterations)
+
+  val clientKey = hmacBytes(alg, saltedPassword, utf8Encode("Client Key"))
+  val storedKey = digestBytes(alg, clientKey)
+  val withoutProof = "c=biws,r=" + rnonce
+  val authMessage = bare + "," + serverFirst + "," + withoutProof
+  val clientSignature = hmacBytes(alg, storedKey, utf8Encode(authMessage))
+  val proof = _xorBytes(clientKey, clientSignature)
+  val clientFinal = withoutProof + ",p=" + base64EncodeBytes(proof)
+
+  var reply = wireRun(state, authDb, {
+    saslContinue: 1,
+    conversationId: first.conversationId,
+    payload: mongoBinary(utf8Encode(clientFinal))
+  })
+
+  val serverKey = hmacBytes(alg, saltedPassword, utf8Encode("Server Key"))
+  val expected = base64EncodeBytes(hmacBytes(alg, serverKey, utf8Encode(authMessage)))
+  val verify = _saslFields(utf8Decode(reply.payload["$binary"]))
+  if (verify?.v != expected) {
+    error("mongodb: the server's SCRAM signature does not verify; not talking to the real server?")
+  }
+
+  // Servers without skipEmptyExchange want one empty round before done: true.
+  while (!(reply?.done ?? false)) {
+    reply = wireRun(state, authDb, {
+      saslContinue: 1,
+      conversationId: first.conversationId,
+      payload: mongoBinary([])
+    })
+  }
+  null
+}
+
+// "r=...,s=...,i=..." -> {r: ..., s: ..., i: ...}; values may contain '='.
+def _saslFields(text) {
+  val out = {}
+  for (part in split(text, ",")) {
+    val eq = indexOf(part, "=")
+    if (eq > 0) {
+      out[substring(part, 0, eq)] = substring(part, eq + 1, length(part))
+    }
+  }
+  out
+}
+
+// SCRAM attribute escaping for the user name: '=' and ',' cannot appear raw.
+def _saslName(user) {
+  val out = replace(replace(user, "=", "=3D"), ",", "=2C")
+  out
+}
+
+def _xorBytes(a, b) {
+  val out = []
+  var i = 0
+  while (i < length(a)) {
+    push(out, bitXor(a[i], b[i]))
+    i += 1
+  }
+  out
+}
+
+// The SASLprep subset described in the module header.
+def _saslprep(s) {
+  var ascii = true
+  for (ch in s) {
+    if (ord(ch) > 127) then ascii = false
+  }
+  if (ascii) {
+    for (ch in s) {
+      if (ord(ch) < 32 || ord(ch) == 127) {
+        error("mongodb: the password contains control characters (SASLprep prohibits them)")
+      }
+    }
+    return s
+  }
+  val spaces = [0x00a0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+    0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x202f, 0x205f, 0x3000]
+  val gone = [0x00ad, 0x034f, 0x1806, 0x180b, 0x180c, 0x180d, 0x200b, 0x200c,
+    0x200d, 0x2060, 0xfe00, 0xfe01, 0xfe02, 0xfe03, 0xfe04, 0xfe05, 0xfe06,
+    0xfe07, 0xfe08, 0xfe09, 0xfe0a, 0xfe0b, 0xfe0c, 0xfe0d, 0xfe0e, 0xfe0f, 0xfeff]
+  var out = ""
+  for (ch in s) {
+    val c = ord(ch)
+    if (contains(spaces, c)) {
+      out += " "
+    } elsif (contains(gone, c)) {
+      null
+    } elsif (c < 32 || c == 127 || (c >= 0x7f && c <= 0x9f) || (c >= 0xd800 && c <= 0xdfff) ||
+             c == 0xfffe || c == 0xffff || (c >= 0x2028 && c <= 0x2029)) {
+      error("mongodb: the password contains characters SASLprep prohibits")
+    } else {
+      out += ch
+    }
+  }
+  out
+}

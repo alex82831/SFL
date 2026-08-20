@@ -1,0 +1,248 @@
+// Part of the SFL standard library: the function combinators of BuiltinsFn.scala —
+// apply, compose, pipe, partial, curry, memoize and friends — written in SFL itself.
+//
+// Every function here takes or returns a function, and SFL has no spread call, so the
+// whole module rests on apply(): the one place where a computed argument list is turned
+// back into a call. Behaviour, including the wording of errors, has to match the
+// interpreter's native versions exactly, because both are run against the same suite.
+
+// ------------------------------------------------------------- internal helpers
+
+// The interpreter renders the offending value with repr and shortens it; jsonStringify
+// is that same repr, so quoted strings and containers come out identically. The cut is
+// counted in UTF-16 units, like the runtime's, so both split a surrogate pair alike.
+def _show(v) {
+  val s = jsonStringify(v)
+  if (length(s) <= 48) then s else substring(s, 0, 45) + "..."
+}
+
+def _bad(fn, pos, want, v) {
+  error("${fn}: argument ${pos} must be ${want}, got ${typeOf(v)} ${_show(v)}")
+}
+
+def _argFn(v, pos, fn) {
+  if (!isFunction(v)) { _bad(fn, pos, "a function", v) }
+}
+
+def _argArr(v, pos, fn) {
+  if (!isArray(v)) { _bad(fn, pos, "an array", v) }
+}
+
+// Mirrors argIdx. A float is an integer when it has no fractional part: `v % 1.0` is
+// NaN for both infinities and for NaN itself, so those fall through to the type error,
+// while a finite-but-enormous 1e100 does not — the runtime accepts it, saturates the
+// conversion, and then reports it as out of range, which is what happens here too.
+def _argIdx(v, pos, fn) {
+  val n = if (isInt(v)) then v
+    elsif (isFloat(v) && v % 1.0 == 0) then toInt(v)
+    else _bad(fn, pos, "an integer", v)
+  if (n > 2147483647 || n < -2147483648) {
+    error("${fn}: index ${n} is out of range")
+  }
+  n
+}
+
+// Values render unambiguously under repr, which is what makes it a usable cache key:
+// the string "1" and the number 1 stay apart. The separator is NUL, the one character
+// no rendering can contain, so no two argument lists can collide.
+def _key(args) {
+  val sep = chr(0)
+  var key = ""
+  var i = 0
+  while (i < length(args)) {
+    if (i > 0) { key += sep }
+    key += jsonStringify(args[i])
+    i += 1
+  }
+  key
+}
+
+// A distinct value standing for "this argument was not passed". SFL compares functions
+// by identity, so no value a caller constructs can equal this one — only naming this
+// helper itself would. That is what lets an optional parameter keep the arity it
+// declares and still tell an omitted argument from an explicit null, the distinction
+// the natives make by counting arguments. Collecting the argument with ...rest would
+// tell them apart too, but at the cost of the arity, and with it the wording of every
+// complaint about how many arguments curry was given.
+def _absent() = null
+
+// ------------------------------------------------------------------------ apply
+
+// A call needs its arguments spelled out at the call site, so a computed argument list
+// becomes a jump table on its length. The native has no ceiling; sixteen is as far as
+// spelling them out is worth taking, and past it the module says so rather than
+// silently dropping arguments.
+def apply(f, args) {
+  _argFn(f, 1, "apply")
+  _argArr(args, 2, "apply")
+  select (length(args)) {
+    case 0: f()
+    case 1: f(args[0])
+    case 2: f(args[0], args[1])
+    case 3: f(args[0], args[1], args[2])
+    case 4: f(args[0], args[1], args[2], args[3])
+    case 5: f(args[0], args[1], args[2], args[3], args[4])
+    case 6: f(args[0], args[1], args[2], args[3], args[4], args[5])
+    case 7: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+    case 8: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+    case 9: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+              args[8])
+    case 10: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+               args[8], args[9])
+    case 11: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+               args[8], args[9], args[10])
+    case 12: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+               args[8], args[9], args[10], args[11])
+    case 13: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+               args[8], args[9], args[10], args[11], args[12])
+    case 14: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+               args[8], args[9], args[10], args[11], args[12], args[13])
+    case 15: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+               args[8], args[9], args[10], args[11], args[12], args[13], args[14])
+    case 16: f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
+               args[8], args[9], args[10], args[11], args[12], args[13], args[14],
+               args[15])
+    default: error("apply: cannot call a function with more than 16 arguments")
+  }
+}
+
+// ------------------------------------------------------------------ combinators
+
+def identity(x) = x
+
+def constantly(v) {
+  // Named for the runtime's own derived function, so a traceback frame reads the same.
+  def constantly(...ignored) = v
+  constantly
+}
+
+def compose(f, ...more) {
+  val fns = [f] + more
+  // The native checks every element at position 0, so a bad function anywhere in the
+  // list is reported as argument 1.
+  for (g in fns) { _argFn(g, 1, "compose") }
+  val last = length(fns) - 1
+  def composed(...args) {
+    // The rightmost function receives the original arguments.
+    var acc = apply(fns[last], args)
+    var i = last - 1
+    while (i >= 0) {
+      acc = fns[i](acc)
+      i -= 1
+    }
+    acc
+  }
+  composed
+}
+
+def pipe(f, ...more) {
+  val fns = [f] + more
+  for (g in fns) { _argFn(g, 1, "pipe") }
+  val n = length(fns)
+  def piped(...args) {
+    var acc = apply(fns[0], args)
+    var i = 1
+    while (i < n) {
+      acc = fns[i](acc)
+      i += 1
+    }
+    acc
+  }
+  piped
+}
+
+def partial(f, ...bound) {
+  _argFn(f, 1, "partial")
+  def applied(...rest) = apply(f, bound + rest)
+  applied
+}
+
+def partialRight(f, ...bound) {
+  _argFn(f, 1, "partialRight")
+  def appliedRight(...rest) = apply(f, rest + bound)
+  appliedRight
+}
+
+def flip(f) {
+  _argFn(f, 1, "flip")
+  // Two required parameters and a rest give the result the same shape the native one
+  // declares — at least two arguments — so a short call is rejected before the body
+  // runs, and anything that asks how many arguments it takes gets the same answer.
+  def flipped(a, b, ...more) = apply(f, [b, a] + more)
+  flipped
+}
+
+def curry(f, arity = _absent) {
+  _argFn(f, 1, "curry")
+  // Left out, the arity is the function's own — which is what __arity reports, since
+  // the language itself has no way to ask.
+  val n = if (arity == _absent) then __arity(f) else _argIdx(arity, 2, "curry")
+  if (n < 0) { error("curry: arity must not be negative") }
+  // Each step copies what it has collected, so a partially applied chain can be reused.
+  // Every link takes exactly one argument, which is the arity the native's links declare.
+  def step(got) {
+    if (length(got) >= n) { return apply(f, got) }
+    def curried(x) = step(got + [x])
+    curried
+  }
+  if (n == 0) then f() else step([])
+}
+
+def uncurry(f) {
+  _argFn(f, 1, "uncurry")
+  def uncurried(first, ...more) {
+    var acc = f(first)
+    var i = 0
+    while (i < length(more)) {
+      // The chain can run out before the arguments do; the runtime calls the value
+      // anyway, and reports what it found there rather than where it came from.
+      if (!isFunction(acc)) { error("expected a function, got ${typeOf(acc)}") }
+      acc = acc(more[i])
+      i += 1
+    }
+    acc
+  }
+  uncurried
+}
+
+def memoize(f) {
+  _argFn(f, 1, "memoize")
+  val cache = object()
+  def memoized(...args) {
+    val key = _key(args)
+    if (has(cache, key)) {
+      return get(cache, key)
+    }
+    val v = apply(f, args)
+    set(cache, key, v)
+    v
+  }
+  memoized
+}
+
+def once(f) {
+  _argFn(f, 1, "once")
+  var done = false
+  var result = null
+  def onceOnly(...args) {
+    // The flag is set after the call, so a failed first attempt can be retried.
+    if (!done) {
+      result = apply(f, args)
+      done = true
+    }
+    result
+  }
+  onceOnly
+}
+
+def negate(pred) {
+  _argFn(pred, 1, "negate")
+  def negated(...args) = !apply(pred, args)
+  negated
+}
+
+def tap(v, f) {
+  _argFn(f, 2, "tap")
+  f(v)
+  v
+}

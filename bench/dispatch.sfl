@@ -1,0 +1,48 @@
+// Three ways to dispatch on a tagged record, same work, ranked. The manual's
+// "惯用法：标签记录" (§5.7) quotes these numbers. Run it both ways:
+//
+//   sfl bench/dispatch.sfl
+//   sfl -c bench/dispatch.sfl -o /tmp/dispatch && /tmp/dispatch
+
+val shapes = []
+for (i in range(0, 100)) {
+  if (i % 2 == 0) { push(shapes, {"kind": "circle", "r": 1.0 + i}) }
+  else { push(shapes, {"kind": "rect", "w": 2.0, "h": 1.0 + i}) }
+}
+val N = 20000    // 100 shapes x 20000 rounds = 2 million dispatches per way
+
+// A. Literal select on the tag: one index plus a comparison chain.
+def areaA(s) = select (s.kind) {
+  case "circle": 3.14159 * s.r * s.r
+  case "rect":   s.w * s.h
+  default: 0
+}
+
+// B. Object patterns: isObject + has + get per key, per branch tried.
+def areaB(s) = select (s) {
+  case {"kind": "circle", "r": r}: 3.14159 * r * r
+  case {"kind": "rect", "w": w, "h": h}: w * h
+  case _: 0
+}
+
+// C. Extractors: a function call plus a result array per branch tried.
+def circleOf(v) = if (v?.kind == "circle") then [v.r] else null
+def rectOf(v)   = if (v?.kind == "rect") then [v.w, v.h] else null
+def areaC(s) = select (s) {
+  case circleOf(r): 3.14159 * r * r
+  case rectOf(w, h): w * h
+  case _: 0
+}
+
+def bench(name, f) {
+  var acc = 0.0
+  val t0 = timeNanos()
+  for (n in range(0, N)) {
+    for (s in shapes) { acc += f(s) }
+  }
+  println(padEnd(name, 22) + padStart(toString((timeNanos() - t0) / 1000000), 6) + " ms  " + toInt(acc))
+}
+
+bench("literal select .kind", areaA)
+bench("object patterns", areaB)
+bench("extractors", areaC)

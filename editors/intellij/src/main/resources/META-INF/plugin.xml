@@ -1,0 +1,68 @@
+<idea-plugin>
+    <id>com.fartech.sfl</id>
+    <name>SFL</name>
+    <vendor>fartech</vendor>
+    <description><![CDATA[
+        Language support for <b>SFL</b> — Scripting for Fun.
+        <p>
+        Syntax highlighting, comment/uncomment, brace matching, and — through the
+        bundled language server (<code>sfl lsp</code>) — diagnostics as you type,
+        completion for all builtins with signatures and docs, hover documentation
+        and signature help.
+        </p>
+        <p>
+        Needs the <code>sfl</code> binary: either on PATH, or pointed at by the
+        <code>SFL_PATH</code> environment variable. Runs on IntelliJ IDEA
+        <b>Community</b> and Ultimate alike (the LSP client is LSP4IJ).
+        </p>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.redhat.devtools.lsp4ij</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType name="SFL"
+                  language="SFL"
+                  implementationClass="com.fartech.sfl.ide.SflFileType"
+                  fieldName="INSTANCE"
+                  extensions="sfl"/>
+        <lang.parserDefinition language="SFL"
+                               implementationClass="com.fartech.sfl.ide.SflParserDefinition"/>
+        <lang.syntaxHighlighterFactory language="SFL"
+                                       implementationClass="com.fartech.sfl.ide.SflSyntaxHighlighterFactory"/>
+        <lang.commenter language="SFL"
+                        implementationClass="com.fartech.sfl.ide.SflCommenter"/>
+        <lang.braceMatcher language="SFL"
+                           implementationClass="com.fartech.sfl.ide.SflBraceMatcher"/>
+        <applicationConfigurable parentId="tools"
+                                 id="com.fartech.sfl.settings"
+                                 displayName="SFL"
+                                 instance="com.fartech.sfl.ide.settings.SflSettingsConfigurable"/>
+        <notificationGroup id="SFL" displayType="BALLOON"/>
+        <moduleType id="SFL_MODULE"
+                    implementationClass="com.fartech.sfl.ide.project.SflModuleType"/>
+        <moduleBuilder builderClass="com.fartech.sfl.ide.project.SflModuleBuilder"
+                       id="SFL_MODULE_BUILDER"
+                       order="last"/>
+        <runLineMarkerContributor language="SFL"
+                                  implementationClass="com.fartech.sfl.ide.SflRunLineMarkerContributor"/>
+        <projectTaskRunner implementation="com.fartech.sfl.ide.build.SflProjectTaskRunner"/>
+    </extensions>
+
+    <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">
+        <server id="sflLanguageServer"
+                name="SFL Language Server"
+                factoryClass="com.fartech.sfl.ide.lsp.SflLanguageServerFactory">
+            <description><![CDATA[
+                The language server inside the sfl binary itself (<code>sfl lsp</code>):
+                diagnostics, completion, hover and signature help.
+            ]]></description>
+        </server>
+        <languageMapping language="SFL"
+                         serverId="sflLanguageServer"
+                         languageId="sfl"/>
+        <debugAdapterServer id="sfl"
+                            name="SFL"
+                            factoryClass="com.fartech.sfl.ide.debug.SflDebugAdapterDescriptorFactory"/>
+    </extensions>
+</idea-plugin>

@@ -1,0 +1,471 @@
+import "lib/assert"
+
+// -------------------------------------------------------------------- types
+
+check("typeOf null", typeOf(null), "null")
+check("typeOf int", typeOf(1), "int")
+check("typeOf float", typeOf(1.5), "float")
+check("typeOf string", typeOf("s"), "string")
+check("typeOf bool", typeOf(true), "bool")
+check("typeOf array", typeOf([]), "array")
+check("typeOf object", typeOf({}), "object")
+check("typeOf function", typeOf((x) -> x), "function")
+check("typeOf builtin", typeOf(println), "function")
+checkTrue("isNumber", isNumber(1) && isNumber(1.5) && !isNumber("1"))
+checkTrue("isInt", isInt(1) && !isInt(1.5))
+checkTrue("isNull", isNull(null) && !isNull(0))
+checkTrue("isFunction", isFunction(println))
+check("toString number", toString(12), "12")
+check("toString string", toString("a"), "a")
+check("toString array", toString([1, "a"]), "[1, \"a\"]")
+check("toString object", toString({"k": 1}), "{\"k\": 1}")
+check("toInt from string", toInt("42"), 42)
+check("toInt from float", toInt(3.9), 3)
+check("toInt from bool", toInt(true), 1)
+check("toFloat", toFloat("1.5"), 1.5)
+check("toBool", toBool(""), false)
+checkFails("toInt rejects junk", () -> toInt("abc"), "not a number")
+
+// ------------------------------------------------------------------ strings
+
+check("length string", length("hello"), 5)
+check("length array", length([1, 2]), 2)
+check("length object", length({"a": 1}), 1)
+check("length cjk", length("中文"), 2)
+check("isEmpty", isEmpty(""), true)
+check("charAt", charAt("hello", 1), "e")
+check("charAt negative", charAt("hello", -1), "o")
+check("subString", subString("hello", 1, 3), "el")
+check("subString to end", subString("hello", 2), "llo")
+check("slice string", slice("hello", 1, -1), "ell")
+check("slice array", slice([1, 2, 3, 4], 1, 3), [2, 3])
+check("trim", trim("  x  "), "x")
+check("trimStart", trimStart("  x  "), "x  ")
+check("trimEnd", trimEnd("  x  "), "  x")
+check("toUpper", toUpper("aB"), "AB")
+check("toLower", toLower("aB"), "ab")
+check("capitalize", capitalize("hello"), "Hello")
+
+// Unicode case mapping. The compiled runtime's tables are generated from the
+// interpreter itself (tools/gen-case-tables.py); these pin the corners that
+// once diverged — full mappings that change length, the iota subscripts, the
+// supplementary planes and the final-sigma context rules.
+check("toUpper grows sharp s", toUpper("straße"), "STRASSE")
+check("toUpper ligature", toUpper("ﬃ"), "FFI")
+check("toUpper apostrophe n", toUpper(chr(0x149)), chr(0x2BC) + "N")
+check("toUpper armenian ech-yiwn", toUpper(chr(0x587)), chr(0x535) + chr(0x552))
+check("toUpper dialytika tonos", toUpper(chr(0x390)), chr(0x399) + chr(0x308) + chr(0x301))
+check("toUpper iota subscript", toUpper(chr(0x1F80)), chr(0x1F08) + chr(0x399))
+check("toUpper iota subscript titlecase", toUpper(chr(0x1F88)), chr(0x1F08) + chr(0x399))
+check("toLower iota subscript titlecase", toLower(chr(0x1F88)), chr(0x1F80))
+check("toLower dotted capital I", toLower(chr(0x130)), "i" + chr(0x307))
+check("toUpper deseret", toUpper(chr(0x10428)), chr(0x10400))
+check("toLower deseret", toLower(chr(0x10400)), chr(0x10428))
+check("final sigma", toLower(chr(0x39F) + chr(0x3A3)), chr(0x3BF) + chr(0x3C2))
+check("interior sigma", toLower(chr(0x3A3) + chr(0x39F)), chr(0x3C3) + chr(0x3BF))
+check("final sigma through marks", toLower("A" + chr(0x300) + chr(0x3A3)), "a" + chr(0x300) + chr(0x3C2))
+check("final sigma after deseret", toLower(chr(0x10400) + chr(0x3A3)), chr(0x10428) + chr(0x3C2))
+check("sigma before deseret is final", toLower(chr(0x391) + chr(0x3A3) + chr(0x10400)),
+      chr(0x3B1) + chr(0x3C2) + chr(0x10428))
+check("unpaired high swallows a pair", toUpper(chr(0xD801) + chr(0x10428)), chr(0xD801) + chr(0x10428))
+check("capitalize iota subscript", capitalize(chr(0x1F80) + "x"), chr(0x1F88) + "x")
+check("capitalize sharp s stays", capitalize("ßx"), "ßx")
+check("capitalize supplementary stays", capitalize(chr(0x10428) + "x"), chr(0x10428) + "x")
+check("format upper-cases fully", format("%S", "straße"), "STRASSE")
+
+// The whole code space folded into two numbers, so any drift in either
+// engine's case tables shows up. If the interpreter's Unicode data ever
+// changes, regenerate the runtime tables with tools/gen-case-tables.py and
+// update these sums.
+var upSum = 0
+var loSum = 0
+for (cp in range(0, 1114112)) {
+  if (cp < 0xD800 || cp > 0xDFFF) {
+    val up = toUpper(chr(cp))
+    val lo = toLower(chr(cp))
+    var j = 0
+    while (j < length(up)) { upSum = (upSum * 31 + ord(charAt(up, j))) % 1000000007; j += 1 }
+    j = 0
+    while (j < length(lo)) { loSum = (loSum * 31 + ord(charAt(lo, j))) % 1000000007; j += 1 }
+  }
+}
+check("toUpper across every code point", upSum, 475775354)
+check("toLower across every code point", loSum, 214974554)
+check("repeat", repeat("ab", 3), "ababab")
+check("padStart", padStart("7", 3, "0"), "007")
+check("padEnd", padEnd("7", 3, "."), "7..")
+check("split", split("a,b,c", ","), ["a", "b", "c"])
+check("split empty separator", split("abc", ""), ["a", "b", "c"])
+check("split with limit", split("a,b,c", ",", 2), ["a", "b,c"])
+check("lines", lines("a\nb"), ["a", "b"])
+check("join", join(["a", "b"], "-"), "a-b")
+check("join no separator", join([1, 2, 3]), "123")
+check("replace", replace("aaa", "a", "b"), "bbb")
+check("strFind", strFind("hello", "ll"), 2)
+check("strFind missing", strFind("hello", "z"), -1)
+check("indexOf array", indexOf([1, 2, 3], 2), 1)
+check("lastIndexOf", lastIndexOf("abcabc", "b"), 4)
+check("contains string", contains("hello", "ell"), true)
+check("contains array", contains([1, 2], 2), true)
+check("contains object key", contains({"a": 1}, "a"), true)
+check("startsWith", startsWith("hello", "he"), true)
+check("endsWith", endsWith("hello", "lo"), true)
+check("reverse string", reverse("abc"), "cba")
+check("reverse array", reverse([1, 2, 3]), [3, 2, 1])
+check("format", format("%s=%d", "n", 42), "n=42")
+check("format float", format("%.2f", 3.14159), "3.14")
+check("chr", chr(65), "A")
+check("ord", ord("A"), 65)
+check("compare", compare(1, 2), -1)
+checkFails("charAt out of bounds", () -> charAt("ab", 9), "out of bounds")
+
+// ------------------------------------------------------------------- regex
+
+check("matches", matches("abc123", "[a-z]+[0-9]+"), true)
+check("matches false", matches("abc", "[0-9]+"), false)
+check("regexFind", regexFind("v1.2", "([0-9])\\.([0-9])"), ["1.2", "1", "2"])
+check("regexFind none", regexFind("abc", "[0-9]"), null)
+check("regexFindAll", length(regexFindAll("a1b2", "[0-9]")), 2)
+check("regexReplace", regexReplace("a1b2", "[0-9]", "#"), "a#b#")
+check("regexSplit", regexSplit("a1b22c", "[0-9]+"), ["a", "b", "c"])
+
+// ---------------------------------------------------------------- encoding
+
+check("base64 round trip", base64Decode(base64Encode("hello")), "hello")
+check("base64 known", base64Encode("hi"), "aGk=")
+check("hex round trip", hexDecode(hexEncode("hi")), "hi")
+check("hexEncode", hexEncode("hi"), "6869")
+check("md5", md5(""), "d41d8cd98f00b204e9800998ecf8427e")
+check("sha1", sha1(""), "da39a3ee5e6b4b0d3255bfef95601890afd80709")
+check("sha256", sha256("abc"),
+  "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+check("urlEncode", urlEncode("a b&c"), "a+b%26c")
+check("urlDecode", urlDecode("a+b%26c"), "a b&c")
+
+// The details three implementations have to agree on: the interpreter's Java
+// codecs, stdlib/codec.sfl run by either engine, and the compiled primitives.
+check("base64 of unpaired surrogate", base64Encode(chr(0xd800)), "Pw==")
+check("base64 of surrogate pair", base64Encode(chr(0xd83d) + chr(0xde00)), "8J+YgA==")
+check("base64 accepts an unpadded tail", base64Decode("QQ"), "A")
+check("base64 extra padding pads with zeros", base64Decode("QQ===="), "A" + chr(0) + chr(0))
+check("base64 malformed utf8 replaces", base64Decode("7aCA"), chr(0xfffd))
+checkFails("base64 rejects junk", () -> base64Decode("ab!c"), "not valid Base64")
+checkFails("base64 rejects half a byte", () -> base64Decode("Q"), "not valid Base64")
+check("hex of unpaired surrogate", hexEncode(chr(0xd800) + "A"), "3f41")
+check("hex knows wide digits", hexDecode(chr(0xff10) + chr(0xff21)), chr(0x0a))
+check("hex overlong utf8 replaces", hexDecode("c080"), chr(0xfffd) + chr(0xfffd))
+checkFails("hex odd length", () -> hexDecode("abc"), "even number")
+checkFails("hex names the bad input", () -> hexDecode("6z"), "invalid hex character in '6z'")
+check("md5 of unpaired surrogate", md5(chr(0xd800)), "d1457b72c3fb323a2671125aef3eab5d")
+
+// ------------------------------------------------------- bytes: codecs
+
+// Byte arrays are arrays of ints 0..255; these builtins are the binary halves
+// of the text codecs above and must agree between the engines byte for byte.
+check("utf8Encode ascii", utf8Encode("hi"), [104, 105])
+check("utf8Encode multibyte", utf8Encode("é€"), [0xc3, 0xa9, 0xe2, 0x82, 0xac])
+check("utf8Encode astral", utf8Encode(chr(0x1d11e)), [0xf0, 0x9d, 0x84, 0x9e])
+check("utf8Encode surrogate is '?'", utf8Encode(chr(0xd800)), [63])
+check("utf8Decode round trip", utf8Decode(utf8Encode("héllo€𝄞")), "héllo€𝄞")
+check("utf8Decode malformed replaces", utf8Decode([0xc0, 0x80]), chr(0xfffd) + chr(0xfffd))
+check("utf8Decode empty", utf8Decode([]), "")
+check("utf8Encode accepts integral floats", utf8Decode([104.0, 105.0]), "hi")
+checkFails("bytes reject a string element", () -> utf8Decode([104, "x"]),
+  "non-byte element at index 1 (string)")
+checkFails("bytes reject out of range", () -> utf8Decode([104, 300]),
+  "has 300 at index 1, expected 0..255")
+checkFails("bytes reject a non-array", () -> utf8Decode("hi"), "must be a byte array")
+
+check("base64EncodeBytes", base64EncodeBytes([0, 1, 2, 250, 255]), "AAEC+v8=")
+check("base64EncodeBytes empty", base64EncodeBytes([]), "")
+check("base64DecodeBytes", base64DecodeBytes("AAEC+v8="), [0, 1, 2, 250, 255])
+check("base64DecodeBytes unpadded", base64DecodeBytes("QQ"), [65])
+check("base64DecodeBytes empty", base64DecodeBytes(""), [])
+checkFails("base64DecodeBytes stray padding", () -> base64DecodeBytes("QQ===="), "not valid Base64")
+checkFails("base64DecodeBytes junk", () -> base64DecodeBytes("a!bc"), "not valid Base64")
+checkFails("base64DecodeBytes half a byte", () -> base64DecodeBytes("Q"), "not valid Base64")
+checkFails("base64DecodeBytes data after padding", () -> base64DecodeBytes("QQ==QQ=="), "not valid Base64")
+var bytesAll = []
+for (i in range(0, 256)) { push(bytesAll, i) }
+check("base64 bytes full range round trip", base64DecodeBytes(base64EncodeBytes(bytesAll)), bytesAll)
+check("hexEncodeBytes", hexEncodeBytes([0, 171, 255]), "00abff")
+check("hexDecodeBytes", hexDecodeBytes("00AbFf"), [0, 171, 255])
+check("hex bytes full range round trip", hexDecodeBytes(hexEncodeBytes(bytesAll)), bytesAll)
+checkFails("hexDecodeBytes odd length", () -> hexDecodeBytes("abc"), "even number")
+checkFails("hexDecodeBytes is ascii only", () -> hexDecodeBytes("0" + chr(0xff10)),
+  "invalid hex character at index 1")
+
+// ------------------------------------------------------- bytes: digests
+
+// digestBytes must agree with the hex digests above on UTF-8 input...
+check("digestBytes sha256", hexEncodeBytes(digestBytes("sha256", utf8Encode("abc"))), sha256("abc"))
+check("digestBytes sha1", hexEncodeBytes(digestBytes("sha1", [])), sha1(""))
+check("digestBytes md5", hexEncodeBytes(digestBytes("md5", [])), md5(""))
+// ...and unlike them it can hash bytes no string encodes to.
+check("digestBytes raw byte", hexEncodeBytes(digestBytes("md5", [0xff])),
+  "00594fd4f42ba43fc1ca0427a0576295")
+checkFails("digestBytes unknown algorithm", () -> digestBytes("sha512", []),
+  "unknown algorithm 'sha512' (expected \"md5\", \"sha1\" or \"sha256\")")
+
+// HMAC and PBKDF2 pinned to published vectors (RFC 2202, RFC 4231, RFC 6070).
+check("hmac sha1 rfc2202", hexEncodeBytes(hmacBytes("sha1", utf8Encode("key"),
+  utf8Encode("The quick brown fox jumps over the lazy dog"))),
+  "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9")
+check("hmac sha256 rfc4231", hexEncodeBytes(hmacBytes("sha256", utf8Encode("key"),
+  utf8Encode("The quick brown fox jumps over the lazy dog"))),
+  "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8")
+check("hmac md5", hexEncodeBytes(hmacBytes("md5", utf8Encode("key"),
+  utf8Encode("The quick brown fox jumps over the lazy dog"))),
+  "80070713463e7749b90c2dc24911e275")
+check("hmac long key is hashed", hexEncodeBytes(hmacBytes("sha256",
+  utf8Encode(repeat("k", 100)), utf8Encode("msg"))),
+  hexEncodeBytes(hmacBytes("sha256", digestBytes("sha256", utf8Encode(repeat("k", 100))),
+    utf8Encode("msg"))))
+check("pbkdf2 sha1 rfc6070 c1", hexEncodeBytes(pbkdf2("sha1", utf8Encode("password"),
+  utf8Encode("salt"), 1, 20)), "0c60c80f961f0e71f3a9b524af6012062fe037a6")
+check("pbkdf2 sha1 rfc6070 c2", hexEncodeBytes(pbkdf2("sha1", utf8Encode("password"),
+  utf8Encode("salt"), 2, 20)), "ea6c014dc72d6f8ccd1ed92ace1d41f0d8de8957")
+check("pbkdf2 sha1 rfc6070 long", hexEncodeBytes(pbkdf2("sha1",
+  utf8Encode("passwordPASSWORDpassword"), utf8Encode("saltSALTsaltSALTsaltSALTsaltSALTsalt"),
+  4096, 25)), "3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038")
+check("pbkdf2 sha256 default length", hexEncodeBytes(pbkdf2("sha256", utf8Encode("password"),
+  utf8Encode("salt"), 1)), "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
+checkFails("pbkdf2 zero iterations", () -> pbkdf2("sha1", [], [], 0), "at least 1")
+checkFails("pbkdf2 length bounds", () -> pbkdf2("sha1", [], [], 1, 5000), "1..4096")
+
+val rnd = randomBytes(32)
+check("randomBytes length", length(rnd), 32)
+checkTrue("randomBytes in range", every(rnd, (b) -> isInt(b) && b >= 0 && b <= 255))
+check("randomBytes zero", randomBytes(0), [])
+checkFails("randomBytes bounds", () -> randomBytes(-1), "0..1048576")
+
+// ------------------------------------------------------- bytes: float bits
+
+check("doubleToBits 1.0", doubleToBits(1.0), 4607182418800017408)
+check("doubleToBits of int arg", doubleToBits(1), 4607182418800017408)
+check("bitsToDouble", bitsToDouble(4607182418800017408), 1.0)
+check("doubleToBits negative zero", doubleToBits(-(0.0)), shiftLeft(1, 63))
+check("float bits round trip", bitsToDouble(doubleToBits(3.141592653589793)), 3.141592653589793)
+check("NaN is canonical", doubleToBits(NAN()), 9221120237041090560)
+checkTrue("bitsToDouble NaN", isNaN(bitsToDouble(9221120237041090560)))
+
+// -------------------------------------------------------------------- math
+
+check("abs int", abs(-3), 3)
+check("abs float", abs(-3.5), 3.5)
+check("max varargs", max(1, 5, 3), 5)
+check("max of array", max([1, 5, 3]), 5)
+check("min", min(1, 5, 3), 1)
+check("floor", floor(1.7), 1)
+check("ceil", ceil(1.2), 2)
+check("round", round(1.5), 2)
+check("round digits", round(3.14159, 2), 3.14)
+check("trunc", trunc(-1.7), -1)
+check("sign", sign(-5), -1)
+check("clamp", clamp(10, 0, 5), 5)
+check("gcd", gcd(12, 18), 6)
+check("lcm", lcm(4, 6), 12)
+check("sqrt", sqrt(9.0), 3.0)
+check("pow", pow(2, 10), 1024)
+check("pow float", pow(2.0, 0.5) > 1.41, true)
+check("log", round(log(E()), 4), 1)
+check("log10", log10(1000.0), 3.0)
+check("exp", round(exp(0.0)), 1)
+check("atan2", round(atan2(0.0, 1.0)), 0)
+check("hypot", hypot(3.0, 4.0), 5.0)
+check("PI", round(PI(), 4), 3.1416)
+checkTrue("isNaN", isNaN(NAN()))
+checkTrue("isInfinite", isInfinite(INF()))
+check("parseInt", parseInt("42"), 42)
+check("parseInt radix", parseInt("ff", 16), 255)
+check("parseFloat", parseFloat("1.5"), 1.5)
+checkFails("sqrt of negative", () -> sqrt(-1.0), "must not be negative")
+checkFails("parseInt junk", () -> parseInt("zz"), "not an integer")
+
+randomSeed(42)
+val r1 = random()
+randomSeed(42)
+check("randomSeed is reproducible", random(), r1)
+checkTrue("random in range", random() >= 0 && random() < 1)
+checkTrue("randomInt in range", randomInt(5) >= 0 && randomInt(5) < 5)
+
+// -------------------------------------------------------------------- bits
+
+check("bitAnd", bitAnd(12, 10), 8)
+check("bitOr", bitOr(12, 10), 14)
+check("bitXor", bitXor(12, 10), 6)
+check("bitNot", bitNot(0), -1)
+check("shiftLeft", shiftLeft(1, 4), 16)
+check("shiftRight", shiftRight(-16, 2), -4)
+check("shiftRightU", shiftRightU(16, 2), 4)
+
+// ------------------------------------------------------------------ arrays
+
+check("array()", array(1, 2), [1, 2])
+check("newArray", newArray(3, 0), [0, 0, 0])
+check("range n", range(4), [0, 1, 2, 3])
+check("range from-to", range(2, 5), [2, 3, 4])
+check("range with step", range(0, 10, 3), [0, 3, 6, 9])
+check("range descending", range(3, 0, -1), [3, 2, 1])
+
+val a1 = [1, 2, 3]
+push(a1, 4)
+check("push", a1, [1, 2, 3, 4])
+check("pop", pop(a1), 4)
+check("shift", shift(a1), 1)
+unshift(a1, 0)
+check("unshift", a1, [0, 2, 3])
+insert(a1, 1, 9)
+check("insert", a1, [0, 9, 2, 3])
+check("removeAt", removeAt(a1, 1), 9)
+check("concat", concat([1], [2], 3), [1, 2, 3])
+check("flatten", flatten([1, [2, [3]]]), [1, 2, [3]])
+check("flatten deep", flatten([1, [2, [3]]], 2), [1, 2, 3])
+check("unique", unique([1, 2, 1, 3, 2]), [1, 2, 3])
+check("zip", zip([1, 2], ["a", "b"]), [[1, "a"], [2, "b"]])
+check("first", first([7, 8]), 7)
+check("last", last([7, 8]), 8)
+check("first of empty", first([]), null)
+check("take", take([1, 2, 3], 2), [1, 2])
+check("drop", drop([1, 2, 3], 2), [3])
+check("sum ints", sum([1, 2, 3]), 6)
+check("sum floats", sum([1.5, 2.5]), 4.0)
+check("sum empty", sum([]), 0)
+check("sort numbers", sort([3, 1, 2]), [1, 2, 3])
+check("sort strings", sort(["b", "a"]), ["a", "b"])
+check("sort with comparator", sort([1, 3, 2], (a, b) -> b - a), [3, 2, 1])
+check("sortBy", sortBy(["ccc", "a", "bb"], (s) -> length(s)), ["a", "bb", "ccc"])
+check("sort does not mutate", { val s = [2, 1]; sort(s); s }, [2, 1])
+check("clear", clear([1, 2]), [])
+checkFails("pop empty", () -> pop([]), "empty")
+
+// --------------------------------------------------------- higher order
+
+check("map", map([1, 2, 3], (x) -> x * 2), [2, 4, 6])
+check("map object", map({"a": 1}, (k, v) -> v + 1), {"a": 2})
+check("filter", filter([1, 2, 3, 4], (x) -> x % 2 == 0), [2, 4])
+check("filter object", filter({"a": 1, "b": 2}, (k, v) -> v > 1), {"b": 2})
+check("reduce", reduce([1, 2, 3], (acc, x) -> acc + x, 0), 6)
+check("reduce without initial", reduce([1, 2, 3], (acc, x) -> acc + x), 6)
+check("find", find([1, 2, 3], (x) -> x > 1), 2)
+check("find none", find([1], (x) -> x > 5), null)
+check("findIndex", findIndex([1, 2, 3], (x) -> x == 3), 2)
+check("any", any([1, 2], (x) -> x > 1), true)
+check("every", every([2, 4], (x) -> x % 2 == 0), true)
+check("count", count([1, 2, 3, 4], (x) -> x > 2), 2)
+check("map with a builtin", map(["a", "b"], toUpper), ["A", "B"])
+var sideEffect = 0
+forEach([1, 2, 3], (x) -> sideEffect += x)
+check("forEach", sideEffect, 6)
+checkFails("reduce of empty", () -> reduce([], (a, b) -> a), "empty")
+
+// ----------------------------------------------------------------- objects
+
+val o1 = {"a": 1, "b": 2}
+check("keys", keys(o1), ["a", "b"])
+check("values", values(o1), [1, 2])
+check("entries", entries(o1), [["a", 1], ["b", 2]])
+check("fromEntries", fromEntries([["x", 1]]), {"x": 1})
+check("has", has(o1, "a"), true)
+check("get", get(o1, "a"), 1)
+check("get missing", get(o1, "zz", "d"), "d")
+check("set", get(set(object(), "k", 5), "k"), 5)
+check("remove", remove({"a": 1}, "a"), 1)
+check("merge", merge({"a": 1}, {"b": 2}), {"a": 1, "b": 2})
+check("merge later wins", merge({"a": 1}, {"a": 2}), {"a": 2})
+check("size", size(o1), 2)
+val original = {"nested": [1, 2]}
+val shallow = copy(original)
+push(shallow["nested"], 3)
+check("copy is shallow", length(original["nested"]), 3)
+val deep = deepCopy(original)
+push(deep["nested"], 4)
+check("deepCopy is independent", length(original["nested"]), 3)
+
+// --------------------------------------------------------------- iterators
+
+val it = iter([1, 2])
+checkTrue("hasNext", hasNext(it))
+check("iterNext", iterNext(it), 1)
+check("iterNext again", iterNext(it), 2)
+check("hasNext exhausted", hasNext(it), false)
+checkFails("iterNext exhausted", () -> iterNext(it), "exhausted")
+
+var iterSum = 0
+val it2 = iter({"a": 1, "b": 2})
+while (hasNext(it2)) {
+  iterSum += length(iterNext(it2))
+}
+check("iterate object keys", iterSum, 2)
+
+// -------------------------------------------------------------------- json
+
+check("jsonParse object", jsonParse("{\"a\":1}"), {"a": 1})
+check("jsonParse array", jsonParse("[1,2.5,\"x\",true,null]"), [1, 2.5, "x", true, null])
+check("jsonParse nested", jsonParse("{\"a\":{\"b\":[1]}}").a.b[0], 1)
+check("jsonStringify", jsonStringify({"a": 1}), "{\"a\": 1}")
+check("json round trip", jsonParse(jsonStringify({"a": [1, {"b": "c"}]})), {"a": [1, {"b": "c"}]})
+checkTrue("jsonStringify pretty", contains(jsonStringify({"a": 1}, true), "\n"))
+check("jsonParse escapes", jsonParse("\"a\\nb\""), "a\nb")
+checkFails("jsonParse rejects junk", () -> jsonParse("{oops}"), "invalid JSON")
+
+// ---------------------------------------------------------------------- fs
+
+val tmp = tempFile(".sfl-test")
+writeFile(tmp, "line1\nline2")
+check("readFile", readFile(tmp), "line1\nline2")
+check("readLines", readLines(tmp), ["line1", "line2"])
+appendFile(tmp, "\nline3")
+check("appendFile", length(readLines(tmp)), 3)
+check("exists", exists(tmp), true)
+check("isFile", isFile(tmp), true)
+check("isDir", isDir(tmp), false)
+checkTrue("fileSize", fileSize(tmp) > 0)
+check("baseName", baseName("/a/b/c.txt"), "c.txt")
+check("dirName", dirName("/a/b/c.txt"), "/a/b")
+check("joinPath", joinPath("a", "b", "c"), "a/b/c")
+check("removeFile", removeFile(tmp), true)
+check("exists after remove", exists(tmp), false)
+check("fileSize missing", fileSize(tmp), -1)
+checkFails("readFile missing", () -> readFile("/definitely/not/here"), "not found")
+
+// ------------------------------------------------------------------ system
+
+check("getEnv default", getEnv("SFL_DEFINITELY_UNSET_VAR", "fallback"), "fallback")
+setEnv("SFL_TEST_VAR", "yes")
+check("setEnv/getEnv", getEnv("SFL_TEST_VAR"), "yes")
+checkTrue("cwd", length(cwd()) > 0)
+checkTrue("uuid", length(uuid()) == 36)
+checkTrue("osName", length(osName()) > 0)
+checkTrue("args is an array", isArray(args()))
+
+val ran = execute("echo hello")
+check("execute exit code", ran.code, 0)
+check("execute stdout", trim(ran.out), "hello")
+val failed = execute("exit 3")
+check("execute non-zero exit", failed.code, 3)
+
+// -------------------------------------------------------------------- time
+
+checkTrue("timeMillis", timeMillis() > 1600000000000)
+checkTrue("timeNanos", timeNanos() > 0)
+check("formatTime", formatTime(0, "%Y", true), "1970")
+check("formatTime default", length(formatTime(0)), 19)
+val parts = timeParts(0, true)
+check("timeParts year", parts.year, 1970)
+check("timeParts month", parts.month, 1)
+check("timeParts day", parts.day, 1)
+
+// -------------------------------------------------------------------- meta
+
+check("error message", try(() -> error("boom"), (e) -> e), "boom")
+check("try returns body value", try(() -> 1 + 1), 2)
+check("try without handler swallows", try(() -> error("x")), null)
+check("assert passes", try(() -> assert(true)), null)
+check("assert fails", try(() -> assert(false, "nope"), (e) -> e), "nope")
+checkTrue("builtins list", length(builtins()) > 100)
+def add2(a, b) = a + b
+check("signature", signature(add2), "add2(a, b)")
+check("builtin signature", signature(length), "length(v)")
+
+report("builtins")

@@ -1,0 +1,30 @@
+// Recursion, mutual recursion, and monomorphisation over argument types.
+def fact(n) = if (n <= 1) then 1 else n * fact(n - 1)
+println(fact(10), fact(20))
+
+def isEven(n) = if (n == 0) then true else isOdd(n - 1)
+def isOdd(n) = if (n == 0) then false else isEven(n - 1)
+println(isEven(10), isOdd(10), isEven(101))
+
+// Called with both int and float: the compiler emits one version of each.
+def twice(x) = x * 2
+println(twice(21), twice(1.5))
+
+def clampTo(v, lo, hi) {
+  if (v < lo) { return lo }
+  if (v > hi) { return hi }
+  v
+}
+println(clampTo(5, 0, 10), clampTo(-3, 0, 10), clampTo(99, 0, 10))
+
+def sumTo(n) {
+  var s = 0
+  var i = 1
+  while (i <= n) { s = s + i; i = i + 1 }
+  s
+}
+println(sumTo(100), sumTo(1000))
+
+def noReturn(n) { var x = n * 2 }
+noReturn(3)
+println("done")

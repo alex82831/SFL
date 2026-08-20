@@ -1,0 +1,24 @@
+// Errors carry the same message, the same help and the same shape as they do under
+// the interpreter, and try/attempt catch them the same way.
+println(try(() -> error("boom"), (m) -> "caught: " + m))
+println(try(() -> 1 + 1, (m) -> "never"))
+println(try(() -> error("quiet")))
+
+val r = attempt(() -> [1, 2][9])
+println(r.ok, r.error.message, r.error.kind, r.error.help)
+
+println(attempt(() -> 1 / 0).error.message)
+println(attempt(() -> {"a": 1}.missing).error.message)
+println(attempt(() -> "text" * "text").error.message)
+println(attempt(() -> undefinedThing()).error.message)
+println(attempt(() -> 42).value)
+
+def risky(n) {
+  if (n < 0) then error("negative: " + n)
+  n * 2
+}
+println(attempt(() -> risky(-1)).error.message, risky(2))
+
+var cleanup = "not run"
+val guarded = attempt(() -> { cleanup = "ran"; error("x") })
+println(cleanup, guarded.ok)

@@ -1,0 +1,22 @@
+// Functions are values: passed, returned, stored, and called through a variable.
+def double(x) = x * 2
+def apply2(f, v) = f(v)
+println(apply2(double, 21))
+println(apply2((x) -> x + 1, 41))
+
+val table = {"inc": (x) -> x + 1, "dec": (x) -> x - 1}
+println(table.inc(10), table["dec"](10))
+
+def twice(f) = (x) -> f(f(x))
+println(twice(double)(5))
+
+// A builtin used as a value, not called directly.
+val fn = toUpper
+println(fn("shout"))
+
+def dispatch(name, v) = select (name) {
+  case "up": toUpper(v)
+  case "down": toLower(v)
+  default: v
+}
+println(dispatch("up", "abc"), dispatch("down", "ABC"), dispatch("?", "x"))

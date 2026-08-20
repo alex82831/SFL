@@ -1,0 +1,81 @@
+// redis/resp — the RESP2 protocol: framing commands, parsing replies.
+//
+// Commands go as arrays of bulk strings. Replies: '+' simple string,
+// '-' error (raised), ':' integer, '$' bulk string (-1 = null),
+// '*' array (-1 = null). Bulk payloads are read byte-exactly, so values
+// containing newlines survive; they decode as UTF-8 into SFL strings.
+
+// Writes one command, each part a bulk string. Numbers render with toString;
+// byte arrays pass through raw for binary values.
+def respWrite(state, parts) {
+  val out = []
+  _respBytes(out, utf8Encode("*" + toString(length(parts)) + "\r\n"))
+  for (p in parts) {
+    val payload =
+      if (isString(p)) then utf8Encode(p)
+      elsif (isArray(p)) then p
+      else utf8Encode(toString(p))
+    _respBytes(out, utf8Encode("$" + toString(length(payload)) + "\r\n"))
+    _respBytes(out, payload)
+    push(out, 13)
+    push(out, 10)
+  }
+  socketWriteBytes(state.sock, out)
+}
+
+// Reads one reply; raises on '-' errors and closed connections.
+def respRead(state) {
+  val line = _line(state)
+  if (line == "") then error("redis: empty reply line")
+  val kind = charAt(line, 0)
+  val rest = substring(line, 1, length(line))
+  if (kind == "+") {
+    rest
+  } elsif (kind == "-") {
+    error("redis: " + rest)
+  } elsif (kind == ":") {
+    parseInt(rest)
+  } elsif (kind == "$") {
+    val n = parseInt(rest)
+    if (n < 0) then return null
+    val payload = _exactly(state, n)
+    _exactly(state, 2) // the trailing \r\n
+    utf8Decode(payload)
+  } elsif (kind == "*") {
+    val n = parseInt(rest)
+    if (n < 0) then return null
+    val out = []
+    var i = 0
+    while (i < n) {
+      push(out, respRead(state))
+      i += 1
+    }
+    out
+  } else {
+    error("redis: unexpected reply type '" + kind + "'")
+  }
+}
+
+def _line(state) {
+  val line = socketReadLine(state.sock, state.timeoutMs)
+  if (line == null) then error("redis: timed out or the server closed the connection")
+  line
+}
+
+def _exactly(state, n) {
+  val out = []
+  while (length(out) < n) {
+    val chunk = socketReadBytes(state.sock, n - length(out), state.timeoutMs)
+    if (chunk == null) then error("redis: timed out waiting for the server")
+    if (length(chunk) == 0) then error("redis: the server closed the connection")
+    _respBytes(out, chunk)
+  }
+  out
+}
+
+// Appends every byte of src to dst (file-private: mongodb/bytes owns the
+// public spelling and the two must not collide in one program).
+def _respBytes(dst, src) {
+  for (b in src) { push(dst, b) }
+  dst
+}

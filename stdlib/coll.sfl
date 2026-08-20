@@ -1,0 +1,813 @@
+// Part of the SFL standard library: the collection layer — arrays, iterators, and
+// the higher-order functions over them. Compiled ahead of time into the linkable
+// archive rather than written in the runtime's C.
+//
+// Every function here has a native twin in the interpreter (BuiltinsColl.scala and
+// the transforms in BuiltinsFn.scala), and the two are tested against each other.
+// So the results are only half of it: which argument is checked first, and the exact
+// wording of every error, have to agree as well.
+//
+// Three things the natives do cannot be reached from SFL, and are left alone:
+//
+//   * take() on an iterator that came from iter(array) hands back that same cursor,
+//     narrowed, so the source is narrowed too. Nothing here can reposition an iterator
+//     somebody else is holding, so take() returns a separate view and leaves the source
+//     where it was. drop() is the same underneath, but there advancing the source and
+//     returning a view onto it is indistinguishable, so drop() does exactly that.
+//   * An error raised here carries no help line. The natives attach one ("the signature
+//     is …") because the runtime knows their signature; error() has no way to add one.
+//     Only the message matches, which is the part that gets read.
+//   * A function that clears the object it is being mapped over, or deletes the key it
+//     is standing on and puts it back, leaves the native walking entries that are no
+//     longer in the object. The walk here can only see the object as it is.
+
+// ---------------------------------------------------------------- argument checks
+
+// The wording of Builtins.bad, including Err.show's shortening: an error has to stay
+// readable on one line even when the offending value is a whole nested structure.
+def _bad(fn, pos, want, v) {
+  val text = jsonStringify(v)
+  val shown = if (length(text) <= 48) then text else substring(text, 0, 45) + "..."
+  error("${fn}: argument ${pos} must be ${want}, got ${typeOf(v)} ${shown}")
+}
+
+def _arr(fn, pos, v) = if (isArray(v)) then v else _bad(fn, pos, "an array", v)
+
+def _fn(fn, pos, v) = if (isFunction(v)) then v else _bad(fn, pos, "a function", v)
+
+// argIdx: an integer, or a float that is exactly one. `v % 1.0` is NaN for both
+// infinities and for NaN itself, so those fall through to the type error.
+def _idx(fn, pos, v) {
+  val n =
+    if (isInt(v)) then v
+    elsif (isFloat(v) && v % 1.0 == 0) then toInt(v)
+    else _bad(fn, pos, "an integer", v)
+  if (n > 2147483647 || n < -2147483648) {
+    error("${fn}: index ${n} is out of range")
+  }
+  n
+}
+
+// An optional trailing argument needs a default that no caller can also pass, because
+// the natives tell "not given" apart from "given as null". A rest parameter would do it,
+// but it also turns the arity the runtime reports into "at least 2" where the native
+// says "2 to 3". A default keeps the arity exact, and a function value works as the
+// marker: equality on functions is identity, so only this very closure matches it.
+val _none = () -> null
+
+// map and filter also take an object; the iterator form is lazy. The container's type
+// is reported before the function argument is even looked at.
+def _mapKind(fn, v) {
+  val t = typeOf(v)
+  if (t != "array" && t != "object" && t != "iterator") {
+    error("${fn}: expected an array or object, got ${t}")
+  }
+  t
+}
+
+// The sequence transforms: eager over an array, lazy over an iterator.
+def _seqKind(fn, v) {
+  val t = typeOf(v)
+  if (t != "array" && t != "iterator") {
+    error("${fn}: expected an array or iterator, got ${t}")
+  }
+  t
+}
+
+// The step protocol __iterFn expects: [value] for an element, [] once spent.
+def _step(it) = if (hasNext(it)) then [iterNext(it)] else []
+
+// ------------------------------------------------------------------- map and filter
+
+def map(v, f) {
+  val kind = _mapKind("map", v)
+  _fn("map", 2, f)
+  // All-literal cases, so this stays a plain Select node (`default:` rather than
+  // `case _:` — a wildcard pattern would fall off that fast path).
+  select (kind) {
+    case "iterator": __iterFn({ () ->
+      val nx = _step(v)
+      if (isEmpty(nx)) then [] else [f(nx[0])]
+    })
+    case "object": {
+      val mapped = object()
+      // The walk is over the object itself, not over a copy of its entries: a function
+      // that adds a key while it runs sees that key come round in its turn, and one that
+      // rewrites a value it has not reached yet passes itself the new one. The step to the
+      // next key is a link hanging off the current one, so deleting the key the walk is
+      // standing on ends it — deleting any other key does not.
+      val ks = iter(v)
+      while (hasNext(ks)) {
+        val k = iterNext(ks)
+        // A key that has already been through is one that f deleted and put back, which
+        // appends it afresh. The native stopped when it was deleted; stopping here as well
+        // at least keeps the walk finite, which is the part that matters.
+        if (has(mapped, k)) { return mapped }
+        set(mapped, k, f(k, get(v, k)))
+        if (!has(v, k)) { return mapped }
+      }
+      mapped
+    }
+    default: {
+      val out = []
+      var i = 0
+      while (i < length(v)) {
+        push(out, f(v[i]))
+        i += 1
+      }
+      out
+    }
+  }
+}
+
+def filter(v, pred) {
+  val kind = _mapKind("filter", v)
+  _fn("filter", 2, pred)
+  select (kind) {
+    case "iterator": __iterFn({ () ->
+      while (hasNext(v)) {
+        val x = iterNext(v)
+        if (pred(x)) { return [x] }
+      }
+      []
+    })
+    case "object": {
+      val kept = object()
+      // Live, like map's, and ending the same way if the key underfoot is deleted.
+      val seen = object()
+      val ks = iter(v)
+      while (hasNext(ks)) {
+        val k = iterNext(ks)
+        if (has(seen, k)) { return kept }
+        set(seen, k, true)
+        val x = get(v, k)
+        if (pred(k, x)) { set(kept, k, x) }
+        if (!has(v, k)) { return kept }
+      }
+      kept
+    }
+    default: {
+      val out = []
+      var i = 0
+      while (i < length(v)) {
+        if (pred(v[i])) { push(out, v[i]) }
+        i += 1
+      }
+      out
+    }
+  }
+}
+
+// ------------------------------------------------------------------------- folds
+
+def reduce(arr, f, initial = _none) {
+  _arr("reduce", 1, arr)
+  _fn("reduce", 2, f)
+  var i = 0
+  var acc = null
+  if (initial != _none) {
+    acc = initial
+  } elsif (length(arr) == 0) {
+    error("reduce: array is empty and no initial value was given")
+  } else {
+    acc = arr[0]
+    i = 1
+  }
+  while (i < length(arr)) {
+    acc = f(acc, arr[i])
+    i += 1
+  }
+  acc
+}
+
+def foldRight(arr, f, initial) {
+  _arr("foldRight", 1, arr)
+  _fn("foldRight", 2, f)
+  var acc = initial
+  var i = length(arr) - 1
+  while (i >= 0) {
+    acc = f(arr[i], acc)
+    i -= 1
+  }
+  acc
+}
+
+def scan(arr, f, initial = _none) {
+  _arr("scan", 1, arr)
+  _fn("scan", 2, f)
+  var i = 0
+  var acc = null
+  if (initial != _none) {
+    acc = initial
+  } elsif (length(arr) == 0) {
+    error("scan: array is empty and no initial value was given")
+  } else {
+    acc = arr[0]
+    i = 1
+  }
+  // The seed is part of the result, so a scan is always one longer than its input.
+  val out = [acc]
+  while (i < length(arr)) {
+    acc = f(acc, arr[i])
+    push(out, acc)
+    i += 1
+  }
+  out
+}
+
+// ------------------------------------------------------------------- searching
+
+def forEach(v, f) {
+  val t = typeOf(v)
+  if (t != "array" && t != "object") {
+    error("forEach: expected an array or object, got ${t}")
+  }
+  _fn("forEach", 2, f)
+  if (t == "object") {
+    // A snapshot, so f is free to add or remove keys as it goes. Indexed on purpose:
+    // a `for ([k, x] in ...)` pattern would pay isArray+size+index per entry.
+    for (e in entries(v)) { f(e[0], e[1]) }
+    return null
+  }
+  var i = 0
+  while (i < length(v)) {
+    f(v[i])
+    i += 1
+  }
+  null
+}
+
+def find(arr, pred) {
+  _arr("find", 1, arr)
+  _fn("find", 2, pred)
+  var found = null
+  var i = 0
+  // A matching null does not end the scan: the native tracks "found" by the value
+  // itself, so it keeps looking until something non-null matches.
+  while (i < length(arr) && isNull(found)) {
+    if (pred(arr[i])) { found = arr[i] }
+    i += 1
+  }
+  found
+}
+
+def findIndex(arr, pred) {
+  _arr("findIndex", 1, arr)
+  _fn("findIndex", 2, pred)
+  var i = 0
+  while (i < length(arr)) {
+    if (pred(arr[i])) { return i }
+    i += 1
+  }
+  -1
+}
+
+def any(arr, pred) {
+  _arr("any", 1, arr)
+  _fn("any", 2, pred)
+  var i = 0
+  while (i < length(arr)) {
+    if (pred(arr[i])) { return true }
+    i += 1
+  }
+  false
+}
+
+def every(arr, pred) {
+  _arr("every", 1, arr)
+  _fn("every", 2, pred)
+  var i = 0
+  while (i < length(arr)) {
+    if (!pred(arr[i])) { return false }
+    i += 1
+  }
+  true
+}
+
+def count(arr, pred) {
+  _arr("count", 1, arr)
+  _fn("count", 2, pred)
+  var n = 0
+  for (v in arr) {
+    if (pred(v)) { n += 1 }
+  }
+  n
+}
+
+// ---------------------------------------------------------------------- flattening
+
+// One level of flattening: an array or an iterator contributes its elements, anything
+// else contributes itself.
+def _expand(v) =
+  if (isArray(v)) then iter(v)
+  elsif (typeOf(v) == "iterator") then v
+  else iter([v])
+
+def flatMap(v, f) {
+  _fn("flatMap", 2, f)
+  val kind = _seqKind("flatMap", v)
+  if (kind == "iterator") {
+    var cur = iter([])
+    return __iterFn({ () ->
+      while (!hasNext(cur)) {
+        if (!hasNext(v)) { return [] }
+        cur = _expand(f(iterNext(v)))
+      }
+      [iterNext(cur)]
+    })
+  }
+  val out = []
+  var i = 0
+  while (i < length(v)) {
+    for (x in _expand(f(v[i]))) { push(out, x) }
+    i += 1
+  }
+  out
+}
+
+def flatten(arr, depth = _none) {
+  val d = if (depth != _none) then _idx("flatten", 2, depth) else 1
+  _arr("flatten", 1, arr)
+  val out = []
+  _flattenInto(out, arr, d)
+  out
+}
+
+def _flattenInto(out, arr, depth) {
+  for (v in arr) {
+    if (isArray(v) && depth > 0) {
+      _flattenInto(out, v, depth - 1)
+    } else {
+      push(out, v)
+    }
+  }
+}
+
+def concat(first, ...rest) {
+  val out = []
+  _appendTo(out, first)
+  for (v in rest) { _appendTo(out, v) }
+  out
+}
+
+// concat splices an array argument and appends anything else whole.
+def _appendTo(out, v) {
+  if (isArray(v)) {
+    for (x in v) { push(out, x) }
+  } else {
+    push(out, v)
+  }
+}
+
+def conj(arr, value, ...more) {
+  _arr("conj", 1, arr)
+  val out = slice(arr, 0)
+  push(out, value)
+  for (v in more) { push(out, v) }
+  out
+}
+
+// ------------------------------------------------------------------- grouping
+
+def groupBy(arr, key) {
+  _fn("groupBy", 2, key)
+  _arr("groupBy", 1, arr)
+  val out = object()
+  for (v in arr) {
+    // An object's keys are strings, so a key of any other type becomes its text form.
+    val k = toString(key(v))
+    if (has(out, k)) { push(out[k], v) } else { set(out, k, [v]) }
+  }
+  out
+}
+
+def partition(arr, pred) {
+  _fn("partition", 2, pred)
+  _arr("partition", 1, arr)
+  val yes = []
+  val no = []
+  for (v in arr) {
+    if (pred(v)) { push(yes, v) } else { push(no, v) }
+  }
+  [yes, no]
+}
+
+def frequencies(arr) {
+  _arr("frequencies", 1, arr)
+  val out = object()
+  for (v in arr) {
+    val k = toString(v)
+    set(out, k, if (has(out, k)) then out[k] + 1 else 1)
+  }
+  out
+}
+
+def unique(arr) {
+  _arr("unique", 1, arr)
+  val out = []
+  for (v in arr) {
+    if (!contains(out, v)) { push(out, v) }
+  }
+  out
+}
+
+def distinctBy(arr, key) {
+  _fn("distinctBy", 2, key)
+  _arr("distinctBy", 1, arr)
+  val seen = object()
+  val out = []
+  for (v in arr) {
+    // Source text, not display text: this is the one place the native keys a set by
+    // repr, which keeps the string "1" apart from the number 1.
+    val k = jsonStringify(key(v))
+    if (!has(seen, k)) {
+      set(seen, k, true)
+      push(out, v)
+    }
+  }
+  out
+}
+
+// ------------------------------------------------------------------ slicing
+
+def take(v, n) {
+  val count = max(0, _idx("take", 2, n))
+  val kind = _seqKind("take", v)
+  if (kind == "iterator") {
+    var left = count
+    return __iterFn({ () ->
+      if (left <= 0) { return [] }
+      left -= 1
+      _step(v)
+    })
+  }
+  slice(v, 0, count)
+}
+
+def drop(v, n) {
+  val count = max(0, _idx("drop", 2, n))
+  val kind = _seqKind("drop", v)
+  if (kind == "iterator") {
+    // An iterator taken straight off an array is sliced in place: the native hands back
+    // the very same cursor, moved on, so the skipped elements are gone from the source
+    // the moment drop is called. Advancing it here and returning a view onto it is the
+    // same thing seen from outside. Every other iterator is sliced into a fresh, lazy
+    // one, so the source is left where it was until the result is read.
+    if (toString(v) == "<iterator over array>") {
+      var skipped = count
+      while (skipped > 0 && hasNext(v)) {
+        iterNext(v)
+        skipped -= 1
+      }
+      return __iterFn({ () -> _step(v) })
+    }
+    var left = count
+    return __iterFn({ () ->
+      while (left > 0 && hasNext(v)) {
+        iterNext(v)
+        left -= 1
+      }
+      left = 0
+      _step(v)
+    })
+  }
+  slice(v, count)
+}
+
+def takeWhile(v, pred) {
+  _fn("takeWhile", 2, pred)
+  val kind = _seqKind("takeWhile", v)
+  if (kind == "iterator") {
+    var live = true
+    return __iterFn({ () ->
+      if (!live || !hasNext(v)) { return [] }
+      val x = iterNext(v)
+      if (pred(x)) then [x] else { live = false; [] }
+    })
+  }
+  val out = []
+  var i = 0
+  while (i < length(v) && pred(v[i])) {
+    push(out, v[i])
+    i += 1
+  }
+  out
+}
+
+def dropWhile(v, pred) {
+  _fn("dropWhile", 2, pred)
+  val kind = _seqKind("dropWhile", v)
+  if (kind == "iterator") {
+    var dropping = true
+    return __iterFn({ () ->
+      if (dropping) {
+        dropping = false
+        while (hasNext(v)) {
+          val x = iterNext(v)
+          if (!pred(x)) { return [x] }
+        }
+        return []
+      }
+      _step(v)
+    })
+  }
+  var i = 0
+  while (i < length(v) && pred(v[i])) { i += 1 }
+  slice(v, i)
+}
+
+def chunk(arr, n) {
+  val size = _idx("chunk", 2, n)
+  if (size <= 0) { error("chunk: size must be positive") }
+  _arr("chunk", 1, arr)
+  val out = []
+  var i = 0
+  while (i < length(arr)) {
+    push(out, slice(arr, i, min(i + size, length(arr))))
+    i += size
+  }
+  out
+}
+
+def windows(arr, n) {
+  val size = _idx("windows", 2, n)
+  if (size <= 0) { error("windows: size must be positive") }
+  _arr("windows", 1, arr)
+  val len = length(arr)
+  // An array shorter than the window still yields one, short, window; an empty one
+  // yields none at all. That is what the native's sliding() does.
+  if (len > 0 && len < size) { return [slice(arr, 0)] }
+  val out = []
+  var i = 0
+  while (i + size <= len) {
+    push(out, slice(arr, i, i + size))
+    i += 1
+  }
+  out
+}
+
+// ------------------------------------------------------------------- pairing
+
+def zip(a, b) {
+  _arr("zip", 1, a)
+  _arr("zip", 2, b)
+  val out = []
+  var i = 0
+  val n = min(length(a), length(b))
+  while (i < n) {
+    push(out, [a[i], b[i]])
+    i += 1
+  }
+  out
+}
+
+def zipWith(a, b, f) {
+  _arr("zipWith", 1, a)
+  _arr("zipWith", 2, b)
+  _fn("zipWith", 3, f)
+  val out = []
+  var i = 0
+  val n = min(length(a), length(b))
+  while (i < n) {
+    push(out, f(a[i], b[i]))
+    i += 1
+  }
+  out
+}
+
+def enumerate(v) {
+  val kind = _seqKind("enumerate", v)
+  if (kind == "iterator") {
+    var n = 0
+    return __iterFn({ () ->
+      if (!hasNext(v)) { return [] }
+      val pair = [n, iterNext(v)]
+      n += 1
+      [pair]
+    })
+  }
+  val out = []
+  var i = 0
+  while (i < length(v)) {
+    push(out, [i, v[i]])
+    i += 1
+  }
+  out
+}
+
+def intersperse(arr, sep) {
+  _arr("intersperse", 1, arr)
+  val out = []
+  var i = 0
+  while (i < length(arr)) {
+    if (i > 0) { push(out, sep) }
+    push(out, arr[i])
+    i += 1
+  }
+  out
+}
+
+def first(arr) {
+  _arr("first", 1, arr)
+  if (length(arr) == 0) then null else arr[0]
+}
+
+def last(arr) {
+  _arr("last", 1, arr)
+  if (length(arr) == 0) then null else arr[length(arr) - 1]
+}
+
+// ----------------------------------------------------------------- arithmetic
+
+def sum(arr) {
+  _arr("sum", 1, arr)
+  // Two accumulators: the result stays an int as long as every element was one, and
+  // the float total has to have been built in the same order to round the same way.
+  var allInt = true
+  var ints = 0
+  var floats = 0.0
+  var i = 0
+  while (i < length(arr)) {
+    val v = arr[i]
+    if (isInt(v)) {
+      ints += v
+      floats += toFloat(v)
+    } elsif (isFloat(v)) {
+      allInt = false
+      floats += v
+    } else {
+      error("sum: element ${i + 1} is ${typeOf(v)}, not a number")
+    }
+    i += 1
+  }
+  if (allInt) then ints else floats
+}
+
+def sumBy(arr, key) {
+  _fn("sumBy", 2, key)
+  _arr("sumBy", 1, arr)
+  var allInt = true
+  var ints = 0
+  var floats = 0.0
+  var i = 0
+  while (i < length(arr)) {
+    val k = key(arr[i])
+    if (isInt(k)) {
+      ints += k
+      floats += toFloat(k)
+    } elsif (isFloat(k)) {
+      allInt = false
+      floats += k
+    } else {
+      error("sumBy: key returned ${typeOf(k)}, not a number")
+    }
+    i += 1
+  }
+  if (allInt) then ints else floats
+}
+
+def maxBy(arr, key) = _extremeBy(arr, key, "maxBy", 1)
+
+def minBy(arr, key) = _extremeBy(arr, key, "minBy", -1)
+
+// `want` is the sign of compare(candidate, best) that makes the candidate win.
+def _extremeBy(arr, key, fn, want) {
+  _arr(fn, 1, arr)
+  if (length(arr) == 0) { error("${fn}: array is empty") }
+  _fn(fn, 2, key)
+  var best = arr[0]
+  var bestKey = key(best)
+  var i = 1
+  while (i < length(arr)) {
+    val k = key(arr[i])
+    if (compare(k, bestKey) == want) {
+      best = arr[i]
+      bestKey = k
+    }
+    i += 1
+  }
+  best
+}
+
+// --------------------------------------------------------------------- sorting
+
+def sort(arr, compareFn = _none) {
+  _arr("sort", 1, arr)
+  val items = slice(arr, 0)
+  if (compareFn != _none) {
+    val cmp = _fn("sort", 2, compareFn)
+    _sortRange(items, (x, y) -> _negative(_asNumber(cmp(x, y))))
+  } else {
+    _sortRange(items, (x, y) -> compare(x, y) < 0)
+  }
+  items
+}
+
+def sortBy(arr, key) {
+  _arr("sortBy", 1, arr)
+  _fn("sortBy", 2, key)
+  // Decorate first: the key is computed once per element rather than once per
+  // comparison, which a key function with a side effect can tell apart.
+  val decorated = []
+  for (v in arr) { push(decorated, [key(v), v]) }
+  _sortRange(decorated, (x, y) -> compare(x[0], y[0]) < 0)
+  val out = []
+  for (pair in decorated) { push(out, pair[1]) }
+  out
+}
+
+// A comparator has to return a number; this is the wording Values.toDouble uses.
+def _asNumber(v) = if (isNumber(v)) then v else error("expected a number, got ${typeOf(v)}")
+
+// The native tests the comparator's result with a plain machine comparison, which is
+// false for -0.0. SFL's own `<` is a total order and puts -0.0 below 0, so the zero
+// has to be ruled out separately.
+def _negative(v) = v < 0 && v != 0
+
+// Both sorts are stable, and both are the algorithm java.util.Arrays.sort runs: binary
+// insertion sort up to sixteen elements, a split merge above that. The choice is not an
+// internal detail — a comparator with a side effect, or one that is inconsistent, or a
+// pair of values that turn out not to be comparable, all make the exact sequence of
+// comparisons visible.
+val _sortCutoff = 16
+
+// Ordering.fromLessThan builds the three-way comparison out of the less-than test, and
+// only asks the other way round when the first answer was "not less". So a comparator
+// sees one call for a pair it puts in order and two for a pair it does not.
+def _cmp3(lt, x, y) = if (lt(x, y)) then -1 elsif (lt(y, x)) then 1 else 0
+
+def _sortRange(a, lt) {
+  val n = length(a)
+  // The scratch array is allocated once, at full length, and shared by every merge.
+  if (n > _sortCutoff) then _splitMerge(a, newArray(n), 0, n, lt)
+  else _insertionSort(a, 0, n, lt)
+}
+
+def _splitMerge(a, temp, start, end, lt) {
+  val len = end - start
+  if (len > _sortCutoff) {
+    val middle = start + len / 2
+    _splitMerge(a, temp, start, middle, lt)
+    _splitMerge(a, temp, middle, end, lt)
+    _mergeInto(a, temp, start, middle, end, lt)
+    var i = 0
+    while (i < len) {
+      a[start + i] = temp[start + i]
+      i += 1
+    }
+  } else {
+    _insertionSort(a, start, end, lt)
+  }
+}
+
+def _mergeInto(a, temp, start, middle, end, lt) {
+  var out = start
+  var left = start
+  var right = middle
+  while (out < end) {
+    // Ties keep the left run in front, which is what makes the sort stable.
+    if (left < middle && (right >= end || _cmp3(lt, a[left], a[right]) <= 0)) {
+      temp[out] = a[left]
+      left += 1
+    } else {
+      temp[out] = a[right]
+      right += 1
+    }
+    out += 1
+  }
+}
+
+def _insertionSort(a, start, end, lt) {
+  val n = end - start
+  if (n >= 2) {
+    if (_cmp3(lt, a[start], a[start + 1]) > 0) {
+      val first = a[start]
+      a[start] = a[start + 1]
+      a[start + 1] = first
+    }
+    var m = 2
+    while (m < n) {
+      val next = a[start + m]
+      // The element already in place is checked first, so an ordered array costs one
+      // comparison per element and never enters the search below.
+      if (_cmp3(lt, next, a[start + m - 1]) < 0) {
+        var lo = start
+        var hi = start + m - 1
+        while (hi - lo > 1) {
+          val mid = (lo + hi) / 2
+          if (_cmp3(lt, next, a[mid]) < 0) { hi = mid } else { lo = mid }
+        }
+        // The search narrows to a pair and then compares against the lower of the two
+        // once more, so the landing place is one comparison past the loop.
+        val at = lo + (if (_cmp3(lt, next, a[lo]) < 0) then 0 else 1)
+        var i = start + m
+        while (i > at) {
+          a[i] = a[i - 1]
+          i -= 1
+        }
+        a[at] = next
+      }
+      m += 1
+    }
+  }
+}

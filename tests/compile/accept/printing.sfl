@@ -1,0 +1,12 @@
+// Output must be byte-for-byte what the interpreter produces.
+println("plain text")
+println(42)
+println(true, false)
+println(1.0, 2.5, 0.1, 1.0 / 3.0, 100.0, 1e10)
+println(-0.5, 1e-7)
+print("no")
+print("newline")
+println("")
+println("mixed", 1, 2.5, true)
+println()
+println("done")

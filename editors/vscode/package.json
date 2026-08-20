@@ -1,0 +1,201 @@
+{
+  "name": "sfl-lang",
+  "displayName": "SFL",
+  "description": "SFL language support: syntax highlighting, diagnostics, completion, hover and signature help via the sfl language server.",
+  "version": "0.1.0",
+  "publisher": "fartech",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "sfl",
+    "scripting"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "sfl",
+        "aliases": [
+          "SFL",
+          "sfl"
+        ],
+        "extensions": [
+          ".sfl"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "sfl",
+        "scopeName": "source.sfl",
+        "path": "./syntaxes/sfl.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "sfl.newProject",
+        "title": "SFL: New Project…",
+        "shortTitle": "SFL Project"
+      },
+      {
+        "command": "sfl.runFile",
+        "title": "SFL: Run File",
+        "icon": "$(play)"
+      },
+      {
+        "command": "sfl.debugFile",
+        "title": "SFL: Debug File",
+        "icon": "$(debug-alt)"
+      },
+      {
+        "command": "sfl.compileFile",
+        "title": "SFL: Compile File to Native Executable"
+      },
+      {
+        "command": "sfl.restartServer",
+        "title": "SFL: Restart Language Server"
+      }
+    ],
+    "menus": {
+      "file/newFile": [
+        {
+          "command": "sfl.newProject",
+          "group": "file"
+        }
+      ],
+      "editor/title/run": [
+        {
+          "command": "sfl.runFile",
+          "when": "resourceLangId == sfl",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sfl.debugFile",
+          "when": "resourceLangId == sfl",
+          "group": "navigation@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "sfl.runFile",
+          "when": "resourceLangId == sfl"
+        },
+        {
+          "command": "sfl.debugFile",
+          "when": "resourceLangId == sfl"
+        },
+        {
+          "command": "sfl.compileFile",
+          "when": "resourceLangId == sfl"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "SFL",
+      "properties": {
+        "sfl.path": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Path to the `sfl` binary. Leave empty to use `sfl` (or `sfl.exe` on Windows) from PATH."
+        }
+      }
+    },
+    "breakpoints": [
+      {
+        "language": "sfl"
+      }
+    ],
+    "taskDefinitions": [
+      {
+        "type": "sfl",
+        "properties": {
+          "task": {
+            "type": "string",
+            "description": "The sfl build task to run (build, test, clean, or one defined in build.sfl)."
+          }
+        },
+        "required": [
+          "task"
+        ]
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "sfl",
+        "label": "SFL",
+        "languages": [
+          "sfl"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [
+              "program"
+            ],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "The .sfl script to debug.",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments passed to the script.",
+                "default": []
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause on the first statement.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "sfl",
+            "request": "launch",
+            "name": "Debug SFL script",
+            "program": "${file}"
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "SFL: Debug current file",
+            "body": {
+              "type": "sfl",
+              "request": "launch",
+              "name": "Debug ${1:script}",
+              "program": "^\"\\${file}\""
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p .",
+    "watch": "tsc -w -p .",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.4.0",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
+  }
+}

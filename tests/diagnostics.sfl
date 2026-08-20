@@ -1,0 +1,168 @@
+// Error reporting: the message, the suggestion, and the structured form.
+//
+// These assert on message content, so a regression that makes an error vaguer again
+// shows up as a test failure rather than going unnoticed.
+
+import "lib/assert"
+
+// Runs body and returns the error object, or fails the check if it succeeded.
+def failureOf(body) {
+  val r = attempt(body)
+  if (r.ok) then error("expected a failure, but it returned " + toString(r.value)) else r.error
+}
+
+def messageOf(body) = failureOf(body).message
+def helpOf(body) = join(failureOf(body).help, " | ")
+
+// ------------------------------------------------------------- attempt() shape
+
+val good = attempt(() -> 6 * 7)
+check("attempt reports success", good.ok, true)
+check("attempt returns the value", good.value, 42)
+check("a successful attempt has no error key", has(good, "error"), false)
+
+val bad = attempt(() -> error("something went wrong"))
+check("attempt reports failure", bad.ok, false)
+check("attempt captures the message", bad.error.message, "something went wrong")
+check("attempt records the kind", bad.error.kind, "Runtime error")
+checkTrue("attempt records a line", bad.error.line > 0)
+checkTrue("attempt records the file", isString(bad.error.file))
+checkTrue("attempt records help as an array", isArray(bad.error.help))
+checkTrue("attempt records a trace as an array", isArray(bad.error.trace))
+
+// ------------------------------------------------------ suggestions for typos
+
+val user = {"name": "Ann", "email": "a@b.c"}
+checkTrue("a misspelled key is suggested", contains(helpOf(() -> user["emial"]), "did you mean 'email'"))
+checkTrue("the available keys are listed", contains(helpOf(() -> user["nope"]), "name, email"))
+checkTrue("get() is suggested for optional keys", contains(helpOf(() -> user["nope"]), "get(o, key, default)"))
+check("the message names the key", messageOf(() -> user["zzz"]), "object has no key 'zzz'")
+
+checkTrue("a misspelled global is suggested",
+  contains(helpOf(() -> eval("prinln(1)")), "did you mean 'println'"))
+checkTrue("a misspelled builtin is suggested",
+  contains(helpOf(() -> eval("lenght([1])")), "did you mean 'length'"))
+
+// --------------------------------------------------------- bounds and indices
+
+val three = [1, 2, 3]
+check("out of bounds names the length", messageOf(() -> three[9]),
+  "array index 9 is out of bounds (length 3)")
+checkTrue("out of bounds explains the valid range",
+  contains(helpOf(() -> three[9]), "0 to 2, or -1 to -3"))
+checkTrue("an empty array says so", contains(helpOf(() -> [][0]), "the array is empty"))
+checkTrue("indexing null is explained", contains(helpOf(() -> {
+  val nothing = null
+  nothing["k"]
+}), "isNull"))
+
+// ------------------------------------------------------- signatures and arity
+
+def scale(factor, values) = map(values, (v) -> v * factor)
+check("arity error counts arguments", messageOf(() -> scale(2)),
+  "scale expects 2 argument(s), got 1")
+checkTrue("arity error shows the declaration",
+  contains(helpOf(() -> scale(2)), "scale(factor, values)"))
+
+def withOptional(a, b = 1) = a + b
+checkTrue("optional parameters are marked in the signature",
+  contains(helpOf(() -> eval("withOptional()")), "withOptional(a, b?)"))
+
+def variadic(first, ...rest) = first
+checkTrue("rest parameters are marked in the signature",
+  contains(helpOf(() -> eval("variadic()")), "variadic(first, ...rest)"))
+
+checkTrue("a builtin's argument error shows its signature",
+  contains(helpOf(() -> map("not an array", identity)), "map(v, f)"))
+checkTrue("a builtin's arity error shows its signature",
+  contains(helpOf(() -> eval("charAt(\"abc\")")), "charAt(s, i)"))
+
+// --------------------------------------------------------------- type errors
+
+checkTrue("the offending values appear in the message",
+  contains(messageOf(() -> eval("true + 1")), "true + 1"))
+checkTrue("a conversion is suggested",
+  contains(helpOf(() -> eval("true + 1")), "toInt"))
+
+check("calling a non-function says what it is",
+  messageOf(() -> eval("val n = 7\nn(1)")), "'n' is not a function, it is int 7")
+checkTrue("indexing advice for a wrongly-called object",
+  contains(helpOf(() -> eval("val o = {\"a\": 1}\no(\"a\")")), "o.key"))
+checkTrue("indexing advice for a wrongly-called array",
+  contains(helpOf(() -> eval("val a = [1]\na(0)")), "a[i]"))
+
+// ------------------------------------------------------------- syntax errors
+
+check("an unclosed body reports where it opened",
+  messageOf(() -> eval("def f() {\n  println(1)")),
+  "unterminated function body, opened at line 1")
+checkTrue("'=' in a condition suggests '=='",
+  contains(helpOf(() -> eval("if (1 = 2) { }")), "did you mean '=='"))
+checkTrue("a reserved word is explained",
+  contains(helpOf(() -> eval("val while = 1")), "reserved word"))
+checkTrue("assigning to a call is explained",
+  contains(helpOf(() -> eval("length([1]) = 2")), "assign to a variable"))
+check("syntax errors report their kind", failureOf(() -> eval("val =")).kind, "Syntax error")
+
+// ---------------------------------------------------- sugar-era syntax errors
+
+check("an empty interpolation is a clean syntax error",
+  failureOf(() -> eval("\"\${}\"")).kind, "Syntax error")
+checkTrue("a string cut off by a newline points at multi-line strings",
+  contains(helpOf(() -> eval("val s = \"abc\nval t = 1")), "\"\"\""))
+checkTrue("an unterminated raw string names the raw multi-line form",
+  contains(helpOf(() -> eval("val s = r\"abc\n1")), "r\"\"\""))
+checkTrue("a lone question mark is reported",
+  contains(messageOf(() -> eval("1 ? 2")), "unexpected character '?'"))
+check("?. without a field name is reported",
+  messageOf(() -> eval("val o = {}\no?.[0]")), "expected a field name after '?.'")
+
+// ----------------------------------------------------------------- traceback
+
+// Note: the trace also contains failureOf itself, since it is a function on the stack.
+def hasFrame(trace, name) = any(trace, (f) -> contains(f, name))
+
+def inner(a) { a[9] }
+def middle(a) { val x = inner(a); x }
+def outer() { val y = middle([1]); y }
+val traced = failureOf(outer).trace
+checkTrue("the traceback has a frame per call", length(traced) >= 3)
+checkTrue("the innermost call comes first", contains(traced[0], "inner"))
+checkTrue("intermediate calls appear", hasFrame(traced, "middle"))
+checkTrue("the outermost call appears", hasFrame(traced, "outer"))
+check("frames are ordered innermost first",
+  [findIndex(traced, (f) -> contains(f, "inner")) < findIndex(traced, (f) -> contains(f, "middle")),
+   findIndex(traced, (f) -> contains(f, "middle")) < findIndex(traced, (f) -> contains(f, "outer"))],
+  [true, true])
+
+// A tail call reuses its caller's frame, so the caller is absent from the traceback and
+// the frame that remains is named after what was actually running.
+def tailInner(a) { a[9] }
+def tailOuter() { tailInner([1]) }
+val tailTrace = failureOf(tailOuter).trace
+checkTrue("the running function is named", hasFrame(tailTrace, "tailInner"))
+check("the frame it replaced is gone", hasFrame(tailTrace, "tailOuter"), false)
+
+// ------------------------------------------------------------ thread errors
+
+val failed = spawn(() -> {
+  val o = {"a": 1}
+  o["missing"]
+})
+val threadErr = failureOf(() -> await(failed))
+checkTrue("the thread is named", contains(threadErr.message, "thread-"))
+checkTrue("the underlying message is kept", contains(threadErr.message, "object has no key 'missing'"))
+checkTrue("where it happened is reported", contains(join(threadErr.help, " "), "raised at"))
+
+// -------------------------------------------------------- errors are values
+
+// Because attempt() returns data, error handling composes like anything else.
+val outcomes = map(["1", "oops", "3"], (s) -> attempt(() -> toInt(s)))
+check("successes and failures can be partitioned",
+  map(partition(outcomes, (r) -> r.ok), length), [2, 1])
+check("the values can be collected",
+  map(filter(outcomes, (r) -> r.ok), (r) -> r.value), [1, 3])
+checkTrue("the failure explains itself",
+  contains(find(outcomes, (r) -> !r.ok).error.message, "not a number"))
+
+report("diagnostics")

@@ -1,0 +1,21 @@
+// The part of the builtin library written in SFL, checked against the natives.
+//
+// Importing these modules defines functions that shadow the builtins of the same
+// names, so the assertions below run against the SFL implementations rather than the
+// interpreter's own. Then the whole builtin suite runs unchanged: if the two ever
+// disagree about a result or an error message, this is where it shows up.
+//
+// It is also the suite that keeps the compiler honest, because these are exactly the
+// definitions a compiled program links from libsflstd.a.
+
+import "../stdlib/coll"
+import "../stdlib/obj"
+import "../stdlib/text"
+import "../stdlib/fn"
+import "../stdlib/codec"
+import "../stdlib/regex"
+import "../stdlib/lazy"
+
+// The suite it runs reports under its own name, so say whose implementations these are.
+println("stdlib: the builtin suite, run against the SFL implementations")
+import "builtins"

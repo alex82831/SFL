@@ -1,0 +1,111 @@
+// Defaults are resolved in the defining scope: a default expression's names index
+// the frame the function was defined under, not the frame being filled. Each case
+// here exercises a different way such a name reaches the captured environment.
+
+// A local of the defining function.
+def outer2() {
+  val a = 5
+  def h(y = a) = y
+  h() + h(100)
+}
+println(outer2())
+
+// A parameter of the defining function.
+def outer3(a) {
+  def h(y = a * 2) = y
+  h()
+}
+println(outer3(21))
+
+// One local and one variable a scope further out: the outer reference must climb
+// exactly one frame up from the captured environment, not zero.
+def o1() {
+  val b = 2
+  def o2() {
+    val a = 5
+    def h(y = a + b) = y
+    h()
+  }
+  o2()
+}
+println(o1())
+
+// Three deep: the middle and outermost locals from the innermost defaults.
+def d1(p) {
+  def d2(q) {
+    def h(y = p * 10, z = q + 1) = y + z
+    h()
+  }
+  d2(p + 1)
+}
+println(d1(3))
+
+// A select pattern that binds a name inside the default expression.
+def selDefault() {
+  val a = 7
+  def h(y = select (a) { case 0: "zero" case n: "got " + n }) = y
+  h()
+}
+println(selDefault())
+
+// A lambda in the default captures the defining frame.
+def lamDefault() {
+  val a = 11
+  def h(f = () -> a + 1) = f()
+  h()
+}
+println(lamDefault())
+
+// A lambda's own default sees the scope the lambda was defined in.
+def lamOwn() {
+  val a = 13
+  val lam = (y = a * 3) -> y
+  lam()
+}
+println(lamOwn())
+
+// The default calls another function on an enclosing local.
+def callDefault() {
+  val a = 4
+  def twice(v) = v * 2
+  def h(y = twice(a)) = y
+  h() + h(1)
+}
+println(callDefault())
+
+// Defined inside a loop: the default reads the per-iteration frame.
+def loopDefault() {
+  val out = []
+  for (i in range(3)) {
+    def g(y = i * i) = y
+    push(out, g())
+  }
+  out
+}
+println(loopDefault())
+
+// Defaults of a top-level function evaluate against globals, and a function
+// defined at the top level carries no environment at all — omitting its
+// defaulted arguments must still work.
+val g0 = 100
+def top(x, y = g0 + 1, z = 2) = x + y + z
+println(top(1), top(1, 10), top(1, 10, 20))
+
+// Mixed rest parameter and defaults over an enclosing local.
+def restMix() {
+  val a = 3
+  def h(x, y = a, ...rest) = x + y + length(rest)
+  h(1) + h(1, 10) + h(1, 10, 2, 3)
+}
+println(restMix())
+
+// The default is only evaluated when the argument is omitted: an enclosing
+// local mutated between calls is read at call time, not definition time.
+def lateBound() {
+  var a = 1
+  def h(y = a) = y
+  val first = h()
+  a = 50
+  first + h()
+}
+println(lateBound())

@@ -1,0 +1,58 @@
+// Modules: names beginning with `_` belong to the file that declares them, and
+// `import "m" as x` puts a module's surface behind `x` instead of in the global scope.
+
+import "lib/assert"
+import "ns/geo" as g
+import "ns/label" as t
+import "ns/wraps" as w
+import "ns/plain"
+
+// Two modules, the same public name, no collision.
+check("geo.dist", g.dist({"x": 3, "y": 4}), 5.0)
+check("label.dist", t.dist("abc"), "[abc]")
+check("geo.origin", g.origin(), {"x": 0, "y": 0})
+check("label.origin", t.origin(), "here")
+
+// Each module's private helper is its own, even though both are called _square.
+check("private helpers do not collide", [g.dist({"x": 1, "y": 0}), t.dist("x")], [1.0, "[x]"])
+
+// A qualified name is a plain global underneath, so it is a value like any other.
+val f = g.dist
+check("a module's function is a value", f({"x": 6, "y": 8}), 10.0)
+check("passed to a higher-order builtin",
+  map([{"x": 3, "y": 4}, {"x": 6, "y": 8}], g.dist), [5.0, 10.0])
+
+// Closures defined inside a module still reach the module's private names.
+check("closure in a module", g.scaler(3)({"x": 1, "y": 2}), {"x": 3, "y": 6})
+check("lambda reaching a private helper", g.squares([1, 2, 3]), [1, 4, 9])
+
+// A module that imports another keeps its own surface behind its own alias.
+check("module importing a module", w.far({"x": 3, "y": 4}), true)
+check("delegating through two modules", w.viaModule({"x": 3, "y": 4}), 5.0)
+
+// A module's function works as an extractor through its alias, resolved at parse
+// time exactly as `g.point` is in an expression — no flat-name binding needed.
+check("qualified extractor",
+  select ({"x": 3, "y": 4}) { case g.point(x, y): x + y case _: "no" }, 7)
+check("qualified extractor no-match",
+  select (5) { case g.point(x, y): x + y case _: "no" }, "no")
+check("qualified extractor with guard",
+  select ({"x": 6, "y": 8}) {
+    case g.point(x, y) if x > 5: "far " + (x + y)
+    case g.point(x, y): "near"
+    case _: "no"
+  }, "far 14")
+
+// A name beginning with `_` inside a function is an ordinary local.
+def usesLocal() {
+  val _tmp = 7
+  _tmp * 2
+}
+check("a local may begin with an underscore", usesLocal(), 14)
+
+// A plain import puts the module's surface in scope, and still keeps `_` out of it.
+check("a plain import exports its surface", visible(2), 6)
+checkFails("a plain import keeps private names to itself",
+  () -> _hidden(2), "undefined variable '_hidden'")
+
+report("namespaces")

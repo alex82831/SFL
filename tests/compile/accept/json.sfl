@@ -1,0 +1,14 @@
+// JSON output has to be JSON. Rendering a function used to produce `<fn lambda/0>`,
+// which this module's own parser rejects — output that looked like a result and was not.
+println(jsonStringify({"x": 1, "xs": [1, 2], "s": "t", "b": true, "n": null}))
+println(jsonStringify([1, [2, [3]]], true))
+
+println(attempt(() -> jsonStringify({"x": 1, "get": () -> 2})).error.message)
+println(attempt(() -> jsonStringify({"x": 1, "get": () -> 2})).error.help)
+println(attempt(() -> jsonStringify(() -> 1)).error.help)
+println(attempt(() -> jsonStringify([1, {"deep": [0, toUpper]}])).error.help)
+println(attempt(() -> jsonStringify(iter([1]))).error.message)
+
+// What is representable still round-trips.
+val v = {"a": [1, 2.5, "s", true, null], "b": {"c": 1}}
+println(jsonParse(jsonStringify(v)) == v)

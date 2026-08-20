@@ -1,0 +1,5 @@
+// A lambda bound at the top level captures nothing, so it compiles like a def.
+val f = (x) -> x + 1
+println(f(1))
+val g = (a, b) -> a * b + 1
+println(g(6, 7), f(41))

@@ -1,0 +1,78 @@
+// mongodb/bytes — little-endian packing over byte arrays (arrays of ints 0..255).
+//
+// BSON counts everything in little-endian int32/int64/double, so this is the
+// layer everything else in the package stands on. The functions are public and
+// deliberately generic: nothing here knows about BSON, and another wire format
+// could import just this module.
+
+// Appends every byte of `src` to `dst` (mutating dst) and returns dst.
+def bytesAppend(dst, src) {
+  for (b in src) { push(dst, b) }
+  dst
+}
+
+// A copy of b[from, until) as a fresh byte array.
+def bytesSlice(b, from, until) {
+  val out = []
+  var i = from
+  while (i < until) {
+    push(out, b[i])
+    i += 1
+  }
+  out
+}
+
+// Appends v as a little-endian int32. The value must fit; BSON lengths and
+// wire-protocol headers are the callers, and a length past 2^31 is an error
+// upstream long before it gets here.
+def pushI32le(out, v) {
+  push(out, bitAnd(v, 0xff))
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(shiftRightU(v, 16), 0xff))
+  push(out, bitAnd(shiftRightU(v, 24), 0xff))
+  out
+}
+
+// Appends v as a little-endian int64.
+def pushI64le(out, v) {
+  var i = 0
+  while (i < 8) {
+    push(out, bitAnd(shiftRightU(v, i * 8), 0xff))
+    i += 1
+  }
+  out
+}
+
+// Appends a float as its IEEE-754 little-endian bytes.
+def pushF64le(out, v) = pushI64le(out, doubleToBits(v))
+
+// Overwrites out[at .. at+3] with v as little-endian int32; used to patch a
+// document's length once its end is known.
+def patchI32le(out, at, v) {
+  out[at] = bitAnd(v, 0xff)
+  out[at + 1] = bitAnd(shiftRightU(v, 8), 0xff)
+  out[at + 2] = bitAnd(shiftRightU(v, 16), 0xff)
+  out[at + 3] = bitAnd(shiftRightU(v, 24), 0xff)
+  out
+}
+
+// Little-endian int32 at b[at], sign-extended to an SFL int.
+def readI32le(b, at) {
+  val raw = b[at] + shiftLeft(b[at + 1], 8) + shiftLeft(b[at + 2], 16) + shiftLeft(b[at + 3], 24)
+  if (raw >= 0x80000000) then raw - 0x100000000 else raw
+}
+
+// Little-endian int64 at b[at]. The top byte shifts into the sign bit, which is
+// exactly how a negative int64 comes back.
+def readI64le(b, at) {
+  var v = 0
+  var i = 7
+  while (i >= 0) {
+    v = shiftLeft(v, 8) + b[at + i]
+    i -= 1
+  }
+  v
+}
+
+// Little-endian IEEE-754 double at b[at].
+def readF64le(b, at) = bitsToDouble(readI64le(b, at))

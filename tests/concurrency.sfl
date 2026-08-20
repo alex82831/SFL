@@ -1,0 +1,252 @@
+// Threads, channels and synchronisation.
+//
+// Concurrency tests must not depend on timing to decide pass or fail: every check here
+// either joins a thread, drains a channel, or waits on a latch before asserting.
+
+import "lib/assert"
+
+// ------------------------------------------------------------------- threads
+
+val t = spawn(() -> 6 * 7)
+check("a thread returns its value", await(t), 42)
+check("a finished thread is not alive", isAlive(t), false)
+check("threads are named", startsWith(threadName(t), "thread-"), true)
+
+check("arguments are passed through", await(spawn((a, b) -> a + b, 3, 4)), 7)
+check("a thread can call a named function", await(spawn(toUpper, "hi")), "HI")
+
+// The spawned function is a closure over the spawning scope.
+val captured = "outer value"
+check("threads see captured variables", await(spawn(() -> captured)), "outer value")
+
+def makeWorker(factor) = (n) -> n * factor
+check("a closure built elsewhere runs on a thread", await(spawn(makeWorker(3), 5)), 15)
+
+// awaitAll keeps order regardless of which thread finishes first.
+val staggered = map([30, 5, 20, 1], (ms) -> spawn((d) -> { sleep(d); d }, ms))
+check("awaitAll preserves order", awaitAll(staggered), [30, 5, 20, 1])
+
+check("cpuCount is sane", cpuCount() >= 1, true)
+check("currentThreadName works on the main thread", isString(currentThreadName()), true)
+
+// Errors cross the thread boundary when awaited.
+val failing = spawn(() -> error("worker failed"))
+checkFails("a thread's error surfaces on await", () -> await(failing), "worker failed")
+check("threadFailed reports it", threadFailed(failing), true)
+
+// A thread that outlives the timeout is reported rather than silently ignored.
+val slow = spawn(() -> { sleep(3000); "late" })
+checkFails("await honours its timeout", () -> await(slow, 50), "did not finish")
+
+// ---------------------------------------------------------- real parallelism
+
+// Eight threads each incrementing a shared counter under a lock must lose nothing.
+var counter = 0
+val guard = mutex()
+val bumpers = map(range(8), (i) -> spawn(() -> {
+  for (j in range(1000)) {
+    withLock(guard, () -> counter = counter + 1)
+  }
+}))
+awaitAll(bumpers)
+check("a mutex prevents lost updates", counter, 8000)
+
+// The same through an atomic, without a lock.
+val total = atomic(0)
+awaitAll(map(range(8), (i) -> spawn(() -> {
+  for (j in range(1000)) { atomicAdd(total, 1) }
+})))
+check("atomicAdd loses nothing", atomicGet(total), 8000)
+
+// Threads run genuinely concurrently: work split across threads finishes sooner than
+// the same work in sequence. Only asserted when there is more than one processor.
+def burn(n) {
+  var i = 0
+  var s = 0
+  while (i < n) { s = s + i % 7; i += 1 }
+  s
+}
+val serialStart = timeNanos()
+burn(400000)
+burn(400000)
+burn(400000)
+burn(400000)
+val serialMs = (timeNanos() - serialStart) / 1000000
+val parStart = timeNanos()
+awaitAll(map(range(4), (i) -> spawn(burn, 400000)))
+val parMs = (timeNanos() - parStart) / 1000000
+if (cpuCount() > 1) {
+  checkTrue("four threads beat four sequential runs", parMs < serialMs)
+} else {
+  checkTrue("single processor: skipped the parallelism check", true)
+}
+
+// ------------------------------------------------------------------ atomics
+
+val ref = atomic("start")
+check("atomicGet reads the initial value", atomicGet(ref), "start")
+atomicSet(ref, "next")
+check("atomicSet replaces it", atomicGet(ref), "next")
+check("atomicCompareSet succeeds on a match", atomicCompareSet(ref, "next", "done"), true)
+check("atomicCompareSet fails on a mismatch", atomicCompareSet(ref, "nope", "x"), false)
+check("the value survives a failed compare", atomicGet(ref), "done")
+check("atomic() defaults to null", atomicGet(atomic()), null)
+check("atomicUpdate applies a function", atomicUpdate(atomic(10), (v) -> v * 3), 30)
+check("atomicAdd works on floats", atomicAdd(atomic(1.5), 0.5), 2.0)
+
+// ----------------------------------------------------------------- channels
+
+val ch = channel()
+send(ch, "a")
+send(ch, "b")
+check("channelSize counts what is queued", channelSize(ch), 2)
+check("receive is first in, first out", receive(ch), "a")
+check("tryReceive takes the next", tryReceive(ch), "b")
+check("tryReceive returns null when empty", tryReceive(ch), null)
+check("receive times out to null", receive(ch, 20), null)
+
+// A producer thread and the main thread as consumer.
+val pipe = channel()
+val producer = spawn(() -> {
+  for (i in range(5)) { send(pipe, i * i) }
+  closeChannel(pipe)
+})
+check("everything sent is received in order", channelToArray(pipe), [0, 1, 4, 9, 16])
+await(producer)
+check("the channel reports itself closed", channelClosed(pipe), true)
+check("receiving from a closed empty channel gives null", receive(pipe), null)
+checkFails("sending to a closed channel is an error", () -> send(pipe, 1), "closed")
+
+// Values queued before the close are still delivered afterwards.
+val late = channel()
+send(late, "queued")
+closeChannel(late)
+check("a close does not discard queued values", receive(late), "queued")
+check("then the channel reads as empty", receive(late), null)
+
+// A bounded channel applies backpressure; the send only completes once space frees up.
+val bounded = channel(2)
+val filler = spawn(() -> {
+  for (i in range(6)) { send(bounded, i) }
+  closeChannel(bounded)
+})
+check("a bounded channel delivers everything", channelToArray(bounded), [0, 1, 2, 3, 4, 5])
+await(filler)
+
+// Several workers sharing one queue of jobs, reporting into a results channel.
+val jobs = channel()
+val results = channel()
+val workers = map(range(4), (w) -> spawn(() -> {
+  var handled = 0
+  var job = receive(jobs)
+  while (job != null) {
+    send(results, job * 2)
+    handled += 1
+    job = receive(jobs)
+  }
+  handled
+}))
+for (i in range(40)) { send(jobs, i) }
+closeChannel(jobs)
+val handledCounts = awaitAll(workers)
+closeChannel(results)
+check("every job was taken exactly once", sum(handledCounts), 40)
+check("every result came back", sum(channelToArray(results)), 2 * sum(range(40)))
+
+check("channelDrain empties without waiting", {
+  val d = channel()
+  send(d, 1)
+  send(d, 2)
+  val got = channelDrain(d)
+  [got, channelSize(d)]
+}, [[1, 2], 0])
+
+// -------------------------------------------------------- locks and permits
+
+val m = mutex()
+check("tryLock succeeds when free", tryLock(m), true)
+unlock(m)
+check("withLock returns the body's value", withLock(m, () -> "inside"), "inside")
+// The lock must be released even when the body raises.
+try(() -> withLock(m, () -> error("inside failure")))
+check("withLock releases after an error", tryLock(m), true)
+unlock(m)
+checkFails("unlocking what you do not hold is an error", () -> unlock(mutex()), "does not hold")
+
+// A lock held by another thread is not available until it lets go.
+val held = mutex()
+val holder = latch(1)
+val finish = latch(1)
+val locker = spawn(() -> {
+  withLock(held, () -> {
+    countDown(holder)
+    awaitLatch(finish, 3000)
+  })
+})
+awaitLatch(holder, 3000)
+check("a lock held elsewhere cannot be taken", tryLock(held, 20), false)
+countDown(finish)
+await(locker)
+check("and becomes available once released", tryLock(held), true)
+unlock(held)
+
+val l = latch(3)
+check("latchCount starts at the initial count", latchCount(l), 3)
+countDown(l)
+check("countDown decrements", latchCount(l), 2)
+check("awaitLatch times out while the count is above zero", awaitLatch(l, 20), false)
+countDown(l)
+countDown(l)
+check("awaitLatch returns once the count reaches zero", awaitLatch(l, 1000), true)
+
+val sem = semaphore(2)
+check("the first permit is available", acquire(sem, 100), true)
+check("so is the second", acquire(sem, 100), true)
+check("the third has to wait", acquire(sem, 20), false)
+release(sem)
+check("releasing frees one up", acquire(sem, 100), true)
+
+// -------------------------------------------------------------- parallelMap
+
+check("parallelMap keeps order", parallelMap(range(20), (n) -> n * n),
+  map(range(20), (n) -> n * n))
+check("parallelMap accepts a builtin", parallelMap(["a", "b", "c"], toUpper), ["A", "B", "C"])
+check("parallelMap on an empty array", parallelMap([], identity), [])
+check("parallelMap with one worker", parallelMap([1, 2, 3], (n) -> n + 1, 1), [2, 3, 4])
+checkFails("parallelMap propagates a failure", () -> parallelMap([1, 2], (n) -> error("bad")), "bad")
+checkFails("parallelMap rejects a zero worker count", () -> parallelMap([1], identity, 0), "positive")
+
+// Each element is handled exactly once even with many workers.
+val marks = atomic(0)
+parallelMap(range(50), (n) -> atomicAdd(marks, 1), 8)
+check("parallelMap visits every element once", atomicGet(marks), 50)
+
+// ------------------------------------------------- interpreter under threads
+
+// Threads must not share control-flow state: recursion, closures and errors on one
+// thread cannot disturb another.
+def fibq(n) = if (n < 2) then n else fibq(n - 1) + fibq(n - 2)
+val mixed = concat(
+  map(range(3), (i) -> spawn(() -> fibq(15))),
+  map(range(3), (i) -> spawn(() -> {
+    def loop(n, acc) = if (n == 0) then acc else loop(n - 1, acc + 1)
+    loop(50000, 0)
+  }))
+)
+check("concurrent recursion stays correct", awaitAll(mixed), [610, 610, 610, 50000, 50000, 50000])
+
+val caught = map(range(4), (i) -> spawn(() -> try(() -> error("e" + i), (msg) -> msg)))
+check("each thread keeps its own error state", awaitAll(caught), ["e0", "e1", "e2", "e3"])
+
+// Closures created inside threads still capture per iteration.
+check("per-iteration capture inside a thread", await(spawn(() -> {
+  val fs = []
+  for (i in range(3)) { push(fs, () -> i) }
+  map(fs, (f) -> f())
+})), [0, 1, 2])
+
+// Threads can define and use functions through eval, which mutates the global table.
+check("compiling from a thread is safe",
+  sum(awaitAll(map(range(4), (i) -> spawn(() -> eval("1 + 1"))))), 8)
+
+report("concurrency")

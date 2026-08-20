@@ -1,0 +1,352 @@
+// Part of the SFL standard library: the encoding builtins — Base64, hexadecimal and
+// URL percent-encoding.
+//
+// All six work on the UTF-8 bytes of a string, so the module carries its own UTF-8
+// encoder and decoder. Both reproduce what the interpreter's charsets do with input
+// they cannot represent — an unpaired surrogate encodes as '?', a malformed byte
+// sequence decodes to U+FFFD — because callers can see the difference.
+
+val _base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+val _hexLower = "0123456789abcdef"
+val _hexUpper = "0123456789ABCDEF"
+
+// The interpreter reports a bad argument with the value's type and its source-like
+// rendering, cut short at 48 characters. Every function here takes a single string.
+def _codecString(fn, v) {
+  if (isString(v)) { return v }
+  val shown = toString(v)
+  val brief = if (length(shown) <= 48) then shown else substring(shown, 0, 45) + "..."
+  error("${fn}: argument 1 must be a string, got ${typeOf(v)} ${brief}")
+}
+
+// ------------------------------------------------------------------------- UTF-8
+
+def _isSurrogate(c) = c >= 0xd800 && c <= 0xdfff
+
+def _isLowSurrogate(c) = c >= 0xdc00 && c <= 0xdfff
+
+// The UTF-8 bytes of a string, as integers 0..255.
+def _utf8Encode(s) {
+  val bytes = []
+  val n = length(s)
+  var i = 0
+  while (i < n) {
+    val c = ord(charAt(s, i))
+    if (c < 0x80) {
+      push(bytes, c)
+      i += 1
+    } elsif (c < 0x800) {
+      push(bytes, bitOr(0xc0, shiftRightU(c, 6)))
+      push(bytes, bitOr(0x80, bitAnd(c, 0x3f)))
+      i += 1
+    } elsif (!_isSurrogate(c)) {
+      push(bytes, bitOr(0xe0, shiftRightU(c, 12)))
+      push(bytes, bitOr(0x80, bitAnd(shiftRightU(c, 6), 0x3f)))
+      push(bytes, bitOr(0x80, bitAnd(c, 0x3f)))
+      i += 1
+    } elsif (c < 0xdc00 && i + 1 < n && _isLowSurrogate(ord(charAt(s, i + 1)))) {
+      val cp = 0x10000 + shiftLeft(c - 0xd800, 10) + (ord(charAt(s, i + 1)) - 0xdc00)
+      push(bytes, bitOr(0xf0, shiftRightU(cp, 18)))
+      push(bytes, bitOr(0x80, bitAnd(shiftRightU(cp, 12), 0x3f)))
+      push(bytes, bitOr(0x80, bitAnd(shiftRightU(cp, 6), 0x3f)))
+      push(bytes, bitOr(0x80, bitAnd(cp, 0x3f)))
+      i += 2
+    } else {
+      // A surrogate with no partner stands for no character at all, and the charset
+      // encoder puts its replacement byte in its place.
+      push(bytes, 0x3f)
+      i += 1
+    }
+  }
+  bytes
+}
+
+// Bytes in the sequence a lead byte starts, or -1 when the byte cannot lead one.
+def _utf8SeqLength(b) =
+  if (b < 0x80) then 1
+  elsif (b < 0xc0) then -1
+  elsif (b < 0xe0) then 2
+  elsif (b < 0xf0) then 3
+  elsif (b < 0xf8) then 4
+  else -1
+
+// The lead byte contributes 7 - len significant bits, each further byte another 6.
+def _utf8CodePoint(bytes, i, len) {
+  var cp = bitAnd(bytes[i], shiftRightU(0xff, len + 1))
+  var k = 1
+  while (k < len) {
+    cp = bitOr(shiftLeft(cp, 6), bitAnd(bytes[i + k], 0x3f))
+    k += 1
+  }
+  cp
+}
+
+// 0 when a well-formed sequence starts at i, otherwise how many bytes the decoder
+// consumes in reporting the error — which is what decides where it picks up again.
+// A sequence may run past the end of the input; then only the bytes actually there
+// are examined, and a byte that cannot continue the sequence still stops it, so the
+// tail after it is decoded rather than swallowed.
+def _utf8Malformed(bytes, i, len, n) {
+  val avail = if (i + len > n) then n - i else len
+  var k = 1
+  while (k < avail) {
+    if (bitAnd(bytes[i + k], 0xc0) != 0x80) { return k }
+    k += 1
+  }
+  if (avail < len) { return avail }
+  val cp = _utf8CodePoint(bytes, i, len)
+  // Anything that had a shorter encoding available, and anything outside the range of
+  // real code points, is rejected rather than accepted in its longer spelling.
+  if (len == 2 && cp < 0x80) then 1
+  elsif (len == 3 && cp < 0x800) then 1
+  elsif (len == 3 && _isSurrogate(cp)) then 3
+  elsif (len == 4 && (cp < 0x10000 || cp > 0x10ffff)) then 1
+  else 0
+}
+
+// urlDecode is the one caller that rejects malformed input instead of papering over
+// it, and it is also the one that names the failure, so its message lives here.
+def _utf8Bad(out, strict) {
+  if (strict) { _urlBadEscape() }
+  push(out, chr(0xfffd))
+}
+
+// Decodes UTF-8 bytes back into a string.
+def _utf8Decode(bytes, strict = false) {
+  val out = []
+  val n = length(bytes)
+  var i = 0
+  while (i < n) {
+    val len = _utf8SeqLength(bytes[i])
+    if (len == 1) {
+      push(out, chr(bytes[i]))
+      i += 1
+    } elsif (len < 0) {
+      _utf8Bad(out, strict)
+      i += 1
+    } else {
+      val bad = _utf8Malformed(bytes, i, len, n)
+      if (bad == 0) {
+        push(out, chr(_utf8CodePoint(bytes, i, len)))
+        i += len
+      } else {
+        _utf8Bad(out, strict)
+        i += bad
+      }
+    }
+  }
+  join(out)
+}
+
+// ------------------------------------------------------------------------ Base64
+
+def _base64Bad() = error("base64Decode: input is not valid Base64")
+
+// -1 for anything outside the alphabet, padding included.
+def _base64Value(c) = indexOf(_base64Chars, c)
+
+// The interpreter sizes its output buffer from the input length alone and hands back
+// the whole buffer, so padding beyond what the data needs surfaces as trailing zero
+// bytes. This computes that buffer's size, and rejects an input of nothing but padding.
+def _base64OutputLength(text, n) {
+  var valid = n
+  if (n >= 1 && charAt(text, n - 1) == "=") {
+    valid -= 1
+    if (n >= 2 && charAt(text, n - 2) == "=") { valid -= 1 }
+  }
+  if (n >= 1 && valid == 0) { _base64Bad() }
+  val rest = valid % 4
+  (valid + 3) / 4 * 3 - (if (rest == 0) then 0 else 4 - rest)
+}
+
+def base64Encode(s) {
+  val bytes = _utf8Encode(_codecString("base64Encode", s))
+  val n = length(bytes)
+  val out = []
+  var i = 0
+  while (i < n) {
+    val b1 = if (i + 1 < n) then bytes[i + 1] else 0
+    val b2 = if (i + 2 < n) then bytes[i + 2] else 0
+    val bits = bitOr(bitOr(shiftLeft(bytes[i], 16), shiftLeft(b1, 8)), b2)
+    push(out, charAt(_base64Chars, shiftRightU(bits, 18)))
+    push(out, charAt(_base64Chars, bitAnd(shiftRightU(bits, 12), 0x3f)))
+    push(out, if (i + 1 < n) then charAt(_base64Chars, bitAnd(shiftRightU(bits, 6), 0x3f)) else "=")
+    push(out, if (i + 2 < n) then charAt(_base64Chars, bitAnd(bits, 0x3f)) else "=")
+    i += 3
+  }
+  join(out)
+}
+
+def base64Decode(s) {
+  val text = _codecString("base64Decode", s)
+  val n = length(text)
+  val outLength = _base64OutputLength(text, n)
+  val bytes = []
+  var acc = 0      // the six-bit groups gathered so far
+  var held = 0     // how many of them, always fewer than four
+  var i = 0
+  // The scan stops at the first padding character; only more padding may follow it.
+  while (i < n && charAt(text, i) != "=") {
+    val v = _base64Value(charAt(text, i))
+    if (v < 0) { _base64Bad() }
+    acc = bitOr(shiftLeft(acc, 6), v)
+    held += 1
+    if (held == 4) {
+      push(bytes, bitAnd(shiftRightU(acc, 16), 0xff))
+      push(bytes, bitAnd(shiftRightU(acc, 8), 0xff))
+      push(bytes, bitAnd(acc, 0xff))
+      acc = 0
+      held = 0
+    }
+    i += 1
+  }
+  var j = i
+  while (j < n) {
+    if (charAt(text, j) != "=") { _base64Bad() }
+    j += 1
+  }
+  // Six leftover bits are half a byte and cannot have come from any input.
+  if (held == 1) { _base64Bad() }
+  if (held == 2) { push(bytes, bitAnd(shiftRightU(acc, 4), 0xff)) }
+  if (held == 3) {
+    push(bytes, bitAnd(shiftRightU(acc, 10), 0xff))
+    push(bytes, bitAnd(shiftRightU(acc, 2), 0xff))
+  }
+  while (length(bytes) < outLength) { push(bytes, 0) }
+  _utf8Decode(bytes)
+}
+
+// --------------------------------------------------------------------------- hex
+
+// A hex digit is not only an ASCII one. The runtime asks Character.digit, which knows
+// every decimal digit in its table and the fullwidth Latin letters as well, so "０Ａ"
+// is as good as "0A". These are the code points the digit zero sits on in each script
+// the table covers; nine more digits follow each of them in order.
+val _hexDigitZeros = [
+  0x0660, 0x06f0, 0x07c0, 0x0966, 0x09e6, 0x0a66, 0x0ae6, 0x0b66, 0x0be6, 0x0c66,
+  0x0ce6, 0x0d66, 0x0e50, 0x0ed0, 0x0f20, 0x1040, 0x1090, 0x17e0, 0x1810, 0x1946,
+  0x19d0, 0x1a80, 0x1a90, 0x1b50, 0x1bb0, 0x1c40, 0x1c50, 0xa620, 0xa8d0, 0xa900,
+  0xa9d0, 0xaa50, 0xabf0, 0xff10
+]
+
+// The value of a non-ASCII digit, or -1. Only radix 16 matters here, so of the
+// fullwidth letters only A-F and a-f stay in range.
+def _hexWide(cp) {
+  if (cp >= 0xff21 && cp <= 0xff26) { return cp - 0xff21 + 10 }
+  if (cp >= 0xff41 && cp <= 0xff46) { return cp - 0xff41 + 10 }
+  for (zero in _hexDigitZeros) {
+    if (cp >= zero && cp <= zero + 9) { return cp - zero }
+  }
+  -1
+}
+
+// -1 for anything that is not a hex digit.
+def _hexValue(c) {
+  val i = indexOf(_hexLower, c)
+  if (i >= 0) { return i }
+  val j = indexOf(_hexUpper, c)
+  if (j >= 0) { return j }
+  val cp = ord(c)
+  if (cp < 0x0660) then -1 else _hexWide(cp)
+}
+
+def hexEncode(s) {
+  val out = []
+  for (b in _utf8Encode(_codecString("hexEncode", s))) {
+    push(out, charAt(_hexLower, shiftRightU(b, 4)))
+    push(out, charAt(_hexLower, bitAnd(b, 0x0f)))
+  }
+  join(out)
+}
+
+def hexDecode(s) {
+  val text = _codecString("hexDecode", s)
+  val n = length(text)
+  if (n % 2 != 0) { error("hex string must have an even number of characters") }
+  val bytes = []
+  var i = 0
+  while (i < n) {
+    val hi = _hexValue(charAt(text, i))
+    val lo = _hexValue(charAt(text, i + 1))
+    if (hi < 0 || lo < 0) { error("invalid hex character in '${text}'") }
+    push(bytes, bitOr(shiftLeft(hi, 4), lo))
+    i += 2
+  }
+  _utf8Decode(bytes)
+}
+
+// --------------------------------------------------------------------------- URL
+
+def _urlBadEscape() =
+  error("urlDecode: URLDecoder: Illegal hex characters in escape (%) pattern")
+
+// The characters urlEncode passes through. The space is here too, but comes out as '+'.
+def _urlSafe(c) =
+  (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") ||
+  indexOf(" .-*_", c) >= 0
+
+def _urlPercent(out, run) {
+  for (b in _utf8Encode(run)) {
+    push(out, "%" + charAt(_hexUpper, shiftRightU(b, 4)) + charAt(_hexUpper, bitAnd(b, 0x0f)))
+  }
+}
+
+def urlEncode(s) {
+  val text = _codecString("urlEncode", s)
+  val n = length(text)
+  val out = []
+  // Characters that need encoding are gathered into runs, so that a character built
+  // from a surrogate pair is turned into bytes as one unit rather than two halves.
+  var start = -1
+  var i = 0
+  while (i < n) {
+    val c = charAt(text, i)
+    if (_urlSafe(c)) {
+      if (start >= 0) {
+        _urlPercent(out, substring(text, start, i))
+        start = -1
+      }
+      push(out, if (c == " ") then "+" else c)
+    } elsif (start < 0) {
+      start = i
+    }
+    i += 1
+  }
+  if (start >= 0) { _urlPercent(out, substring(text, start, n)) }
+  join(out)
+}
+
+def urlDecode(s) {
+  val text = _codecString("urlDecode", s)
+  val n = length(text)
+  val out = []
+  var i = 0
+  while (i < n) {
+    val c = charAt(text, i)
+    select (c) {
+      case "+": {
+        push(out, " ")
+        i += 1
+      }
+      case "%": {
+        if (i + 3 > n) { _urlBadEscape() }
+        // Neighbouring escapes decode together: one character can span several of them,
+        // and each run has to stand on its own as a complete byte sequence.
+        val bytes = []
+        while (i + 3 <= n && charAt(text, i) == "%") {
+          val hi = _hexValue(charAt(text, i + 1))
+          val lo = _hexValue(charAt(text, i + 2))
+          if (hi < 0 || lo < 0) { _urlBadEscape() }
+          push(bytes, bitOr(shiftLeft(hi, 4), lo))
+          i += 3
+        }
+        push(out, _utf8Decode(bytes, true))
+      }
+      default: {
+        push(out, c)
+        i += 1
+      }
+    }
+  }
+  join(out)
+}

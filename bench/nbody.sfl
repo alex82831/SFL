@@ -1,0 +1,12 @@
+// Floating point arithmetic and array indexing.
+var x = 0.0
+var y = 1.0
+var i = 0
+while (i < 300000) {
+  val dx = y * 0.001
+  val dy = 0.0 - x * 0.001
+  x = x + dx
+  y = y + dy
+  i = i + 1
+}
+print(round(x * 1000.0) + " " + round(y * 1000.0))

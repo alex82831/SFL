@@ -1,0 +1,32 @@
+// Closures capture their frame, so two calls to a factory get independent state, and
+// a loop that builds functions gives each iteration its own binding.
+def counter(start) {
+  var n = start
+  { (step) -> n = n + step; n }
+}
+val a = counter(10)
+val b = counter(100)
+a(1)
+println(a(1), b(1))
+
+def adders() {
+  val out = []
+  for (i in range(3)) { push(out, (x) -> x + i) }
+  out
+}
+val fs = adders()
+println(fs[0](10), fs[1](10), fs[2](10))
+
+def outer(x) {
+  def middle(y) {
+    def inner(z) = x + y + z
+    inner
+  }
+  middle
+}
+println(outer(1)(2)(3))
+
+var seen = []
+val each = (f) -> { for (v in [1, 2, 3]) { f(v) } }
+each((v) -> push(seen, v * v))
+println(seen)

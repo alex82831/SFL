@@ -1,0 +1,3 @@
+// EXPECT: is not available in compiled programs
+val thunk = parse("println(1)")
+thunk()

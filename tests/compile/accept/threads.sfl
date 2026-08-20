@@ -1,0 +1,60 @@
+// Real OS threads, channels and locks, with the collector stopping the world when
+// it needs to look at another thread's stack.
+val t = spawn((n) -> n * 2, 21)
+println(await(t))
+
+val workers = []
+for (i in range(4)) { push(workers, spawn((k) -> { var s = 0; for (j in range(1000)) { s += j * k }; s }, i)) }
+println(awaitAll(workers))
+
+val ch = channel(2)
+val producer = spawn(() -> { for (i in range(5)) { send(ch, i * i) }; closeChannel(ch) })
+var got = []
+var open = true
+while (open) {
+  val v = receive(ch)
+  if (isNull(v)) then open = false else push(got, v)
+}
+await(producer)
+println(got)
+
+val m = mutex()
+var shared = 0
+val bumpers = []
+for (i in range(4)) {
+  push(bumpers, spawn(() -> { for (j in range(500)) { withLock(m, () -> { shared += 1 }) } }))
+}
+awaitAll(bumpers)
+println(shared)
+
+val counter = atomic(0)
+val adders = []
+for (i in range(4)) { push(adders, spawn(() -> { for (j in range(250)) { atomicAdd(counter, 1) } })) }
+awaitAll(adders)
+println(atomicGet(counter))
+
+println(sum(parallelMap(range(1, 11), (n) -> n * n)))
+
+val sem = semaphore(2)
+val gate = latch(3)
+val order = channel()
+for (i in range(3)) {
+  spawnDaemon((k) -> {
+    acquire(sem)
+    send(order, k)
+    release(sem)
+    countDown(gate)
+  }, i)
+}
+awaitLatch(gate)
+println(latchCount(gate), channelSize(order), sort(channelDrain(order)))
+
+val failing = spawn(() -> error("expected"))
+println(attempt(() -> await(failing)).ok, threadFailed(failing))
+
+val empty = channel()
+println(tryReceive(empty))
+closeChannel(empty)
+println(channelClosed(empty), receive(empty))
+
+println(cpuCount() > 0, isString(currentThreadName()))

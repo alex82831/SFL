@@ -1,0 +1,14 @@
+// Tail calls run in constant stack, so deep recursion is a loop.
+def countdown(n, acc) = if (n == 0) then acc else countdown(n - 1, acc + n)
+println(countdown(200000, 0))
+
+def isEven(n) = if (n == 0) then true else isOdd(n - 1)
+def isOdd(n) = if (n == 0) then false else isEven(n - 1)
+println(isEven(100000), isOdd(100001))
+
+def build(n, acc) {
+  if (n == 0) then return acc
+  push(acc, n)
+  build(n - 1, acc)
+}
+println(size(build(50000, [])))

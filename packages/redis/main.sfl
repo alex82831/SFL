@@ -1,0 +1,141 @@
+// redis — a Redis client speaking RESP2 over TCP.
+//
+//   import "redis"
+//
+//   val r = redisConnect("127.0.0.1", 6379)
+//   r.set("greeting", "hello")
+//   r.get("greeting")                    // "hello"
+//   r.cmd("INCRBY", "counter", 5)        // any command, argument per argument
+//   r.close()
+//
+// Replies map naturally: simple strings and bulk strings become strings,
+// integers ints, arrays arrays, and a nil bulk/array becomes null. A server
+// error ("-ERR ...") raises. Every command goes through one mutex, so a
+// client can be shared between threads (but see subscribe, which takes the
+// connection over).
+
+import "resp"
+
+// Opens a connection: redisConnect(host?, port?, {timeoutMs?, password?, user?, db?}).
+def redisConnect(host = "127.0.0.1", port = 6379, opts = {}) {
+  val timeoutMs = if (contains(opts, "timeoutMs")) then opts.timeoutMs else 10000
+  val sock = connect(host, port, timeoutMs)
+  val state = {sock: sock, timeoutMs: timeoutMs, lock: mutex()}
+  var closed = false
+
+  def raw(parts) {
+    if (closed) then error("redis: the client is closed")
+    withLock(state.lock, () -> {
+      respWrite(state, parts)
+      respRead(state)
+    })
+  }
+  def cmd(...parts) = raw(parts)
+
+  if (contains(opts, "password")) {
+    if (contains(opts, "user")) then raw(["AUTH", opts.user, opts.password])
+    else raw(["AUTH", opts.password])
+  }
+  if (contains(opts, "db")) then raw(["SELECT", opts.db])
+
+  {
+    cmd: cmd,
+    // strings
+    get: (k) -> raw(["GET", k]),
+    set: (k, v) -> raw(["SET", k, v]),
+    setEx: (k, v, seconds) -> raw(["SET", k, v, "EX", seconds]),
+    del: (...ks) -> raw(concat(["DEL"], ks)),
+    exists: (k) -> raw(["EXISTS", k]) == 1,
+    incr: (k) -> raw(["INCR", k]),
+    incrBy: (k, n) -> raw(["INCRBY", k, n]),
+    decr: (k) -> raw(["DECR", k]),
+    expire: (k, seconds) -> raw(["EXPIRE", k, seconds]) == 1,
+    ttl: (k) -> raw(["TTL", k]),
+    keys: (pattern = "*") -> raw(["KEYS", pattern]),
+    // hashes
+    hSet: (k, field, v) -> raw(["HSET", k, field, v]),
+    hGet: (k, field) -> raw(["HGET", k, field]),
+    hDel: (k, ...fields) -> raw(concat(["HDEL", k], fields)),
+    hGetAll: (k) -> {
+      val flat = raw(["HGETALL", k])
+      val out = {}
+      var i = 0
+      while (i + 1 < length(flat)) {
+        out[flat[i]] = flat[i + 1]
+        i += 2
+      }
+      out
+    },
+    // lists
+    lPush: (k, ...vs) -> raw(concat(["LPUSH", k], vs)),
+    rPush: (k, ...vs) -> raw(concat(["RPUSH", k], vs)),
+    lPop: (k) -> raw(["LPOP", k]),
+    rPop: (k) -> raw(["RPOP", k]),
+    lRange: (k, start, stop) -> raw(["LRANGE", k, start, stop]),
+    lLen: (k) -> raw(["LLEN", k]),
+    // sets
+    sAdd: (k, ...vs) -> raw(concat(["SADD", k], vs)),
+    sRem: (k, ...vs) -> raw(concat(["SREM", k], vs)),
+    sMembers: (k) -> raw(["SMEMBERS", k]),
+    sIsMember: (k, v) -> raw(["SISMEMBER", k, v]) == 1,
+    // sorted sets
+    zAdd: (k, score, v) -> raw(["ZADD", k, score, v]),
+    zRange: (k, start, stop, withScores = false) -> {
+      if (withScores) then raw(["ZRANGE", k, start, stop, "WITHSCORES"])
+      else raw(["ZRANGE", k, start, stop])
+    },
+    // server
+    ping: () -> raw(["PING"]),
+    flushDb: () -> raw(["FLUSHDB"]),
+    dbSize: () -> raw(["DBSIZE"]),
+    publish: (channel, message) -> raw(["PUBLISH", channel, message]),
+
+    // Sends several commands in one round trip; returns their replies in order.
+    // A server error among them comes back as {error: message} rather than
+    // raising, so the other replies survive.
+    pipeline: (commands) -> {
+      if (closed) then error("redis: the client is closed")
+      withLock(state.lock, () -> {
+        for (parts in commands) { respWrite(state, parts) }
+        val out = []
+        for (parts in commands) {
+          val r = attempt(() -> respRead(state))
+          push(out, if (r?.error != null) then {error: r.error.message} else r.value)
+        }
+        out
+      })
+    },
+
+    // Subscribes and hands each message to `handler(channel, message)`. The
+    // connection belongs to the subscription until `handler` returns false.
+    subscribe: (channels, handler) -> {
+      if (closed) then error("redis: the client is closed")
+      withLock(state.lock, () -> {
+        respWrite(state, concat(["SUBSCRIBE"], channels))
+        var going = true
+        while (going) {
+          val m = respRead(state)
+          if (isArray(m) && length(m) == 3 && m[0] == "message") {
+            if (handler(m[1], m[2]) == false) then going = false
+          }
+        }
+        respWrite(state, ["UNSUBSCRIBE"])
+        // Drain until the unsubscribe confirmations are past.
+        var drain = true
+        while (drain) {
+          val m = respRead(state)
+          if (isArray(m) && length(m) >= 1 && m[0] == "unsubscribe") then drain = false
+        }
+        null
+      })
+    },
+
+    close: () -> {
+      if (!closed) {
+        closed = true
+        closeSocket(state.sock)
+      }
+      null
+    }
+  }
+}

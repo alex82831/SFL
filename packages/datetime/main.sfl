@@ -1,0 +1,227 @@
+// datetime — calendar arithmetic, ISO 8601 parsing, and fixed-offset handling.
+//
+//   import "datetime"
+//
+//   val t = dtParse("2026-08-19T15:30:00+08:00")   // -> epoch milliseconds
+//   dtIso(t)                                        // "2026-08-19T07:30:00Z"
+//   dtIso(dtAddMonths(t, 6), 480)                   // six months on, in UTC+8
+//   dtDiffDays(dtParse("2026-12-25"), t)            // days until Christmas
+//
+// Everything is proleptic-Gregorian integer math over epoch milliseconds; time
+// zones are fixed offsets in minutes (no DST database — the builtins
+// formatTime/timeParts cover the machine's local zone). The core builtins
+// already format; this package parses, adds, subtracts, clamps and compares.
+
+val _MS_PER_DAY = 86400000
+
+// ---------------------------------------------------------------- civil math
+
+// Days since 1970-01-01 for a civil date (Howard Hinnant's algorithm; exact
+// over the whole proleptic Gregorian calendar).
+def dtDaysFromCivil(year, month, day) {
+  val y = if (month <= 2) then year - 1 else year
+  val era = (if (y >= 0) then y else y - 399) / 400
+  val yoe = y - era * 400
+  val mp = (month + 9) % 12
+  val doy = (153 * mp + 2) / 5 + day - 1
+  val doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+  era * 146097 + doe - 719468
+}
+
+// The civil date for a days-since-epoch count: {year, month, day}.
+def dtCivilFromDays(days) {
+  val z = days + 719468
+  val era = (if (z >= 0) then z else z - 146096) / 146097
+  val doe = z - era * 146097
+  val yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+  val y = yoe + era * 400
+  val doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+  val mp = (5 * doy + 2) / 153
+  val day = doy - (153 * mp + 2) / 5 + 1
+  val month = if (mp < 10) then mp + 3 else mp - 9
+  {year: if (month <= 2) then y + 1 else y, month: month, day: day}
+}
+
+def dtIsLeapYear(year) = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+
+def dtDaysInMonth(year, month) {
+  if (month == 2) then (if (dtIsLeapYear(year)) then 29 else 28)
+  elsif (contains([4, 6, 9, 11], month)) then 30
+  else 31
+}
+
+// ---------------------------------------------------------------- make/split
+
+// Epoch milliseconds for civil fields, read in the given fixed offset
+// (minutes east of UTC; default 0 = UTC).
+def dtMake(year, month, day, hour = 0, minute = 0, second = 0, ms = 0, offsetMinutes = 0) {
+  if (month < 1 || month > 12) then error("datetime: month must be 1..12")
+  if (day < 1 || day > dtDaysInMonth(year, month)) {
+    error("datetime: day " + toString(day) + " is out of range for " +
+      toString(year) + "-" + toString(month))
+  }
+  dtDaysFromCivil(year, month, day) * _MS_PER_DAY +
+    hour * 3600000 + minute * 60000 + second * 1000 + ms - offsetMinutes * 60000
+}
+
+// The civil fields of an instant in a fixed offset: {year, month, day, hour,
+// minute, second, ms, weekday (1 = Monday .. 7 = Sunday), yearday, offsetMinutes}.
+def dtParts(millis, offsetMinutes = 0) {
+  val local = millis + offsetMinutes * 60000
+  val days = _floorDiv(local, _MS_PER_DAY)
+  val inDay = local - days * _MS_PER_DAY
+  val d = dtCivilFromDays(days)
+  val weekday = ((days % 7) + 7 + 3) % 7 + 1 // 1970-01-01 was a Thursday
+  {
+    year: d.year, month: d.month, day: d.day,
+    hour: inDay / 3600000,
+    minute: inDay % 3600000 / 60000,
+    second: inDay % 60000 / 1000,
+    ms: inDay % 1000,
+    weekday: weekday,
+    yearday: days - dtDaysFromCivil(d.year, 1, 1) + 1,
+    offsetMinutes: offsetMinutes
+  }
+}
+
+def _floorDiv(a, b) {
+  val q = a / b
+  if (a % b != 0 && ((a < 0) != (b < 0))) then q - 1 else q
+}
+
+// ---------------------------------------------------------------- arithmetic
+
+def dtAddDays(millis, days) = millis + days * _MS_PER_DAY
+def dtAddHours(millis, hours) = millis + hours * 3600000
+def dtAddMinutes(millis, minutes) = millis + minutes * 60000
+def dtAddSeconds(millis, seconds) = millis + seconds * 1000
+
+// Adds calendar months, clamping the day into the target month: Jan 31 + 1
+// month is Feb 28 (or 29), the way people and databases both expect.
+def dtAddMonths(millis, months, offsetMinutes = 0) {
+  val p = dtParts(millis, offsetMinutes)
+  val total = (p.year * 12 + p.month - 1) + months
+  val year = _floorDiv(total, 12)
+  val month = total - year * 12 + 1
+  val day = min(p.day, dtDaysInMonth(year, month))
+  dtMake(year, month, day, p.hour, p.minute, p.second, p.ms, offsetMinutes)
+}
+
+def dtAddYears(millis, years, offsetMinutes = 0) = dtAddMonths(millis, years * 12, offsetMinutes)
+
+// Whole days between two instants (a - b), truncated toward zero.
+def dtDiffDays(a, b) = (a - b) / _MS_PER_DAY
+def dtDiffHours(a, b) = (a - b) / 3600000
+def dtDiffMinutes(a, b) = (a - b) / 60000
+def dtDiffSeconds(a, b) = (a - b) / 1000
+
+// Midnight (in the given offset) of the instant's day.
+def dtStartOfDay(millis, offsetMinutes = 0) {
+  val local = millis + offsetMinutes * 60000
+  _floorDiv(local, _MS_PER_DAY) * _MS_PER_DAY - offsetMinutes * 60000
+}
+
+def dtStartOfMonth(millis, offsetMinutes = 0) {
+  val p = dtParts(millis, offsetMinutes)
+  dtMake(p.year, p.month, 1, 0, 0, 0, 0, offsetMinutes)
+}
+
+def dtStartOfYear(millis, offsetMinutes = 0) {
+  val p = dtParts(millis, offsetMinutes)
+  dtMake(p.year, 1, 1, 0, 0, 0, 0, offsetMinutes)
+}
+
+// ---------------------------------------------------------------- ISO 8601
+
+def _pad2(n) = if (n < 10) then "0" + toString(n) else toString(n)
+def _pad3(n) {
+  if (n < 10) then "00" + toString(n)
+  elsif (n < 100) then "0" + toString(n)
+  else toString(n)
+}
+
+// ISO 8601 text for an instant: "2026-08-19T07:30:00Z", or with the offset
+// spelled out when one is given ("2026-08-19T15:30:00+08:00"). Milliseconds
+// appear only when the instant has them.
+def dtIso(millis, offsetMinutes = 0) {
+  val p = dtParts(millis, offsetMinutes)
+  var s = toString(p.year) + "-" + _pad2(p.month) + "-" + _pad2(p.day) +
+    "T" + _pad2(p.hour) + ":" + _pad2(p.minute) + ":" + _pad2(p.second)
+  if (p.ms != 0) then s += "." + _pad3(p.ms)
+  if (offsetMinutes == 0) {
+    s += "Z"
+  } else {
+    val sign = if (offsetMinutes < 0) then "-" else "+"
+    val a = abs(offsetMinutes)
+    s += sign + _pad2(a / 60) + ":" + _pad2(a % 60)
+  }
+  s
+}
+
+// "2026-08-19" of an instant in the given offset.
+def dtIsoDate(millis, offsetMinutes = 0) {
+  val p = dtParts(millis, offsetMinutes)
+  toString(p.year) + "-" + _pad2(p.month) + "-" + _pad2(p.day)
+}
+
+// Parses ISO 8601 into epoch milliseconds. Accepted: "2026-08-19",
+// "2026-08-19T15:30", "...T15:30:00", "...T15:30:00.250", each optionally
+// followed by "Z" or "+hh:mm"/"-hh:mm"/"+hhmm". Text without an offset is
+// read as UTC. Raises on anything else.
+def dtParse(text) {
+  if (!isString(text)) then error("datetime: dtParse expects a string")
+  def bad() = error("datetime: cannot parse '" + text + "' as ISO 8601")
+  def num(s) {
+    if (s == "" || !matches(s, "^[0-9]+$")) then bad()
+    parseInt(s)
+  }
+
+  var s = text
+  var offsetMinutes = 0
+  var hasOffset = false
+  if (endsWith(s, "Z")) {
+    s = substring(s, 0, length(s) - 1)
+    hasOffset = true
+  } else {
+    val m = regexFind(s, "([+-])([0-9][0-9]):?([0-9][0-9])$")
+    if (m != null && contains(s, "T")) {
+      val sign = if (m[1] == "-") then -1 else 1
+      offsetMinutes = sign * (num(m[2]) * 60 + num(m[3]))
+      s = substring(s, 0, length(s) - length(m[0]))
+      hasOffset = true
+    }
+  }
+
+  var datePart = s
+  var timePart = ""
+  val t = indexOf(s, "T")
+  if (t >= 0) {
+    datePart = substring(s, 0, t)
+    timePart = substring(s, t + 1, length(s))
+  }
+
+  val dm = regexFind(datePart, "^([0-9]{4})-([0-9][0-9])-([0-9][0-9])$")
+  if (dm == null) then bad()
+  val year = num(dm[1])
+  val month = num(dm[2])
+  val day = num(dm[3])
+  if (month < 1 || month > 12 || day < 1 || day > dtDaysInMonth(year, month)) then bad()
+
+  var hour = 0
+  var minute = 0
+  var second = 0
+  var ms = 0
+  if (timePart != "") {
+    val tm = regexFind(timePart, "^([0-9][0-9]):([0-9][0-9])(:([0-9][0-9])(\\.([0-9]{1,3}))?)?$")
+    if (tm == null) then bad()
+    hour = num(tm[1])
+    minute = num(tm[2])
+    if (tm[4] != null) then second = num(tm[4])
+    if (tm[6] != null) {
+      val frac = tm[6]
+      ms = num(frac + repeat("0", 3 - length(frac)))
+    }
+    if (hour > 23 || minute > 59 || second > 59) then bad()
+  }
+  dtMake(year, month, day, hour, minute, second, ms, offsetMinutes)
+}

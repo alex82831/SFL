@@ -1,0 +1,71 @@
+// Unpaired surrogates part ways at every byte boundary: the interpreter's charset
+// encoder spells one '?' wherever bytes leave the process (console, files, pipes,
+// argv, the environment), while inside the program the code unit itself survives —
+// a literal, a key, a message all keep it, and WTF-8 round-trips it through the
+// runtime's C strings. Both engines must agree on both halves, byte for byte.
+val hi = chr(0xd800)   // high surrogate, unpaired
+val lo = chr(0xdfff)   // low surrogate, unpaired
+val pair = chr(0xd83d) + chr(0xde03)  // a proper pair: one emoji, two units
+
+// Console bytes: '?' for each unpaired unit, the pair intact.
+println("x" + hi + "y", "a" + lo + "b", pair)
+flush() // the harness merges the streams, so order them deterministically
+eprintln("e" + hi + "f")
+printf("p%sq\n", hi)
+print(hi)
+println("")
+
+// Literals hold the code unit itself, exactly as the interpreter's String does.
+val lit = "L\ud800M"
+println(length(lit), lit == "L" + hi + "M", lit == "L?M", lit[1] == hi)
+println(length("😃"), "😃" == pair)
+
+// Value-level identity: a surrogate is not '?', neither as text nor as a key.
+val ks = {}
+ks[hi] = 1
+ks["?"] = 2
+println(length(keys(ks)), ks[hi], ks["?"])
+println(jsonParse(jsonStringify("j" + hi + "k")) == "j" + hi + "k")
+
+// String-level path folding never encodes.
+val p = "a" + hi + "/b" + hi
+println(baseName(p) == "b" + hi, dirName(p) == "a" + hi, joinPath("x" + hi, "y") == "x" + hi + "/y")
+
+// Error messages keep what the program wrote; only their printing encodes.
+val miss = attempt(() -> readFile("nope" + hi))
+println(miss.error.message == "file not found: nope" + hi)
+val msg = attempt(() -> error("m" + hi + "n"))
+println(msg.error.message == "m" + hi + "n", length(msg.error.message))
+val t = spawn(() -> error("T" + hi + "U"))
+val joined = attempt(() -> await(t))
+println(contains(joined.error.message, "T" + hi + "U"))
+
+// File content and file names take the encoder's spelling on the way down, and
+// the '?' spelling is what comes back up.
+val base = tempFile(".surr")
+writeFile(base, "A" + hi + "B")
+appendFile(base, lo)
+println(readFile(base) == "A?B?", removeFile(base))
+val named = tempFile(hi + ".sfx")
+println(endsWith(named, hi + ".sfx"), exists(named), removeFile(named))
+
+// The environment and a child process see the encoded bytes.
+setEnv("SFL_SURR_T", "v" + hi + "w")
+println(getEnv("SFL_SURR_T") == "v?w")
+val r = execute("printf 'e" + hi + "e'")
+println(r.code, r.out == "e?e")
+val c = processStart(["/bin/echo", "H" + hi + "I"])
+println(processReadLine(c) == "H?I")
+processWait(c)
+val cat = processStart(["/bin/cat"])
+processWriteLine(cat, "P" + hi + "Q")
+processCloseInput(cat)
+println(processReadLine(cat) == "P?Q")
+processWait(cat)
+
+// A line handle writes through the same encoder.
+val f = tempFile(".line")
+val out = openFile(f, "w")
+fileWriteLine(out, "F" + lo + "G")
+fileClose(out)
+println(readFile(f) == "F?G\n", removeFile(f))

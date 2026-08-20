@@ -1,0 +1,43 @@
+# Scala / sbt
+target/
+.bsp/
+.bloop/
+.metals/
+
+# IDEs and editors
+.idea/
+*.iml
+.vscode/
+*.swp
+*~
+
+# macOS
+.DS_Store
+._*
+
+# VSCode extension (editors/vscode)
+node_modules/
+editors/vscode/out/
+*.vsix
+
+# IntelliJ plugin (editors/intellij) — Gradle
+.gradle/
+build/
+
+# Native build artifacts
+*.o
+*.a
+*.dSYM/
+
+# Prebuilt package archives from `sfl pkg build --bin`
+packages/*/bin/
+tests/**/bin/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Local-only: broken 9-byte stub (sbt is installed system-wide)
+/sbt-launch.jar
+
+# Local scratch script
+/test.sfl

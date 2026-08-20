@@ -1,0 +1,78 @@
+// log — leveled, timestamped logging.
+//
+//   import "log"
+//
+//   logInfo("starting", {port: 8080})     // 2026-08-19 15:30:00 INFO starting {"port": 8080}
+//   logSetLevel("debug")                  // debug | info | warn | error | off
+//   logSetFile("app.log")                 // also append every line to a file
+//   logSetSink((line) -> ...)             // or take the lines somewhere else
+//
+// Lines go to stderr so program output stays clean. Extra arguments are
+// rendered like println renders them and joined with spaces. The level, file
+// and sink are process-wide.
+
+val _levels = {debug: 10, info: 20, warn: 30, error: 40, off: 99}
+
+var _level = 20
+var _file = null
+var _sink = null
+val _lock = mutex()
+
+// Sets the least serious level that still logs. Returns the previous name.
+def logSetLevel(name) {
+  if (!contains(_levels, name)) {
+    error("log: unknown level '" + toString(name) + "' (debug, info, warn, error, off)")
+  }
+  val old = _levelName(_level)
+  _level = _levels[name]
+  old
+}
+
+def logLevel() = _levelName(_level)
+
+// Appends every line to `path` as well; null turns file logging off.
+def logSetFile(path) {
+  _file = path
+  null
+}
+
+// Routes lines to a function instead of stderr; null restores stderr.
+def logSetSink(fn) {
+  _sink = fn
+  null
+}
+
+def logDebug(...parts) = _log(10, "DEBUG", parts)
+def logInfo(...parts) = _log(20, "INFO", parts)
+def logWarn(...parts) = _log(30, "WARN", parts)
+def logError(...parts) = _log(40, "ERROR", parts)
+
+def _levelName(n) {
+  if (n <= 10) then "debug"
+  elsif (n <= 20) then "info"
+  elsif (n <= 30) then "warn"
+  elsif (n <= 40) then "error"
+  else "off"
+}
+
+def _log(level, label, parts) {
+  if (level < _level) then return null
+  var msg = ""
+  var first = true
+  for (p in parts) {
+    if (!first) then msg += " "
+    msg += if (isString(p)) then p else toString(p)
+    first = false
+  }
+  val line = formatTime(timeMillis(), "%Y-%m-%d %H:%M:%S") + " " + label + " " + msg
+  withLock(_lock, () -> {
+    if (_sink != null) {
+      _sink(line)
+    } else {
+      eprintln(line)
+    }
+    if (_file != null) then appendFile(_file, line + "\n")
+    null
+  })
+  null
+}

@@ -1,0 +1,161 @@
+// Syntax sugar: string interpolation, raw strings, ?. / ??, bare-param lambdas.
+// All of it desugars in the parser, so this suite runs identically compiled.
+
+import "lib/assert"
+
+// ---- string interpolation ---------------------------------------------------
+
+val who = "world"
+check("basic interpolation", "hello ${who}", "hello world")
+check("expression inside", "${1 + 2} items", "3 items")
+check("leading and trailing text", "a${1}b${2}c", "a1b2c")
+check("only interpolation", "${42}", "42")
+check("float renders as display", "${1.5}", "1.5")
+check("null renders", "${null}", "null")
+check("array renders", "${[1, "x"]}", "[1, \"x\"]")
+check("nested braces", "${ {"k": 5}.k }", "5")
+check("nested interpolated string", "${"in${9}ner"}", "in9ner")
+check("adjacent interpolations", "${1}${2}", "12")
+check("escape stops it", "\${who}", "$" + "{who}")
+check("lone dollar is literal", "cost $5 and $ signs", "cost $5 and $ signs")
+check("triple-quoted interpolates", """v = ${who}""", "v = world")
+check("interpolation is an expression", length("ab${who}"), 7)
+val calls = []
+def loud(x) { push(calls, x); x }
+check("segments evaluate in order", "${loud(1)}-${loud(2)}", "1-2")
+check("evaluation order held", calls, [1, 2])
+
+// Single quotes are the shell's: escapes yes, interpolation no.
+check("single quotes do not interpolate", '${who}', "$" + "{who}")
+
+// ---- raw strings ------------------------------------------------------------
+
+check("raw keeps backslashes", r"a\nb", "a" + "\\" + "nb")
+check("raw regex reads clean", matches("a7", r"[a-z]\d"), true)
+check("raw with quotes form", r'\d+', "\\d+")
+check("raw no interpolation", r"${who}", "$" + "{who}")
+check("raw triple multiline", size(lines(r"""x\n
+y""")), 2)
+
+// ---- ?. absence-safe hop ----------------------------------------------------
+
+val conf = {"server": {"host": "h", "port": 80}, "tags": [1, 2]}
+check("present chain", conf?.server?.host, "h")
+check("missing key gives null", conf?.server?.debug, null)
+check("null receiver gives null", conf?.nothing?.deep, null)
+check("mix with strict dot", conf?.server.port, 80)
+checkFails("strict dot after safe null still raises",
+  () -> conf?.nothing.deep, "cannot index into null")
+checkFails("non-object receiver stays strict", () -> (5)?.k, "cannot index into int")
+checkFails("array receiver stays strict", () -> conf?.tags?.first, "array index must be an integer")
+
+var evals = 0
+def subject() { evals += 1; null }
+subject()?.k?.j
+check("receiver evaluates once", evals, 1)
+
+// ?. with an immediate call: null out when the receiver, the key, or the value is null.
+val api = {"ping": () -> "pong", "gone": null}
+check("safe call on present fn", api?.ping(), "pong")
+check("safe call on missing key", api?.absent(), null)
+check("safe call on null value", api?.gone(), null)
+check("safe call on null receiver", null?.anything(1, 2), null)
+def mkCounter() { var n = 0; {"next": () -> { n += 1; n }} }
+val c = mkCounter()
+c?.next()
+check("safe call really calls", c?.next(), 2)
+
+// ---- ?? null coalescing -----------------------------------------------------
+
+check("null takes the default", null ?? "d", "d")
+check("value wins", 0 ?? "d", 0)
+check("false is not null", false ?? "d", false)
+check("empty string is not null", "" ?? "d", "")
+check("chains left to right", null ?? null ?? 3, 3)
+var sideEffects = 0
+def expensive() { sideEffects += 1; "spent" }
+check("rhs is lazy", "have" ?? expensive(), "have")
+check("lazy really", sideEffects, 0)
+check("rhs runs when needed", null ?? expensive(), "spent")
+check("with safe hop", conf?.server?.debug ?? "off", "off")
+// SFL's || yields a boolean, not an operand — so it can never feed ?? a null.
+check("|| yields booleans, not operands", (false || null) ?? "d", false)
+
+// ---- bare-parameter lambdas -------------------------------------------------
+
+check("bare lambda", map([1, 2, 3], x -> x * 2), [2, 4, 6])
+check("bare lambda closure", { val k = 10; map([1, 2], x -> x + k) }, [11, 12])
+check("braced bare lambda", filter([1, 2, 3, 4], { x -> x % 2 == 0 }), [2, 4])
+check("braced multi-statement", map([1, 2], { x ->
+  val d = x * 10
+  d + 1
+}), [11, 21])
+check("bare lambda in pipe", [3, 1, 2] |> sortBy(x -> -x), [3, 2, 1])
+check("nested bare lambdas", map([[1, 2], [3]], xs -> map(xs, x -> x + 1)), [[2, 3], [4]])
+val compose2 = f -> g -> x -> f(g(x))
+check("curried bare lambdas", compose2(x -> x + 1)(x -> x * 2)(5), 11)
+
+// ---- interactions -----------------------------------------------------------
+
+check("sugar in patterns", select ({"u": {"n": "a"}}) {
+  case {u}: u?.n ?? "anon"
+}, "a")
+check("interpolation of a safe chain", "${conf?.server?.debug ?? "无"}", "无")
+check("tuple in interpolation", "${(1, 2)}", "(1, 2)")
+def describeUser(u) = "${u?.name ?? "匿名"}(${u?.age ?? "?"})"
+check("real-world shape", describeUser({"name": "z"}), "z(?)")
+check("real-world null", describeUser(null), "匿名(?)")
+
+// ---- hardening: cases from the adversarial review ---------------------------
+
+// The escape table applies to triple-quoted strings too (only the r prefix
+// switches it off), so \$ can suppress interpolation in every cooked form.
+check("triple-quoted escapes", """a\tb""", "a" + "\t" + "b")
+check("triple-quoted escaped dollar", """\${who}""", "$" + "{who}")
+check("triple-quoted escaped quote", length("""say \"hi\""""), 8)
+
+check("interpolation four deep", "1${"2${"3${"4${9}d"}c"}b"}a", "12349dcba")
+check("object-literal lambda inside interpolation",
+  "v=${ {"f": x -> "in${x}"}.f(7) }", "v=in7")
+check("closing brace inside a nested string", "x${"}"}y", "x}y")
+check("comment inside an interpolation", "a${ /* ${ not a start } */ 41 + 1 }b", "a42b")
+check("select inside an interpolation",
+  "${select 1 { case 1: "one" default: "other" }}", "one")
+
+// A default parameter runs in the defining scope; the ?? / ?. hidden temp must
+// not claim a frame slot there (the compiler would then address it through the
+// callee's frame — it used to crash on exactly this).
+def sugarDefaults() {
+  def g(y = 1 ?? 2) = y
+  def h(z = null ?? 7) = z
+  def k(w = ({"a": 5})?.a) = w
+  g() + h() + k()
+}
+check("?? and ?. in a nested function's default", sugarDefaults(), 13)
+
+// Calling a non-function through ?. must not name the hidden temporary, and must
+// say the same thing under both engines.
+checkFails("safe call of a non-function stays anonymous",
+  () -> ({"k": 5})?.k(), "this expression is not a function")
+
+// The hop forgives absence, never failure: errors inside the callee propagate.
+checkFails("errors inside a safe-called function propagate",
+  () -> ({"b": () -> 1 / 0})?.b(), "division by zero")
+
+// When the hop yields null the call and its arguments are skipped entirely.
+var sugarArgHits = 0
+def sugarBump() { sugarArgHits += 1; 1 }
+val sugarEmpty = {}
+sugarEmpty?.gone(sugarBump())
+check("safe-call arguments are lazy", sugarArgHits, 0)
+
+// ?? shares the || tier and associates left: this is (false || null) ?? "x".
+check("?? binds like ||, left to right", false || null ?? "x", false)
+
+// Reserved words are field names after ?. exactly as after '.'.
+val sugarRes = {"if": 1, "default": 2}
+check("reserved word after safe hop", sugarRes?.if + sugarRes?.default, 3)
+check("missing reserved-word key", sugarRes?.while, null)
+
+
+report("sugar")

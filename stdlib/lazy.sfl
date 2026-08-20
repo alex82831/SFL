@@ -1,0 +1,78 @@
+// Part of the SFL standard library: lazy sequences.
+//
+// toArray realises an iterator; cycle, iterate, naturals and repeatedly build
+// unbounded ones. Every generator hands __iterFn a closure that yields [value]
+// per element, so an element is computed only when something pulls on it.
+
+// The interpreter reports a bad argument through one shared formatter, Err.show:
+// the value as repr, shortened to 48 characters. jsonStringify is that repr for a
+// string, and toString is for everything else — an array or object quotes the
+// strings inside it either way — so a wrong call reads the same whether the
+// program was interpreted or compiled.
+def _show(v) {
+  val s = if (isString(v)) then jsonStringify(v) else toString(v)
+  if (length(s) > 48) then substring(s, 0, 45) + "..." else s
+}
+
+// A native contributes no frame to a traceback, so the checks below raise their
+// error where they stand instead of routing through a shared helper: one frame
+// for the library function itself is unavoidable, a second for the helper is not.
+
+def toArray(v) {
+  // An array is handed straight back, not copied, exactly as the native does.
+  if (isArray(v)) return v
+  val it = iter(v)
+  val out = []
+  while (hasNext(it)) { push(out, iterNext(it)) }
+  out
+}
+
+def cycle(arr) {
+  if (!isArray(arr)) {
+    error("cycle: argument 1 must be an array, got ${typeOf(arr)} ${_show(arr)}")
+  }
+  if (size(arr) == 0) { error("cycle: array is empty") }
+  var i = 0
+  __iterFn({ () ->
+    // The array is read live rather than copied, so it may have shrunk since the
+    // last pull; wrapping on every element keeps the index inside it.
+    if (i >= size(arr)) { i = 0 }
+    val v = arr[i]
+    i += 1
+    [v]
+  })
+}
+
+def iterate(f, seed) {
+  if (!isFunction(f)) {
+    error("iterate: argument 1 must be a function, got ${typeOf(f)} ${_show(f)}")
+  }
+  var current = seed
+  var started = false
+  __iterFn({ () ->
+    // f runs one step behind the pulls: seed comes out untouched, and the nth
+    // element costs n - 1 calls, never one more.
+    if (started) { current = f(current) } else { started = true }
+    [current]
+  })
+}
+
+def naturals(start = 0) {
+  // A float counts as an integer when it lands exactly on one, as 3.0 does. `%` is
+  // NaN for either infinity and for NaN itself, so those fall through to the error.
+  var n = start
+  if (!isInt(n)) {
+    if (isFloat(n) && n % 1 == 0) {
+      n = toInt(n)
+    } else {
+      error("naturals: argument 1 must be an integer, got ${typeOf(start)} ${_show(start)}")
+    }
+  }
+  __iterFn({ () ->
+    val v = n
+    n += 1
+    [v]
+  })
+}
+
+def repeatedly(v) = __iterFn({ () -> [v] })

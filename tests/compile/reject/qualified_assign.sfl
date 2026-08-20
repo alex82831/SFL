@@ -1,0 +1,3 @@
+// EXPECT: cannot assign to 'g.dist'
+import "ns/geo" as g
+g.dist = 1

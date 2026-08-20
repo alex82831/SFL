@@ -1,0 +1,37 @@
+// Minimal test harness shared by the suites in tests/.
+
+var _passed = 0
+var _failed = 0
+var _failures = []
+
+def check(name, actual, expected) {
+  if (actual == expected) {
+    _passed += 1
+  } else {
+    _failed += 1
+    push(_failures, name + ": expected " + toString(expected) + ", got " + toString(actual))
+  }
+}
+
+def checkTrue(name, cond) = check(name, cond, true)
+
+// Runs body() and asserts that it fails with a message containing `fragment`.
+def checkFails(name, body, fragment) {
+  val msg = try(body, (e) -> e)
+  if (isString(msg) && contains(msg, fragment)) {
+    _passed += 1
+  } else {
+    _failed += 1
+    push(_failures, name + ": expected an error containing " + toString(fragment) + ", got " + toString(msg))
+  }
+}
+
+def report(suite) {
+  println(suite + ": " + toString(_passed) + " passed, " + toString(_failed) + " failed")
+  for (f in _failures) {
+    println("  FAIL  " + f)
+  }
+  if (_failed > 0) {
+    exit(1)
+  }
+}

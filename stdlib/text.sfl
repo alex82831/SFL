@@ -1,0 +1,149 @@
+// Part of the SFL standard library: the string builtins that are written in SFL
+// rather than in the runtime's C — capitalize, join, lines, padStart, padEnd and
+// repeat.
+//
+// Each one has to be indistinguishable from the interpreter's native version,
+// down to the text of the errors it raises, so the checks below reproduce the
+// runtime's own argument helpers rather than doing something simpler. Every
+// module in the archive shares one global namespace, hence the __text prefix on
+// everything that is not itself a builtin.
+
+// ---------------------------------------------------------------------------
+// Argument checking
+// ---------------------------------------------------------------------------
+
+def _quote(s) {
+  var out = "\""
+  for (c in s) {
+    val esc = select (c) {
+      case "\"": "\\\""
+      case "\\": "\\\\"
+      case "\n": "\\n"
+      case "\r": "\\r"
+      case "\t": "\\t"
+      case "\b": "\\b"
+      case "\f": "\\f"
+      default: if (ord(c) < 32) then format("\\u%04x", ord(c)) else c
+    }
+    out = out + esc
+  }
+  out + "\""
+}
+
+// A value as it appears inside an error message: strings quoted, anything long
+// clipped so the message stays readable.
+def _show(v) {
+  val s = if (isString(v)) _quote(v) else toString(v)
+  if (length(s) <= 48) then s else substring(s, 0, 45) + "..."
+}
+
+def _bad(fn, pos, want, v) =
+  error("${fn}: argument ${pos} must be ${want}, got ${typeOf(v)} ${_show(v)}")
+
+def _str(v, fn, pos) = if (isString(v)) then v else _bad(fn, pos, "a string", v)
+
+def _arr(v, fn, pos) = if (isArray(v)) then v else _bad(fn, pos, "an array", v)
+
+// Counts and widths accept a float with nothing after the point, as argInt does.
+// Infinity and NaN fail the test because `x % 1` is NaN for both.
+def _idx(v, fn, pos) {
+  val n = if (isInt(v)) v
+    elsif (isFloat(v) && v % 1 == 0) toInt(v)
+    else _bad(fn, pos, "an integer", v)
+  if (n > 2147483647 || n < -2147483648) {
+    error("${fn}: index ${n} is out of range")
+  }
+  n
+}
+
+// ---------------------------------------------------------------------------
+// The builtins themselves
+// ---------------------------------------------------------------------------
+
+// Unicode's *simple* upper-case mapping of one UTF-16 unit, which is what the
+// native version applies. toUpper() applies the full mapping instead, and the two
+// disagree for the 27 characters whose full mapping is more than one unit long but
+// whose simple mapping is still a real change: the Greek letters carrying an iota
+// subscript. For every other such character ("ß" -> "SS", the ligatures, "ŉ", …)
+// the simple mapping is the character itself, so falling back to it is correct.
+def _simpleUpper(c) {
+  val cp = ord(c)
+  if (cp >= 0x1f80 && cp <= 0x1f87) { return chr(cp + 8) }
+  if (cp >= 0x1f90 && cp <= 0x1f97) { return chr(cp + 8) }
+  if (cp >= 0x1fa0 && cp <= 0x1fa7) { return chr(cp + 8) }
+  if (cp == 0x1fb3 || cp == 0x1fc3 || cp == 0x1ff3) { return chr(cp + 9) }
+  c
+}
+
+def capitalize(s) {
+  val str = _str(s, "capitalize", 1)
+  if (length(str) == 0) { return str }
+  val head = charAt(str, 0)
+  val up = toUpper(head)
+  // Only the first UTF-16 unit is upper-cased, and only by the simple mapping. The
+  // rest of the string keeps its own case.
+  (if (length(up) == 1) then up else _simpleUpper(head)) + substring(str, 1)
+}
+
+def join(parts, sep = "") {
+  val arr = _arr(parts, "join", 1)
+  // Any value may be the separator, and elements are written the way `print`
+  // writes them: strings bare, everything else in its source form.
+  _join(arr, toString(sep), 0, length(arr))
+}
+
+// Joins arr[lo, hi) by halves. Appending to a single accumulator would copy the
+// whole result on every element, which is quadratic; this is O(n log n).
+def _join(arr, glue, lo, hi) {
+  if (hi <= lo) { return "" }
+  if (hi - lo == 1) { return toString(arr[lo]) }
+  val mid = (lo + hi) / 2
+  _join(arr, glue, lo, mid) + glue + _join(arr, glue, mid, hi)
+}
+
+def lines(s) {
+  val str = _str(s, "lines", 1)
+  // \r\n, \n and \r all end a line. The -1 limit keeps the empty final element
+  // that a trailing line break produces.
+  split(replace(replace(str, "\r\n", "\n"), "\r", "\n"), "\n", -1)
+}
+
+def padStart(s, width, pad = " ") = _pad(s, width, pad, true, "padStart")
+
+def padEnd(s, width, pad = " ") = _pad(s, width, pad, false, "padEnd")
+
+// `p` repeated until it is exactly `need` units long. The `*` operator refuses to
+// build more than 64MB, and padding has no such ceiling, so past that point the
+// filler is grown by doubling with `+` instead — still O(need), and it never
+// allocates more than the result itself.
+def _fill(p, need) {
+  if (length(p) >= need) { return substring(p, 0, need) }
+  var out = p
+  while (length(out) < need) {
+    val room = need - length(out)
+    out = out + (if (length(out) <= room) then out else substring(out, 0, room))
+  }
+  out
+}
+
+def _pad(s, width, pad, left, fn) {
+  val str = _str(s, fn, 1)
+  val w = _idx(width, fn, 2)
+  val p = _str(pad, fn, 3)
+  // Rejected even when the string is already wide enough to need no padding.
+  if (length(p) == 0) { error("${fn}: padding string must not be empty") }
+  val need = w - length(str)
+  if (need <= 0) { return str }
+  val copies = (need + length(p) - 1) / length(p)
+  val fill = if (copies * length(p) <= 64 * 1024 * 1024) then substring(p * copies, 0, need)
+    else _fill(p, need)
+  if (left) then fill + str else str + fill
+}
+
+def repeat(s, n) {
+  val str = _str(s, "repeat", 1)
+  val count = _idx(n, "repeat", 2)
+  if (count < 0) { error("repeat: count must not be negative") }
+  if (length(str) * count > 64 * 1024 * 1024) { error("repeat: result would be too large") }
+  str * count
+}

@@ -1,0 +1,152 @@
+// csv — RFC 4180 parsing and writing.
+//
+//   import "csv"
+//
+//   csvParse("a,b\n1,2")                       // [["a", "b"], ["1", "2"]]
+//   csvParseObjects("a,b\n1,2")                // [{a: "1", b: "2"}]
+//   csvStringify([["x", "y,z"]])               // "x,\"y,z\"\n"
+//   csvStringifyObjects([{a: 1, b: 2}])        // "a,b\n1,2\n"
+//
+// Quoting follows the RFC: fields containing the separator, quotes or line
+// breaks are quoted, and a quote inside a quoted field doubles. Cells always
+// parse to strings — what a number means is the caller's decision.
+
+// Parses CSV text into an array of rows (arrays of strings). Options:
+// {sep: ","} for another separator (";" and "\t" are the common ones).
+def csvParse(text, opts = {}) {
+  if (!isString(text)) then error("csv: expected a string, got " + typeOf(text))
+  val sep = _sepOf(opts)
+  val rows = []
+  var row = []
+  var cell = ""
+  var quoted = false
+  var i = 0
+  val n = length(text)
+
+  def endCell() {
+    push(row, cell)
+    cell = ""
+  }
+  def endRow() {
+    endCell()
+    push(rows, row)
+    row = []
+  }
+
+  while (i < n) {
+    val c = charAt(text, i)
+    if (quoted) {
+      if (c == "\"") {
+        if (i + 1 < n && charAt(text, i + 1) == "\"") {
+          cell += "\""
+          i += 2
+        } else {
+          quoted = false
+          i += 1
+        }
+      } else {
+        cell += c
+        i += 1
+      }
+    } elsif (c == "\"" && cell == "") {
+      quoted = true
+      i += 1
+    } elsif (c == sep) {
+      endCell()
+      i += 1
+    } elsif (c == "\r") {
+      if (i + 1 < n && charAt(text, i + 1) == "\n") then i += 1
+      endRow()
+      i += 1
+    } elsif (c == "\n") {
+      endRow()
+      i += 1
+    } else {
+      cell += c
+      i += 1
+    }
+  }
+  if (quoted) then error("csv: unterminated quote at end of input")
+  // A final line without a terminator still counts, but a trailing newline
+  // does not invent an empty row.
+  if (cell != "" || length(row) > 0) then endRow()
+  rows
+}
+
+// Parses CSV whose first row is a header into an array of objects keyed by it.
+def csvParseObjects(text, opts = {}) {
+  val rows = csvParse(text, opts)
+  if (length(rows) == 0) then return []
+  val header = rows[0]
+  val out = []
+  var r = 1
+  while (r < length(rows)) {
+    val row = rows[r]
+    val obj = {}
+    var c = 0
+    while (c < length(header)) {
+      obj[header[c]] = if (c < length(row)) then row[c] else ""
+      c += 1
+    }
+    push(out, obj)
+    r += 1
+  }
+  out
+}
+
+// Writes rows (arrays of values; non-strings are rendered with toString) as
+// CSV text, one "\n"-terminated line per row. Options: {sep: ","}.
+def csvStringify(rows, opts = {}) {
+  if (!isArray(rows)) then error("csv: expected an array of rows, got " + typeOf(rows))
+  val sep = _sepOf(opts)
+  var out = ""
+  for (row in rows) {
+    if (!isArray(row)) then error("csv: each row must be an array, got " + typeOf(row))
+    var first = true
+    for (cellv in row) {
+      if (!first) then out += sep
+      out += _cell(cellv, sep)
+      first = false
+    }
+    out += "\n"
+  }
+  out
+}
+
+// Writes objects under a header row. The column set is the first object's keys
+// unless {columns: [...]} says otherwise; missing keys become empty cells.
+def csvStringifyObjects(objs, opts = {}) {
+  if (!isArray(objs)) then error("csv: expected an array of objects, got " + typeOf(objs))
+  if (length(objs) == 0) then return ""
+  val sep = _sepOf(opts)
+  val columns =
+    if (contains(opts, "columns")) then opts.columns
+    else keys(objs[0])
+  val rows = [columns]
+  for (o in objs) {
+    if (!isObject(o)) then error("csv: each record must be an object, got " + typeOf(o))
+    val row = []
+    for (k in columns) {
+      push(row, if (contains(o, k)) then o[k] else "")
+    }
+    push(rows, row)
+  }
+  csvStringify(rows, opts)
+}
+
+def _sepOf(opts) {
+  val sep = if (contains(opts, "sep")) then opts.sep else ","
+  if (!isString(sep) || length(sep) != 1 || sep == "\"" || sep == "\n" || sep == "\r") {
+    error("csv: the separator must be a single character other than quotes and newlines")
+  }
+  sep
+}
+
+def _cell(v, sep) {
+  val s = if (isString(v)) then v elsif (isNull(v)) then "" else toString(v)
+  if (contains(s, sep) || contains(s, "\"") || contains(s, "\n") || contains(s, "\r")) {
+    "\"" + replace(s, "\"", "\"\"") + "\""
+  } else {
+    s
+  }
+}

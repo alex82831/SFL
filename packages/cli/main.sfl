@@ -1,0 +1,215 @@
+// cli — command-line argument parsing with generated help.
+//
+//   import "cli"
+//
+//   val spec = {
+//     name: "greet", doc: "Greets people.",
+//     flags:   {loud: {short: "l", doc: "Shout it"}},
+//     options: {times: {short: "n", doc: "How many times", default: "1"}},
+//     positionals: [{name: "who", required: true, doc: "Whom to greet"},
+//                   {name: "others", variadic: true, doc: "More of them"}]
+//   }
+//   val got = cliParse(spec)          // parses args(); prints help on -h
+//   // got = {flags: {loud: bool}, options: {times: "3"}, positionals: {who: "x", others: [...]}}
+//
+// Accepted spellings: --flag, --option value, --option=value, -s, and -s value
+// for declared shorts; "--" ends option parsing. Unknown options and missing
+// required positionals print the usage and exit(2); -h/--help prints the full
+// help and exit(0). cliParseArgs(spec, argv) is the pure form: it raises
+// instead of exiting and never prints, which is also what the tests use.
+
+// Parses argv (default: the program's args()) against spec, with the exits and
+// printing a command-line tool wants.
+def cliParse(spec, argv = null) {
+  val a = argv ?? args()
+  if (contains(a, "-h") || contains(a, "--help")) {
+    println(cliHelp(spec))
+    exit(0)
+  }
+  val r = attempt(() -> cliParseArgs(spec, a))
+  if (r?.error != null) {
+    eprintln(r.error.message)
+    eprintln("Try '" + _name(spec) + " --help'.")
+    exit(2)
+  }
+  r.value
+}
+
+// The pure parser: returns {flags, options, positionals} or raises with a
+// message naming the problem.
+def cliParseArgs(spec, argv) {
+  val flagSpecs = if (contains(spec, "flags")) then spec.flags else {}
+  val optSpecs = if (contains(spec, "options")) then spec.options else {}
+  val posSpecs = if (contains(spec, "positionals")) then spec.positionals else []
+
+  // Short spellings resolve through one table; ambiguity is a spec bug.
+  val shorts = {}
+  for (k in flagSpecs) {
+    val sh = _shortOf(flagSpecs[k])
+    if (sh != null) then shorts[sh] = {kind: "flag", name: k}
+  }
+  for (k in optSpecs) {
+    val sh = _shortOf(optSpecs[k])
+    if (sh != null) {
+      if (contains(shorts, sh)) then error("cli: short '-" + sh + "' is declared twice")
+      shorts[sh] = {kind: "option", name: k}
+    }
+  }
+
+  val flags = {}
+  for (k in flagSpecs) { flags[k] = false }
+  val options = {}
+  for (k in optSpecs) {
+    val d = optSpecs[k]
+    if (isObject(d) && contains(d, "default")) then options[k] = d.default
+  }
+  val positional = []
+
+  var i = 0
+  var onlyPositional = false
+  while (i < length(argv)) {
+    val arg = argv[i]
+    if (onlyPositional || !startsWith(arg, "-") || arg == "-") {
+      push(positional, arg)
+      i += 1
+    } elsif (arg == "--") {
+      onlyPositional = true
+      i += 1
+    } elsif (startsWith(arg, "--")) {
+      var name = substring(arg, 2, length(arg))
+      var inlineValue = null
+      val eq = indexOf(name, "=")
+      if (eq >= 0) {
+        inlineValue = substring(name, eq + 1, length(name))
+        name = substring(name, 0, eq)
+      }
+      if (contains(flagSpecs, name)) {
+        if (inlineValue != null) then error("cli: --" + name + " is a flag and takes no value")
+        flags[name] = true
+        i += 1
+      } elsif (contains(optSpecs, name)) {
+        if (inlineValue != null) {
+          options[name] = inlineValue
+          i += 1
+        } else {
+          if (i + 1 >= length(argv)) then error("cli: --" + name + " needs a value")
+          options[name] = argv[i + 1]
+          i += 2
+        }
+      } else {
+        error("cli: unknown option '--" + name + "'")
+      }
+    } else {
+      // One or more shorts bundled: -lv, or -n with its value following.
+      var j = 1
+      while (j < length(arg)) {
+        val sh = charAt(arg, j)
+        if (!contains(shorts, sh)) then error("cli: unknown option '-" + sh + "'")
+        val hit = shorts[sh]
+        if (hit.kind == "flag") {
+          flags[hit.name] = true
+          j += 1
+        } else {
+          if (j + 1 < length(arg)) {
+            // -nVALUE: the rest of the cluster is the value.
+            options[hit.name] = substring(arg, j + 1, length(arg))
+            j = length(arg)
+          } else {
+            if (i + 1 >= length(argv)) then error("cli: -" + sh + " needs a value")
+            options[hit.name] = argv[i + 1]
+            i += 1
+            j += 1
+          }
+        }
+      }
+      i += 1
+    }
+  }
+
+  // Bind positionals: fixed ones in order, a trailing variadic one takes the rest.
+  val bound = {}
+  var p = 0
+  var v = 0
+  while (p < length(posSpecs)) {
+    val d = posSpecs[p]
+    if (_isVariadic(d)) {
+      if (p != length(posSpecs) - 1) then error("cli: only the last positional may be variadic")
+      bound[d.name] = slice(positional, v, length(positional))
+      v = length(positional)
+    } elsif (v < length(positional)) {
+      bound[d.name] = positional[v]
+      v += 1
+    } elsif (_isRequired(d)) {
+      error("cli: missing required argument <" + d.name + ">")
+    } else {
+      bound[d.name] = null
+    }
+    p += 1
+  }
+  if (v < length(positional)) {
+    error("cli: unexpected argument '" + positional[v] + "'")
+  }
+
+  {flags: flags, options: options, positionals: bound}
+}
+
+// The help text cliParse prints for -h/--help.
+def cliHelp(spec) {
+  val name = _name(spec)
+  var out = ""
+  if (contains(spec, "doc")) then out += spec.doc + "\n\n"
+  out += "Usage: " + name
+  val flagSpecs = if (contains(spec, "flags")) then spec.flags else {}
+  val optSpecs = if (contains(spec, "options")) then spec.options else {}
+  val posSpecs = if (contains(spec, "positionals")) then spec.positionals else []
+  if (size(flagSpecs) > 0 || size(optSpecs) > 0) then out += " [options]"
+  for (d in posSpecs) {
+    val n = "<" + d.name + ">"
+    out += " " + (if (_isRequired(d)) then n else "[" + n + "]") +
+      (if (_isVariadic(d)) then "..." else "")
+  }
+  out += "\n"
+
+  val rows = []
+  for (k in flagSpecs) {
+    push(rows, [_spelling(k, flagSpecs[k], false), _docOf(flagSpecs[k])])
+  }
+  for (k in optSpecs) {
+    val d = optSpecs[k]
+    var doc = _docOf(d)
+    if (isObject(d) && contains(d, "default")) then doc += " (default " + toString(d.default) + ")"
+    push(rows, [_spelling(k, d, true), doc])
+  }
+  push(rows, ["-h, --help", "Show this help"])
+  for (d in posSpecs) {
+    push(rows, ["<" + d.name + ">", _docOf(d)])
+  }
+
+  var width = 0
+  for (r in rows) { width = max(width, length(r[0])) }
+  out += "\nOptions:\n"
+  for (r in rows) {
+    out += "  " + padEnd(r[0], width) + "  " + r[1] + "\n"
+  }
+  trimEnd(out)
+}
+
+def _name(spec) = if (contains(spec, "name")) then spec.name else "program"
+def _docOf(d) = if (isObject(d) && contains(d, "doc")) then d.doc else ""
+def _shortOf(d) {
+  if (isObject(d) && contains(d, "short")) {
+    if (!isString(d.short) || length(d.short) != 1) {
+      error("cli: a short spelling must be one character")
+    }
+    return d.short
+  }
+  null
+}
+def _isRequired(d) = isObject(d) && contains(d, "required") && d.required
+def _isVariadic(d) = isObject(d) && contains(d, "variadic") && d.variadic
+
+def _spelling(k, d, takesValue) {
+  val sh = _shortOf(d)
+  val long = "--" + k + (if (takesValue) then " <v>" else "")
+  if (sh != null) then "-" + sh + ", " + long else "    " + long
+}

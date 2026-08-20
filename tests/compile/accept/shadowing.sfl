@@ -1,0 +1,26 @@
+// A top-level def shadows a builtin of the same name, exactly as in the interpreter.
+def flip(b) = !b
+def sum(a, b) = a + b
+def max(a, b) = if (a > b) then a else b
+def round(x) = x + 100
+
+println(flip(true), flip(false))
+println(sum(3, 4), max(3, 9), round(1))
+
+// Booleans as variables, parameters and results.
+var on = true
+on = flip(on)
+println(on, !on, on && true, on || true)
+
+// A variable may shadow a builtin too. `sum` here is an ordinary global that happens
+// to be spelled like a library function, and the program's own one has to win.
+var sum = 0
+for (i in range(10)) { sum += i }
+println(sum, "总计：" + sum)
+
+var filter = "not a function"
+val count = 7
+println(filter, count)
+
+def map(pairs) = size(pairs)
+println(map([1, 2, 3]))

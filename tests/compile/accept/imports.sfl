@@ -1,0 +1,4 @@
+// Imported top-level functions compile like any other.
+import "lib/mathmod"
+println(square(7), cube(3))
+println(hypotSq(3, 4))

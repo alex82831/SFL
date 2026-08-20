@@ -1,0 +1,5 @@
+// A second module using the same names for different things. Nothing collides.
+def _square(s) = "[" + s + "]"
+
+def dist(s) = _square(s)
+def origin() = "here"

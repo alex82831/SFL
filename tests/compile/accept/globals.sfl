@@ -1,0 +1,15 @@
+// Top-level variables are shared between main and the functions.
+var counter = 0
+var scale = 2.5
+
+def bump(by) { counter = counter + by; counter }
+def scaled(v) = v * scale
+
+println(bump(5), bump(3), counter)
+println(scaled(2.0), scaled(4.0))
+scale = 0.5
+println(scaled(4.0))
+
+val limit = 10
+def underLimit(n) = n < limit
+println(underLimit(5), underLimit(50))

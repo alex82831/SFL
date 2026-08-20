@@ -1,0 +1,267 @@
+// Closure semantics, exhaustively.
+//
+// The central rule: a function captures the frame it was created in, and a loop that
+// creates functions gives every iteration its own frame.
+
+import "lib/assert"
+
+// ------------------------------------------------------- capturing environment
+
+def makeGreeter(greeting) = (name) -> greeting + ", " + name
+val hi = makeGreeter("Hi")
+val yo = makeGreeter("Yo")
+check("captures a parameter", hi("Ann"), "Hi, Ann")
+check("each call captures its own", yo("Bob"), "Yo, Bob")
+check("earlier closure is unaffected", hi("Cy"), "Hi, Cy")
+
+def makeCounter(start) {
+  var n = start
+  { () ->
+    n = n + 1
+    n
+  }
+}
+val c1 = makeCounter(0)
+val c2 = makeCounter(100)
+c1(); c1()
+check("mutable capture accumulates", c1(), 3)
+check("instances are independent", c2(), 101)
+
+// Two closures over the same frame share that state.
+def makePair() {
+  var value = 0
+  val setter = (v) -> value = v
+  val getter = () -> value
+  [setter, getter]
+}
+val pair = makePair()
+pair[0](42)
+check("sibling closures share one frame", pair[1](), 42)
+
+// ------------------------------------------------------ capturing across levels
+
+def outer(a) {
+  def middle(b) {
+    def inner(c) = a + b + c
+    inner
+  }
+  middle
+}
+check("three levels of capture", outer(1)(2)(3), 6)
+
+def deepCapture(x) {
+  (a) -> (b) -> (c) -> (d) -> x + a + b + c + d
+}
+check("four nested lambdas", deepCapture(1)(2)(3)(4)(5), 15)
+
+// A closure keeps its frame alive after the defining call has returned.
+def escaped() {
+  val secret = "kept"
+  () -> secret
+}
+val keeper = escaped()
+check("frame outlives the call", keeper(), "kept")
+
+// ------------------------------------------------------- per-iteration capture
+
+def forCaptures() {
+  val fs = []
+  for (i in range(4)) {
+    push(fs, () -> i)
+  }
+  map(fs, (f) -> f())
+}
+check("for loop captures each index", forCaptures(), [0, 1, 2, 3])
+
+def whileCaptures() {
+  val fs = []
+  var k = 0
+  while (k < 4) {
+    val squared = k * k
+    push(fs, () -> squared)
+    k += 1
+  }
+  map(fs, (f) -> f())
+}
+check("while loop captures each iteration", whileCaptures(), [0, 1, 4, 9])
+
+// The loop body may both capture per iteration and update an enclosing variable.
+def mixedLoop() {
+  var total = 0
+  val fs = []
+  for (i in range(4)) {
+    total += i
+    push(fs, () -> i * 10)
+  }
+  [total, map(fs, (f) -> f())]
+}
+check("outer variable still shared", mixedLoop()[0], 6)
+check("captured values still per iteration", mixedLoop()[1], [0, 10, 20, 30])
+
+// Nested loops: both levels capture independently.
+def nestedLoops() {
+  val fs = []
+  for (i in range(2)) {
+    for (j in range(2)) {
+      push(fs, () -> i * 10 + j)
+    }
+  }
+  map(fs, (f) -> f())
+}
+check("nested loops capture both variables", nestedLoops(), [0, 1, 10, 11])
+
+// Capture inside a conditional inside a loop.
+def conditionalCapture() {
+  val fs = []
+  for (i in range(5)) {
+    if (i % 2 == 0) {
+      push(fs, () -> i)
+    }
+  }
+  map(fs, (f) -> f())
+}
+check("capture under a condition", conditionalCapture(), [0, 2, 4])
+
+// break and continue must not disturb the per-iteration frames already handed out.
+def captureWithBreak() {
+  val fs = []
+  for (i in range(10)) {
+    if (i == 3) { break }
+    if (i == 1) { continue }
+    push(fs, () -> i)
+  }
+  map(fs, (f) -> f())
+}
+check("capture survives break and continue", captureWithBreak(), [0, 2])
+
+// A loop that creates no closures keeps the flat, shared-frame layout and still works.
+def plainLoop() {
+  var acc = 0
+  for (i in range(5)) {
+    val doubled = i * 2
+    acc += doubled
+  }
+  acc
+}
+check("loops without closures are unaffected", plainLoop(), 20)
+
+// The same at the top level rather than inside a function.
+topFns = []
+for (i in range(3)) {
+  push(topFns, () -> i + 100)
+}
+check("top-level loop captures per iteration", map(topFns, (f) -> f()), [100, 101, 102])
+
+// ---------------------------------------------------------- closures as values
+
+def applyTwice(f, x) = f(f(x))
+check("closure passed as an argument", applyTwice((n) -> n * 3, 2), 18)
+
+def adderFactory() {
+  val adders = []
+  for (n in [1, 10, 100]) {
+    push(adders, (x) -> x + n)
+  }
+  adders
+}
+val adders = adderFactory()
+check("array of closures", map(adders, (f) -> f(5)), [6, 15, 105])
+
+// Closures given to higher-order builtins see the enclosing scope.
+def scaleAll(items, factor) = map(items, (n) -> n * factor)
+check("closure inside map", scaleAll([1, 2, 3], 4), [4, 8, 12])
+
+def countMatching(items, limit) = count(items, (n) -> n > limit)
+check("closure inside count", countMatching([1, 5, 9], 4), 2)
+
+// ------------------------------------------------------------ recursion + state
+
+// A named function is in scope inside its own body, so closures can recurse.
+def makeAccumulator() {
+  val seen = []
+  def record(v) {
+    push(seen, v)
+    seen
+  }
+  record
+}
+val rec = makeAccumulator()
+rec("a")
+check("closure mutating captured array", rec("b"), ["a", "b"])
+
+// Two closures over separate frames do not interfere even while recursing.
+def makeSummer() {
+  var total = 0
+  def add(n) {
+    if (n <= 0) then total else {
+      total += n
+      add(n - 1)
+    }
+  }
+  add
+}
+val s1 = makeSummer()
+val s2 = makeSummer()
+check("recursive closure accumulates", s1(4), 10)
+check("second recursive closure is fresh", s2(3), 6)
+
+// ------------------------------------------------------------------- shadowing
+
+val shadow = "global"
+def shadowTest() {
+  val shadow = "outer"
+  val f = () -> shadow
+  {
+    val shadow = "inner block"
+    f()
+  }
+}
+check("closure sees its own binding, not a later one", shadowTest(), "outer")
+
+def paramShadowsCapture(v) {
+  val f = (v) -> v + "-param"
+  f("arg")
+}
+check("parameter shadows the captured name", paramShadowsCapture("captured"), "arg-param")
+
+// ------------------------------------------------------------- capture by value
+
+// Reassigning the captured variable is visible to the closure, because the frame is
+// shared rather than copied.
+def sharedFrame() {
+  var v = 1
+  val read = () -> v
+  v = 2
+  read()
+}
+check("closure observes later writes to its frame", sharedFrame(), 2)
+
+// ------------------------------------------------- closures and rest parameters
+
+def captureRest(...items) = () -> length(items)
+check("closure captures a rest parameter", captureRest(1, 2, 3)(), 3)
+
+def restPerIteration(...vals) {
+  val fs = []
+  for (v in vals) {
+    push(fs, () -> v * 2)
+  }
+  map(fs, (f) -> f())
+}
+check("per-iteration capture over a rest parameter", restPerIteration(1, 2, 3), [2, 4, 6])
+
+// A closure returned from a loop that itself returns closures.
+def grid() {
+  val rows = []
+  for (i in range(3)) {
+    val cols = []
+    for (j in range(2)) {
+      push(cols, () -> i * 10 + j)
+    }
+    push(rows, () -> map(cols, (f) -> f()))
+  }
+  map(rows, (r) -> r())
+}
+check("closures nested two loops deep", grid(), [[0, 1], [10, 11], [20, 21]])
+
+report("closures")

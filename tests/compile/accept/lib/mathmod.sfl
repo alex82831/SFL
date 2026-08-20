@@ -1,0 +1,3 @@
+def square(n) = n * n
+def cube(n) = n * n * n
+def hypotSq(a, b) = square(a) + square(b)

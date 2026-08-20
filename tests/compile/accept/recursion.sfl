@@ -1,0 +1,11 @@
+// Non-tail recursion. Kept within the interpreter's default depth limit so both sides
+// can be compared; compiled code itself recurses on the native stack and goes far deeper.
+def depth(n) = if (n == 0) then 0 else 1 + depth(n - 1)
+println(depth(1000))
+
+def ack(m, n) {
+  if (m == 0) { return n + 1 }
+  if (n == 0) { return ack(m - 1, 1) }
+  ack(m - 1, ack(m, n - 1))
+}
+println(ack(2, 3))

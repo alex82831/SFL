@@ -1,0 +1,347 @@
+// The SFL build tool. This file lives inside the sfl binary (BuildToolSources)
+// and `sfl build` evaluates it with the rest of the command line in args().
+//
+// A project is a directory with a build.sfl that calls project({...}) and,
+// optionally, task(name, fn). The functions the build file calls are ordinary
+// SFL defined right here — evaluated before the build file, so the DSL needs no
+// support from the compiler and no new syntax. The project file is data the way
+// an sbt build is code: the same language as the programs it builds.
+//
+//   sfl build              compile the project's main into <output>/<name>
+//   sfl build run [args…]  run the project's main through the interpreter
+//   sfl build test         run every .sfl under the test directory
+//   sfl build describe     print the project model as JSON (IDEs read this)
+//   sfl build init [name]  scaffold a new project here
+//   sfl build <task>       run a task the build file defined
+
+val __toolVersion = "0.1.0"
+
+// ---------------------------------------------------------------------------
+// Small helpers
+// ---------------------------------------------------------------------------
+
+def __fail(msg) {
+  eprintln("sfl build: " + msg)
+  exit(1)
+}
+
+// Recursively collects *.sfl files under dir, in stable order.
+def __walkSfl(dir, acc) {
+  if (!isDir(dir)) { return acc }
+  for (name in sort(listFiles(dir))) {
+    val p = dir + "/" + name
+    if (isDir(p)) { __walkSfl(p, acc) }
+    elsif (endsWith(name, ".sfl")) { push(acc, p) }
+  }
+  acc
+}
+
+def __rmTree(p) {
+  if (isDir(p)) {
+    for (name in listFiles(p)) { __rmTree(p + "/" + name) }
+  }
+  removeFile(p)
+}
+
+def __newest(paths) {
+  var t = -1
+  for (p in paths) {
+    val m = fileMtime(p)
+    if (m > t) { t = m }
+  }
+  t
+}
+
+def __exe() = exePath() ?? "sfl"
+
+// ---------------------------------------------------------------------------
+// The DSL surface build.sfl programs against
+// ---------------------------------------------------------------------------
+
+var __project = null
+var __userTasks = {}
+var __userTaskOrder = []
+
+def project(spec) {
+  if (__project != null) { __fail("build.sfl calls project() twice") }
+  if (!isObject(spec)) { __fail("project(...) wants an object, got " + typeOf(spec)) }
+  val name = spec?.name ?? __fail("project(...) needs a 'name'")
+  val main = spec?.main ?? null
+  val defaultSources = if (main != null && contains(main, "/")) then [dirName(main)] else ["."]
+  val sources = spec?.sources ?? defaultSources
+  __project = {
+    "name": name,
+    "version": spec?.version ?? "0.0.0",
+    "main": main,
+    "sources": sources,
+    "tests": spec?.tests ?? "tests",
+    "output": spec?.output ?? "build",
+    "opt": spec?.opt ?? "O2"
+  }
+  __project
+}
+
+def task(name, fn, doc = "") {
+  if (!isString(name) || name == "") { __fail("task(...) needs a name") }
+  if (contains(__builtinTasks, name)) { __fail("task '" + name + "' would shadow the built-in task") }
+  if (contains(__userTasks, name)) { __fail("task '" + name + "' is defined twice") }
+  set(__userTasks, name, { "fn": fn, "doc": doc })
+  push(__userTaskOrder, name)
+}
+
+val __builtinTasks = ["build", "run", "test", "clean", "pkg", "describe", "tasks", "init"]
+
+// ---------------------------------------------------------------------------
+// Loading the project
+// ---------------------------------------------------------------------------
+
+def __loadProject() {
+  if (__project != null) { return __project }
+  if (!exists("build.sfl")) {
+    eprintln("sfl build: no build.sfl in " + cwd())
+    eprintln("")
+    eprintln("a minimal one looks like this:")
+    eprintln("")
+    eprintln("  project({")
+    eprintln("    \"name\": \"app\",")
+    eprintln("    \"version\": \"0.1.0\",")
+    eprintln("    \"main\": \"src/main.sfl\"")
+    eprintln("  })")
+    eprintln("")
+    eprintln("or scaffold one: sfl build init [name]")
+    exit(1)
+  }
+  eval(readFile("build.sfl"))
+  if (__project == null) { __fail("build.sfl never calls project({...})") }
+  __project
+}
+
+def __sourceFiles(p) {
+  val acc = []
+  for (dir in p.sources) { __walkSfl(dir, acc) }
+  if (p.main != null && !contains(acc, p.main) && exists(p.main)) { push(acc, p.main) }
+  acc
+}
+
+// Everything whose change should trigger a rebuild.
+def __inputs(p) {
+  val acc = __sourceFiles(p)
+  push(acc, "build.sfl")
+  if (exists("sfl.pkg")) { push(acc, "sfl.pkg") }
+  acc
+}
+
+// ---------------------------------------------------------------------------
+// Built-in tasks
+// ---------------------------------------------------------------------------
+
+def __taskBuild(argv) {
+  val p = __loadProject()
+  if (p.main == null) { __fail("the project declares no 'main'; nothing to compile") }
+  if (!exists(p.main)) { __fail("main '" + p.main + "' does not exist") }
+  val out = p.output + "/" + p.name
+  val force = contains(argv, "--force")
+  if (!force && exists(out) && fileMtime(out) >= __newest(__inputs(p))) {
+    println(p.name + " is up to date: " + out)
+    return 0
+  }
+  mkdirs(p.output)
+  val code = passthrough(__exe(), ["-c", p.main, "-o", out, "-" + p.opt])
+  if (code != 0) { __fail("compiling " + p.main + " failed") }
+  println("built " + out)
+  0
+}
+
+def __taskRun(argv) {
+  val p = __loadProject()
+  if (p.main == null) { __fail("the project declares no 'main'; nothing to run") }
+  passthrough(__exe(), [p.main] + argv)
+}
+
+def __taskTest(argv) {
+  val p = __loadProject()
+  if (!isDir(p.tests)) { __fail("no test directory '" + p.tests + "'") }
+  val files = __walkSfl(p.tests, [])
+  if (length(files) == 0) { __fail("no .sfl files under '" + p.tests + "'") }
+  var failed = 0
+  for (f in files) {
+    println("── " + f)
+    val code = passthrough(__exe(), [f])
+    if (code != 0) {
+      failed += 1
+      eprintln("   FAILED (exit " + code + ")")
+    }
+  }
+  println("")
+  if (failed == 0) {
+    println("tests: " + length(files) + " file(s), all passed")
+    0
+  } else {
+    eprintln("tests: " + failed + " of " + length(files) + " file(s) FAILED")
+    1
+  }
+}
+
+def __taskClean(argv) {
+  val p = __loadProject()
+  if (isDir(p.output)) {
+    __rmTree(p.output)
+    println("removed " + p.output + "/")
+  } else {
+    println("nothing to clean")
+  }
+  0
+}
+
+def __taskPkg(argv) {
+  __loadProject()
+  if (!exists("sfl.pkg")) {
+    __fail("packaging needs an sfl.pkg manifest; see 'sfl pkg --help'")
+  }
+  passthrough(__exe(), ["pkg", "build", "."])
+}
+
+def __taskDescribe(argv) {
+  val p = __loadProject()
+  // ({}) not {}: a bare {} in expression position parses as an empty block.
+  val deps = if (exists("sfl.pkg")) then (jsonParse(readFile("sfl.pkg"))?.deps ?? ({})) else ({})
+  val model = {
+    "tool": "sfl build " + __toolVersion,
+    "name": p.name,
+    "version": p.version,
+    "main": p.main,
+    "sources": p.sources,
+    "sourceFiles": __sourceFiles(p),
+    "tests": p.tests,
+    "output": p.output,
+    "opt": p.opt,
+    "deps": deps,
+    "tasks": __builtinTasks + __userTaskOrder
+  }
+  println(jsonStringify(model, true))
+  0
+}
+
+def __taskTasks(argv) {
+  __loadProject()
+  println("built-in:")
+  println("  build [--force]   compile main to <output>/<name>, skipping when fresh")
+  println("  run [args…]       run main through the interpreter")
+  println("  test              run every .sfl under the test directory")
+  println("  clean             remove the output directory")
+  println("  pkg               pack the project as a .sflpkg (needs sfl.pkg)")
+  println("  describe          print the project model as JSON")
+  println("  init [name]       scaffold a project in this directory")
+  if (length(__userTaskOrder) > 0) {
+    println("from build.sfl:")
+    for (name in __userTaskOrder) {
+      val doc = __userTasks[name].doc
+      println("  " + name + (if (doc != "") then repeat(" ", max(1, 18 - length(name))) + doc else ""))
+    }
+  }
+  0
+}
+
+// The IDE wizards call this with flags (and the IntelliJ plugin keeps a Java
+// fallback of these templates for machines without the binary — change one,
+// change the other: editors/intellij/.../project/SflScaffold.java).
+def __taskInit(argv) {
+  if (exists("build.sfl")) { __fail("this directory already has a build.sfl") }
+  var name = null
+  var version = "0.1.0"
+  var withTests = true
+  var i = 0
+  while (i < length(argv)) {
+    val a = argv[i]
+    if (a == "--version") {
+      if (i + 1 >= length(argv)) { __fail("--version needs a value, such as 0.1.0") }
+      version = argv[i + 1]
+      i += 2
+    }
+    elsif (a == "--no-tests") { withTests = false; i += 1 }
+    elsif (startsWith(a, "-")) { __fail("unknown option '" + a + "' for init") }
+    else {
+      if (name != null) { __fail("init takes at most one name") }
+      name = a
+      i += 1
+    }
+  }
+  if (name == null) { name = baseName(cwd()) }
+  if (contains(version, "\"") || contains(version, "\\")) {
+    __fail("'" + version + "' is not a usable version string")
+  }
+  mkdirs("src")
+  writeFile("build.sfl",
+    "project({\n" +
+    "  \"name\": \"" + name + "\",\n" +
+    "  \"version\": \"" + version + "\",\n" +
+    "  \"main\": \"src/main.sfl\"\n" +
+    "})\n" +
+    "\n" +
+    "// Tasks are plain SFL; the function receives the task's arguments.\n" +
+    "// `sfl build greet` runs this one:\n" +
+    "// task(\"greet\", (args) -> println(\"hello from a task\"), \"say hello\")\n")
+  writeFile("src/main.sfl",
+    "println(\"hello, " + name + "\")\n")
+  if (withTests) {
+    mkdirs("tests")
+    writeFile("tests/smoke.sfl",
+      "// Every .sfl in this directory runs under `sfl build test`; a non-zero\n" +
+      "// exit fails the suite.\n" +
+      "val two = 1 + 1\n" +
+      "if (two != 2) { eprintln(\"arithmetic is broken\"); exit(1) }\n" +
+      "println(\"smoke: ok\")\n")
+  }
+  val made = if (withTests) then "build.sfl, src/main.sfl, tests/smoke.sfl" else "build.sfl, src/main.sfl"
+  println("scaffolded '" + name + "': " + made)
+  println("try: sfl build && sfl build run")
+  0
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch
+// ---------------------------------------------------------------------------
+
+def __usage() {
+  println("sfl build — build, run and test an SFL project")
+  println("")
+  println("Usage")
+  println("  sfl build                 compile (same as 'sfl build build')")
+  println("  sfl build <task> [args…]  run a built-in or build.sfl-defined task")
+  println("  sfl build tasks           list every task")
+  println("")
+  println("The project file is build.sfl — ordinary SFL that calls project({...})")
+  println("and, optionally, task(name, fn, doc). Package dependencies stay in")
+  println("sfl.pkg, where `import` already reads them; the build file never")
+  println("duplicates them.")
+  0
+}
+
+def __dispatch(name, rest) {
+  if (name == "build")    { return __taskBuild(rest) }
+  if (name == "run")      { return __taskRun(rest) }
+  if (name == "test")     { return __taskTest(rest) }
+  if (name == "clean")    { return __taskClean(rest) }
+  if (name == "pkg")      { return __taskPkg(rest) }
+  if (name == "describe") { return __taskDescribe(rest) }
+  if (name == "tasks")    { return __taskTasks(rest) }
+  if (name == "init")     { return __taskInit(rest) }
+  __loadProject()
+  if (contains(__userTasks, name)) {
+    val r = __userTasks[name].fn(rest)
+    return if (isInt(r)) then r else 0
+  }
+  eprintln("sfl build: no task '" + name + "'")
+  eprintln("try 'sfl build tasks'")
+  1
+}
+
+def __main() {
+  val argv = args()
+  if (length(argv) == 0) { return __dispatch("build", []) }
+  val head = argv[0]
+  if (head == "-h" || head == "--help") { return __usage() }
+  __dispatch(head, drop(argv, 1))
+}
+
+exit(__main())

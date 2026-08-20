@@ -1,0 +1,79 @@
+// Generates the builtin reference tables used by docs/SFL-使用手册.md, written in SFL.
+//
+//   sfl tools/gen-builtin-reference.sfl > /tmp/reference.md
+//
+// Signatures come from the interpreter itself and the prose from docs/builtins-zh.json,
+// so the manual cannot drift from the implementation: a builtin with no translation is
+// a hard error rather than a silent omission.
+
+// Resolve the data file relative to this script so the generator works from any cwd.
+val zhPath = joinPath(dirName(dirName(scriptPath())), "docs", "builtins-zh.json")
+val zh = jsonParse(readFile(zhPath))
+
+val groupTitles = {
+  "io":       "输入输出 (io)",
+  "string":   "字符串 (string)",
+  "regex":    "正则表达式 (regex)",
+  "encoding": "编码与摘要 (encoding)",
+  "math":     "数学 (math)",
+  "bits":     "位运算 (bits)",
+  "type":     "类型判断与转换 (type)",
+  "function": "函数组合子 (function)",
+  "array":    "数组与高阶函数 (array)",
+  "object":   "对象 (object)",
+  "iterator": "迭代器 (iterator)",
+  "json":     "JSON (json)",
+  "fs":       "文件系统 (fs)",
+  "sys":      "系统与进程 (sys)",
+  "time":     "时间 (time)",
+  "net":      "网络 (net)",
+  "thread":   "线程 (thread)",
+  "channel":  "通道 (channel)",
+  "sync":     "同步原语 (sync)",
+  "ipc":      "进程间通信 (ipc)",
+  "meta":     "元编程与错误处理 (meta)"
+}
+
+val byGroup = {}
+val missing = []
+for (name in builtins()) {
+  val info = describe(name)
+  if (!has(zh, name)) {
+    push(missing, name)
+  }
+  if (!has(byGroup, info.group)) {
+    byGroup[info.group] = []
+  }
+  push(byGroup[info.group], info)
+}
+
+if (length(missing) > 0) {
+  eprintln("docs/builtins-zh.json 缺少以下内置函数的说明: " + join(sort(missing), ", "))
+  exit(1)
+}
+
+for (group in keys(byGroup)) {
+  if (!has(groupTitles, group)) {
+    eprintln("生成器缺少分组标题: " + group)
+    exit(1)
+  }
+}
+
+def escapePipes(s) = replace(s, "|", "\\|")
+
+var total = 0
+for (group in keys(groupTitles)) {
+  if (has(byGroup, group)) {
+    println("#### " + groupTitles[group])
+    println("")
+    println("| 函数 | 说明 |")
+    println("| --- | --- |")
+    for (e in sortBy(byGroup[group], (x) -> x.name)) {
+      println("| `" + escapePipes(e.signature) + "` | " + escapePipes(zh[e.name]) + " |")
+      total += 1
+    }
+    println("")
+  }
+}
+
+eprintln("已生成 " + total + " 个内置函数的说明")

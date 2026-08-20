@@ -1,0 +1,4 @@
+// Imported without an alias, so `visible` lands in the importer's scope and `_hidden`
+// does not — privacy is a property of the file, not of how it was imported.
+def _hidden(n) = n * 3
+def visible(n) = _hidden(n)

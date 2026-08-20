@@ -1,0 +1,17 @@
+// Strings are built, sliced and compared at run time. Indexing counts UTF-16 code
+// units, exactly as the interpreter does, so non-ASCII text agrees too.
+val name = "world"
+println("hello " + name)
+println("n=" + 42, "f=" + 1.5, "b=" + true, "arr=" + [1, 2])
+
+val s = "héllo wörld"
+println(length(s), s[1], substring(s, 0, 5), toUpper(s))
+println(indexOf(s, "wörld"), contains(s, "ö"), startsWith(s, "hé"))
+println(trim("  padded  ") + "|", replace(s, "ö", "o"))
+println("ab" * 3, compare("a", "b"), compare("b", "a"), compare("a", "a"))
+
+for (ch in "abc") { print(ch, "") }
+println("")
+
+val cmp = if ("apple" < "banana") then "lt" else "ge"
+println(cmp)

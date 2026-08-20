@@ -1,0 +1,162 @@
+// Regressions for defects found while auditing the previous implementation.
+// Each check names the behaviour that used to be wrong.
+
+import "lib/assert"
+
+// The old evaluator resolved a function parameter by walking up the scope chain and
+// writing to the first binding it found, so calling f(x) overwrote an outer `x`.
+val counter = "untouched"
+def clobbers(counter) {
+  counter = "inside"
+  counter
+}
+check("call does not clobber an outer binding", clobbers("arg"), "inside")
+check("outer binding survives the call", counter, "untouched")
+
+var shared = 100
+def alsoShared(shared) = shared * 2
+alsoShared(1)
+check("var binding survives a call with the same parameter name", shared, 100)
+
+// Each activation needs its own storage; the old shared map meant a recursive call
+// overwrote its caller's parameters.
+def sumTo(n) {
+  if (n <= 0) then 0 else n + sumTo(n - 1)
+}
+check("recursive frames are independent", sumTo(100), 5050)
+
+def nestedLocals(n) {
+  val doubled = n * 2
+  val inner = if (n > 0) then nestedLocals(n - 1) else 0
+  doubled + inner
+}
+check("locals survive a nested call", nestedLocals(4), 20)
+
+// Runaway NON-tail recursion has to be reported, not crash the process. The pending
+// addition is what keeps each activation alive; a tail call would use no stack at all.
+def runaway(n) = 1 + runaway(n + 1)
+checkFails("unbounded recursion is reported", () -> runaway(0), "stack overflow")
+
+// The old select/if used a Map, so branches could be reordered or collapse together.
+def manyCases(n) {
+  select (n) {
+    case 1: "a"
+    case 2: "b"
+    case 3: "c"
+    case 4: "d"
+    case 5: "e"
+    case 6: "f"
+    case 7: "g"
+    default: "z"
+  }
+}
+check("select case 1", manyCases(1), "a")
+check("select case 7", manyCases(7), "g")
+check("select default", manyCases(99), "z")
+
+// `false` inside a JSON literal used to be parsed as `true`.
+check("false in an array literal", [true, false][1], false)
+check("false in an object literal", {"flag": false}.flag, false)
+check("false via jsonParse", jsonParse("{\"f\":false}").f, false)
+
+// Objects preserve insertion order rather than hash order.
+val ordered = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+check("object key order", keys(ordered), ["one", "two", "three", "four", "five", "six"])
+check("json round trip preserves order", keys(jsonParse(jsonStringify(ordered))),
+  ["one", "two", "three", "four", "five", "six"])
+
+// Iterating an object yields keys, not opaque pairs.
+var seen = []
+for (k in ordered) { push(seen, k) }
+check("for over object yields plain keys", seen[0], "one")
+
+// Numeric edge cases that used to raise MatchError or ClassCastException.
+checkFails("integer division by zero", () -> 10 / 0, "division by zero")
+checkFails("modulo by zero", () -> 10 % 0, "modulo by zero")
+check("float division by zero is infinite", isInfinite(1.0 / 0.0), true)
+check("large integer literal", 9007199254740993, 9007199254740993)
+check("exponent literal without a dot", 1e3, 1000.0)
+
+// While loops accept any expression as a condition, not only a comparison.
+var n = 0
+while (n < 5 && true) { n += 1 }
+check("logical while condition", n, 5)
+
+var m = 3
+while (m) { m -= 1 }
+check("truthy while condition", m, 0)
+
+// Nested data structures are addressable to arbitrary depth, for reading and writing.
+val deep = {"a": {"b": {"c": [1, 2, {"d": "found"}]}}}
+check("deep read", deep.a.b.c[2].d, "found")
+deep["a"]["b"]["c"][2]["d"] = "changed"
+check("deep write", deep.a.b.c[2].d, "changed")
+deep.a.b.c[0] += 10
+check("deep compound assignment", deep.a.b.c[0], 11)
+
+// Closures capture the frame they were defined in. Two calls to a factory therefore
+// get independent state, which is what the old shared symbol table could not provide.
+def makeBox(start) {
+  var value = start
+  { (delta) ->
+    value = value + delta
+    value
+  }
+}
+val boxA = makeBox(10)
+val boxB = makeBox(100)
+boxA(1)
+check("closures hold independent state", boxA(1), 12)
+check("a second closure is unaffected", boxB(1), 101)
+
+// Each iteration of a loop that builds closures gets its own frame, so the closures
+// capture that iteration's value rather than sharing one binding.
+def loopCaptures() {
+  val out = []
+  for (i in range(3)) {
+    push(out, () -> i)
+  }
+  out
+}
+val perIter = loopCaptures()
+check("for-loop closures capture per iteration", [perIter[0](), perIter[1](), perIter[2]()], [0, 1, 2])
+
+def whileCaptures() {
+  val out = []
+  var k = 0
+  while (k < 3) {
+    val doubled = k * 2
+    push(out, () -> doubled)
+    k += 1
+  }
+  out
+}
+val whileFns = whileCaptures()
+check("while-loop closures capture per iteration", [whileFns[0](), whileFns[1](), whileFns[2]()], [0, 2, 4])
+
+// An empty braced body is an empty block, not an empty object literal. It used to build
+// and discard an object on every iteration.
+var emptyBodyRuns = 0
+for (i in range(3)) { }
+while (emptyBodyRuns < 2) { emptyBodyRuns += 1 }
+check("an empty loop body runs cleanly", emptyBodyRuns, 2)
+def emptyFn() { }
+check("an empty function body yields null", emptyFn(), null)
+// In expression position `{}` still means an empty object.
+check("empty object literal", size({}), 0)
+check("empty object from an expression body", typeOf(eval("def f() = {}\nf()")), "object")
+
+// String escapes beyond \n, which the old lexer stripped along with all quote marks.
+check("tab escape", length("a\tb"), 3)
+check("quote escape", length("say \"hi\""), 8)
+check("backslash escape", length("a\\b"), 3)
+check("quotes survive round trip", jsonParse(jsonStringify("a\"b")), "a\"b")
+
+// Errors report a position instead of a bare message.
+def failsAtLine() {
+  val ok = 1
+  error("deliberate")
+}
+check("error message text", try(failsAtLine, (e) -> e), "deliberate")
+
+report("regression")

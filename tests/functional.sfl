@@ -1,0 +1,288 @@
+// Functional programming: combinators, transforms, persistent updates, lazy
+// sequences, tail calls, rest parameters and the pipeline operator.
+
+import "lib/assert"
+
+val inc = (n) -> n + 1
+val dbl = (n) -> n * 2
+val sq  = (n) -> n * n
+
+// ----------------------------------------------------------- basic combinators
+
+check("identity", identity(7), 7)
+check("identity on containers", identity([1, 2]), [1, 2])
+check("constantly", constantly(9)(1, 2, 3), 9)
+check("constantly with no arguments", constantly("k")(), "k")
+
+check("compose is right to left", compose(inc, dbl)(5), 11)
+check("pipe is left to right", pipe(inc, dbl)(5), 12)
+check("compose of three", compose(inc, dbl, sq)(3), 19)
+check("pipe of three", pipe(sq, dbl, inc)(3), 19)
+check("compose of one is the function", compose(inc)(1), 2)
+// The rightmost function of a composition receives all the original arguments.
+check("compose keeps arity on the right", compose(dbl, (a, b) -> a + b)(3, 4), 14)
+check("pipe keeps arity on the left", pipe((a, b) -> a + b, dbl)(3, 4), 14)
+
+check("partial binds from the left", partial((a, b, c) -> a + b + c, 1, 2)(3), 6)
+check("partial with one bound argument", partial((a, b) -> a - b, 10)(4), 6)
+check("partialRight binds from the right", partialRight((a, b) -> a - b, 4)(10), 6)
+check("flip swaps the first two", flip((a, b) -> a - b)(4, 10), 6)
+
+check("curry", curry((a, b, c) -> a + b + c)(1)(2)(3), 6)
+check("curry with explicit arity", curry(max, 2)(3)(9), 9)
+check("curried partial application", { val f = curry((a, b) -> a * b); val ten = f(10); ten(5) }, 50)
+check("uncurry", uncurry((a) -> (b) -> a + b)(3, 4), 7)
+check("apply spreads an array", apply((a, b, c) -> a + b + c, [1, 2, 3]), 6)
+check("apply with a builtin", apply(max, [4, 9, 1]), 9)
+
+check("negate", negate((n) -> n > 3)(5), false)
+check("negate keeps truthiness rules", negate(isEmpty)([1]), true)
+
+var tapped = 0
+check("tap returns its input", tap(5, (v) -> tapped = v), 5)
+check("tap ran the side effect", tapped, 5)
+
+// -------------------------------------------------------------------- memoize
+
+var slowCalls = 0
+def slowSquare(n) {
+  slowCalls += 1
+  n * n
+}
+val fastSquare = memoize(slowSquare)
+fastSquare(4)
+fastSquare(4)
+fastSquare(5)
+fastSquare(4)
+check("memoize returns the right value", fastSquare(4), 16)
+check("memoize computes once per input", slowCalls, 2)
+check("memoize distinguishes arities", { val m = memoize((a, b) -> a + b); m(1, 2); m(1, 2) }, 3)
+
+var onceCalls = 0
+val boot = once(() -> { onceCalls += 1; "started" })
+boot()
+boot()
+check("once returns the first result", boot(), "started")
+check("once runs the body a single time", onceCalls, 1)
+
+// ------------------------------------------------------------ pipeline operator
+
+check("pipe operator applies a function", 5 |> inc, 6)
+check("pipe operator chains", 5 |> inc |> dbl, 12)
+check("pipe operator with extra arguments", [3, 1, 2] |> join("-"), "3-1-2")
+check("pipe operator into a builtin", "  x  " |> trim, "x")
+check("pipe operator binds loosest", 2 + 3 |> dbl, 10)
+check("pipe operator with a lambda", 4 |> ((n) -> n - 1), 3)
+check("pipe operator end to end",
+  range(1, 11) |> filter((n) -> n % 2 == 0) |> map(sq) |> sum,
+  220)
+
+// --------------------------------------------------------- collection transforms
+
+check("flatMap", flatMap([1, 2, 3], (n) -> [n, n * 10]), [1, 10, 2, 20, 3, 30])
+check("flatMap flattens one level", flatMap([[1, [2]]], identity), [1, [2]])
+check("groupBy", groupBy([1, 2, 3, 4], (n) -> if (n % 2 == 0) then "even" else "odd"),
+  {"odd": [1, 3], "even": [2, 4]})
+check("partition", partition(range(6), (n) -> n < 3), [[0, 1, 2], [3, 4, 5]])
+check("zipWith", zipWith([1, 2, 3], [10, 20], (a, b) -> a + b), [11, 22])
+check("scan with an initial value", scan([1, 2, 3], (a, b) -> a + b, 0), [0, 1, 3, 6])
+check("scan without an initial value", scan([1, 2, 3], (a, b) -> a + b), [1, 3, 6])
+check("foldRight builds right to left", foldRight(["a", "b", "c"], (x, acc) -> x + acc, "!"), "abc!")
+check("foldRight differs from reduce",
+  foldRight([1, 2, 3], (x, acc) -> toString(x) + acc, ""), "123")
+check("takeWhile", takeWhile([1, 2, 9, 1], (n) -> n < 5), [1, 2])
+check("dropWhile", dropWhile([1, 2, 9, 1], (n) -> n < 5), [9, 1])
+check("distinctBy", distinctBy(["aa", "ab", "b"], (s) -> charAt(s, 0)), ["aa", "b"])
+check("chunk", chunk(range(5), 2), [[0, 1], [2, 3], [4]])
+check("windows", windows([1, 2, 3, 4], 3), [[1, 2, 3], [2, 3, 4]])
+check("maxBy", maxBy(["a", "ccc", "bb"], length), "ccc")
+check("minBy", minBy(["a", "ccc", "bb"], length), "a")
+check("sumBy", sumBy([{"n": 1}, {"n": 2}], (o) -> o.n), 3)
+check("frequencies", frequencies(["a", "b", "a", "a"]), {"a": 3, "b": 1})
+check("intersperse", intersperse([1, 2, 3], 0), [1, 0, 2, 0, 3])
+check("enumerate", enumerate(["x", "y"]), [[0, "x"], [1, "y"]])
+checkFails("chunk rejects a zero size", () -> chunk([1], 0), "positive")
+
+// Higher-order builtins accept builtins as well as lambdas.
+check("builtin as an argument", map(["a", "bb"], length), [1, 2])
+check("composed builtins", pipe(trim, toUpper)("  ok  "), "OK")
+
+// ------------------------------------------------------- persistent updates
+
+val original = {"user": {"name": "Ann", "roles": ["dev"]}, "count": 1}
+
+val renamed = assocIn(original, ["user", "name"], "Bea")
+check("assocIn writes the new value", renamed.user.name, "Bea")
+check("assocIn leaves the original alone", original.user.name, "Ann")
+check("assocIn shares untouched branches", renamed.count, 1)
+
+check("updateIn applies a function", updateIn(original, ["count"], inc).count, 2)
+check("updateIn leaves the original alone", original.count, 1)
+check("updateIn into an array", updateIn(original, ["user", "roles"], (r) -> conj(r, "ops")).user.roles,
+  ["dev", "ops"])
+check("original array untouched", original.user.roles, ["dev"])
+
+check("getIn follows a path", getIn(original, ["user", "roles", 0]), "dev")
+check("getIn returns the default", getIn(original, ["user", "missing"], "none"), "none")
+check("getIn on a missing branch", getIn(original, ["nope", "deeper"], 0), 0)
+
+check("assoc on an object", assoc({"a": 1}, "b", 2), {"a": 1, "b": 2})
+check("assoc on an array", assoc([1, 2, 3], 1, 9), [1, 9, 3])
+check("assoc copies", { val a = [1, 2]; assoc(a, 0, 9); a }, [1, 2])
+check("dissoc", dissoc({"a": 1, "b": 2, "c": 3}, "b", "c"), {"a": 1})
+check("conj appends a copy", { val a = [1]; conj(a, 2); a }, [1])
+check("assocIn creates missing objects", assocIn({}, ["a", "b"], 1), {"a": {"b": 1}})
+
+// ------------------------------------------------------------ lazy sequences
+
+check("naturals with take", naturals() |> take(4) |> toArray, [0, 1, 2, 3])
+check("naturals from a start", naturals(5) |> take(3) |> toArray, [5, 6, 7])
+check("iterate", iterate(dbl, 1) |> take(5) |> toArray, [1, 2, 4, 8, 16])
+check("repeatedly", repeatedly("z") |> take(3) |> toArray, ["z", "z", "z"])
+check("cycle", cycle([1, 2, 3]) |> take(5) |> toArray, [1, 2, 3, 1, 2])
+check("lazy map and filter",
+  naturals() |> map(sq) |> filter((n) -> n % 2 == 1) |> take(4) |> toArray,
+  [1, 9, 25, 49])
+check("lazy takeWhile", naturals(1) |> takeWhile((n) -> n < 5) |> toArray, [1, 2, 3, 4])
+check("lazy dropWhile", naturals() |> dropWhile((n) -> n < 3) |> take(2) |> toArray, [3, 4])
+check("lazy drop", naturals() |> drop(100) |> take(2) |> toArray, [100, 101])
+check("lazy flatMap", naturals(1) |> flatMap((n) -> [n, -n]) |> take(4) |> toArray, [1, -1, 2, -2])
+check("lazy enumerate", naturals(10) |> enumerate |> take(2) |> toArray, [[0, 10], [1, 11]])
+check("toArray on an array is a no-op", toArray([1, 2]), [1, 2])
+check("iter feeds the lazy operators", iter([1, 2, 3]) |> map(dbl) |> toArray, [2, 4, 6])
+
+// Laziness must be real: an unbounded source may only be evaluated as far as needed.
+var produced = 0
+val firstThree = naturals() |> map((n) -> { produced += 1; n }) |> take(3) |> toArray
+check("lazy pipeline yields the right prefix", firstThree, [0, 1, 2])
+check("lazy pipeline evaluates no more than needed", produced, 3)
+
+// A lazy chain composed through pipe() rather than |>.
+val firstOdds = pipe(
+  (it) -> filter(it, (n) -> n % 2 == 1),
+  (it) -> take(it, 3),
+  toArray
+)
+check("lazy chain built with pipe", firstOdds(naturals()), [1, 3, 5])
+
+// -------------------------------------------------------------- tail calls
+
+// Depths far beyond the call-depth limit, which non-tail recursion would trip.
+def countDown(n, acc) = if (n == 0) then acc else countDown(n - 1, acc + n)
+check("self tail recursion", countDown(300000, 0), 45000150000)
+
+def isEvenT(n) = if (n == 0) then true else isOddT(n - 1)
+def isOddT(n) = if (n == 0) then false else isEvenT(n - 1)
+check("mutual tail recursion", isEvenT(200000), true)
+
+// Tail position through a block, a select and an explicit return.
+def viaBlock(n, acc) {
+  if (n == 0) {
+    return acc
+  }
+  viaBlock(n - 1, acc + 1)
+}
+check("tail call as a block's last statement", viaBlock(200000, 0), 200000)
+
+def viaSelect(n, acc) {
+  select (n) {
+    case 0: acc
+    default: viaSelect(n - 1, acc + 2)
+  }
+}
+check("tail call in a select branch", viaSelect(100000, 0), 200000)
+
+def viaReturn(n, acc) {
+  if (n == 0) { return acc }
+  return viaReturn(n - 1, acc + 1)
+}
+check("tail call behind an explicit return", viaReturn(200000, 0), 200000)
+
+// A tail call from inside a loop still abandons the current activation.
+def loopThenTail(n) {
+  var i = 0
+  while (i < 3) {
+    if (n > 0) {
+      return loopThenTail(n - 1)
+    }
+    i += 1
+  }
+  "bottom"
+}
+check("tail call from inside a loop", loopThenTail(100000), "bottom")
+
+// Tail calls through a closure value, not just a named function.
+def makeLoop() {
+  def step(n) = if (n == 0) then "done" else step(n - 1)
+  step
+}
+check("tail recursion inside a closure", makeLoop()(200000), "done")
+
+// Non-tail recursion is still bounded, and reports rather than crashing. The depth
+// it stops at differs between running and compiling — a compiled activation is a
+// fraction of the size — so this asks only that unbounded recursion is caught.
+def nonTail(n) = if (n == 0) then 0 else 1 + nonTail(n - 1)
+check("shallow non-tail recursion works", nonTail(100), 100)
+def runawayNonTail(n) = 1 + runawayNonTail(n + 1)
+checkFails("unbounded non-tail recursion is reported", () -> runawayNonTail(0), "stack overflow")
+
+// ------------------------------------------------------------ rest parameters
+
+def collect(...items) = items
+check("rest collects everything", collect(1, 2, 3), [1, 2, 3])
+check("rest can be empty", collect(), [])
+
+def labelled(label, ...rest) = label + ":" + join(rest, ",")
+check("rest after a fixed parameter", labelled("x", 1, 2), "x:1,2")
+check("rest with nothing left over", labelled("x"), "x:")
+
+def withDefaultAndRest(a, b = 10, ...rest) = [a, b, rest]
+check("defaults before rest", withDefaultAndRest(1), [1, 10, []])
+check("default overridden, rest filled", withDefaultAndRest(1, 2, 3, 4), [1, 2, [3, 4]])
+
+val restLambda = (first, ...others) -> [first, length(others)]
+check("rest in a lambda", restLambda("a", "b", "c"), ["a", 2])
+
+checkFails("rest still enforces the required count", () -> labelled(), "at least 1")
+
+// A variadic function written in SFL, composed with the builtins.
+def sumAll(...nums) = reduce(nums, (a, b) -> a + b, 0)
+check("user-defined variadic function", sumAll(1, 2, 3, 4), 10)
+check("variadic through apply", apply(sumAll, [5, 5]), 10)
+
+// --------------------------------------------------------- point-free style
+
+val evens = (ns) -> filter(ns, (n) -> n % 2 == 0)
+val squares = (ns) -> map(ns, sq)
+val total = pipe(evens, squares, sum)
+check("point-free composition", total(range(7)), 56)
+
+// A fold expressed with a composed step function.
+val step = (acc, n) -> assoc(acc, toString(n % 3), n)
+check("fold into an object", reduce([1, 2, 3, 4], step, {}), {"1": 4, "2": 2, "0": 3})
+
+// ------------------------------------------- tail calls in awkward combinations
+
+// A tail call whose target needs a larger frame than the caller.
+def toSmall(n) = if (n == 0) then "done" else toBig(n - 1, 0, 0)
+def toBig(n, a, b) {
+  val x = a
+  val y = b
+  val z = x + y
+  toSmall(n + z)
+}
+check("tail call into a larger frame", toSmall(50000), "done")
+
+// Rest parameters are re-bound on every trampoline hop.
+def restTail(n, ...tags) = if (n == 0) then join(tags, "/") else restTail(n - 1, tags[0], "extra")
+check("tail call with rest parameters", restTail(50000, "a"), "a/extra")
+
+// A tail-recursive walk over a large array.
+def sumFrom(xs, i, acc) = if (i == length(xs)) then acc else sumFrom(xs, i + 1, acc + xs[i])
+check("tail recursion over a large array", sumFrom(range(100000), 0, 0), 4999950000)
+
+// A memoized self-recursive lambda: the name resolves to the memoized wrapper.
+val fibm = memoize((n) -> if (n < 2) then n else fibm(n - 1) + fibm(n - 2))
+check("memoized recursion handles large inputs", fibm(80), 23416728348467685)
+
+report("functional")

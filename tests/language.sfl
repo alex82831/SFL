@@ -1,0 +1,328 @@
+import "lib/assert"
+
+// ---------------------------------------------------------------- literals
+
+check("int", 42, 42)
+check("negative int", -7, 0 - 7)
+check("float", 1.5 + 1.5, 3.0)
+check("hex", 0xff, 255)
+check("binary", 0b1010, 10)
+check("octal", 0o755, 493)
+check("underscores", 1_000_000, 1000000)
+check("exponent", 1e3, 1000.0)
+check("string", "ab" + "cd", "abcd")
+check("single quotes", 'hi', "hi")
+check("escapes", length("a\tb\nc"), 5)
+check("unicode escape", "\u0041\u4e2d", "A中")
+check("triple quoted", length("""a
+b"""), 3)
+check("bool", true, true)
+check("null", null, null)
+check("none alias", none, null)
+
+// ------------------------------------------------------------- arithmetic
+
+check("precedence", 2 + 3 * 4, 14)
+check("parens", (2 + 3) * 4, 20)
+check("integer division", 7 / 2, 3)
+check("float division", 7.0 / 2, 3.5)
+check("modulo", 7 % 3, 1)
+check("mixed int/float", 1 + 2.5, 3.5)
+check("int equals float", 1 == 1.0, true)
+check("unary minus", -(3 + 4), -7)
+check("string concat with number", "n=" + 5, "n=5")
+check("number concat with string", 5 + "x", "5x")
+check("string repeat", "ab" * 3, "ababab")
+check("array concat", [1, 2] + [3], [1, 2, 3])
+check("object merge via +", {"a": 1} + {"b": 2}, {"a": 1, "b": 2})
+checkFails("division by zero", () -> 1 / 0, "division by zero")
+checkFails("bad operand", () -> true - 1, "not defined")
+
+// ------------------------------------------------------------- comparison
+
+check("lt", 1 < 2, true)
+check("le", 2 <= 2, true)
+check("gt", 3 > 2, true)
+check("ge", 2 >= 3, false)
+check("eq", "a" == "a", true)
+check("ne", "a" != "b", true)
+check("deep array equality", [1, [2, 3]] == [1, [2, 3]], true)
+check("deep object equality", {"a": [1]} == {"a": [1]}, true)
+check("cross-type equality", 1 == "1", false)
+
+// ------------------------------------------------------------------ logic
+
+check("and", true && false, false)
+check("or", false || true, true)
+check("not", !false, true)
+// Short-circuit: the right side must not run, or this would raise.
+check("and short-circuits", false && (1 / 0 > 0), false)
+check("or short-circuits", true || (1 / 0 > 0), true)
+
+// -------------------------------------------------------------- variables
+
+val immutable = 1
+var mutable = 1
+mutable = 2
+mutable += 3
+check("var assignment", mutable, 5)
+implicitGlobal = 9
+check("implicit declaration", implicitGlobal, 9)
+checkFails("val is immutable", () -> eval("val c1 = 1\nc1 = 2"), "declared with 'val'")
+
+// -------------------------------------------------------------- functions
+
+def add(a, b) {
+  a + b
+}
+check("block function", add(2, 3), 5)
+
+def mul(a, b) = a * b
+check("expression function", mul(2, 3), 6)
+
+def withDefault(a, b = 10) = a + b
+check("default argument used", withDefault(1), 11)
+check("default argument overridden", withDefault(1, 2), 3)
+
+def fact(n) {
+  if (n <= 1) then 1 else n * fact(n - 1)
+}
+check("recursion", fact(10), 3628800)
+
+// Mutual recursion across forward references.
+def isEven(n) = if (n == 0) then true else isOdd(n - 1)
+def isOdd(n) = if (n == 0) then false else isEven(n - 1)
+check("mutual recursion", isEven(10), true)
+
+check("lambda arrow", ((a, b) -> a + b)(1, 2), 3)
+val braceLambda = { (x) -> x * 2 }
+check("brace lambda", braceLambda(21), 42)
+
+// Curried definitions really return functions now.
+def curried(a)(b) = a + b
+check("curried call", curried(1)(2), 3)
+val partial = curried(10)
+check("partial application", partial(5), 15)
+
+def makeCounter() {
+  var n = 0
+  { () ->
+    n = n + 1
+    n
+  }
+}
+val counter = makeCounter()
+counter()
+check("closure captures state", counter(), 2)
+val other = makeCounter()
+check("closures are independent", other(), 1)
+
+def outerScope() {
+  val local = "inner"
+  def nested() = local
+  nested()
+}
+check("nested function sees enclosing local", outerScope(), "inner")
+
+checkFails("arity checked", () -> add(1), "expects 2")
+
+// `return` from inside nested blocks, which the previous evaluator ignored.
+def earlyReturn(n) {
+  if (n > 0) {
+    if (n > 10) {
+      return "big"
+    }
+    return "small"
+  }
+  "non-positive"
+}
+check("return from nested block", earlyReturn(20), "big")
+check("return from one block deep", earlyReturn(5), "small")
+check("fallthrough after ifs", earlyReturn(-1), "non-positive")
+
+def returnInLoop(limit) {
+  var i = 0
+  while (i < 100) {
+    if (i == limit) {
+      return i * 2
+    }
+    i += 1
+  }
+  -1
+}
+check("return from inside a loop", returnInLoop(7), 14)
+
+// --------------------------------------------------------- shadowing
+
+val shadowed = "global"
+def readsGlobal() = shadowed
+def shadowsParam(shadowed) = shadowed
+check("parameter shadows global", shadowsParam("param"), "param")
+check("global intact after call", readsGlobal(), "global")
+check("global unchanged", shadowed, "global")
+
+// ----------------------------------------------------------- conditionals
+
+check("if/else expression", if (1 > 2) then "a" else "b", "b")
+check("elsif chain", if (false) then 1 elsif (false) then 2 elsif (true) then 3 else 4, 3)
+check("else if chain", if (false) then 1 else if (true) then 2 else 3, 2)
+check("if without else yields null", if (false) then 1, null)
+
+// More than four branches: the old Map-based representation lost their order.
+def branch(n) {
+  if (n == 1) then "one"
+  elsif (n == 2) then "two"
+  elsif (n == 3) then "three"
+  elsif (n == 4) then "four"
+  elsif (n == 5) then "five"
+  elsif (n == 6) then "six"
+  else "many"
+}
+check("branch 1", branch(1), "one")
+check("branch 5", branch(5), "five")
+check("branch 6", branch(6), "six")
+check("branch default", branch(9), "many")
+
+// Branch order matters when several conditions hold.
+def firstMatch(n) {
+  if (n > 0) then "positive"
+  elsif (n > 10) then "big"
+  elsif (n > 100) then "huge"
+  else "other"
+}
+check("first matching branch wins", firstMatch(500), "positive")
+
+// ----------------------------------------------------------------- select
+
+def name(n) {
+  select (n) {
+    case 1: "one"
+    case 2: "two"
+    case 3: "three"
+    default: "other"
+  }
+}
+check("select match", name(2), "two")
+check("select default", name(8), "other")
+check("select on strings", select ("b") { case "a": 1 case "b": 2 default: 0 }, 2)
+
+// ------------------------------------------------------------------ loops
+
+var total = 0
+var i = 1
+while (i <= 10) {
+  total += i
+  i += 1
+}
+check("while loop", total, 55)
+
+// A logical operator in the condition; the old parser only accepted comparisons.
+var j = 0
+while (j < 10 && j >= 0) {
+  j += 1
+}
+check("while with && condition", j, 10)
+
+var forSum = 0
+for (x in [1, 2, 3, 4]) {
+  forSum += x
+}
+check("for over array", forSum, 10)
+
+var chars = ""
+for (c in "abc") {
+  chars = chars + c + "."
+}
+check("for over string", chars, "a.b.c.")
+
+var objKeys = []
+for (k in {"a": 1, "b": 2}) {
+  push(objKeys, k)
+}
+check("for over object yields keys", objKeys, ["a", "b"])
+
+var breakAt = 0
+for (x in range(100)) {
+  if (x == 5) { break }
+  breakAt = x
+}
+check("break", breakAt, 4)
+
+var oddSum = 0
+for (x in range(10)) {
+  if (x % 2 == 0) { continue }
+  oddSum += x
+}
+check("continue", oddSum, 25)
+
+var nested = 0
+for (a in range(3)) {
+  for (b in range(3)) {
+    if (b == 1) { break }
+    nested += 1
+  }
+}
+check("break only exits the inner loop", nested, 3)
+
+// ------------------------------------------------------------ collections
+
+val arr = [1, 2, 3]
+check("array index", arr[0], 1)
+check("negative index", arr[-1], 3)
+arr[1] = 20
+check("array assignment", arr[1], 20)
+arr[0] += 100
+check("array compound assignment", arr[0], 101)
+checkFails("index out of bounds", () -> arr[10], "out of bounds")
+
+val obj = {"name": "sfl", "nested": {"deep": [1, 2]}}
+check("object index", obj["name"], "sfl")
+check("dot access", obj.name, "sfl")
+check("nested chain", obj["nested"]["deep"][1], 2)
+check("nested dot chain", obj.nested.deep[0], 1)
+obj["count"] = 3
+check("object assignment", obj.count, 3)
+obj.count += 1
+check("object compound assignment", obj.count, 4)
+checkFails("missing key", () -> obj["absent"], "no key")
+check("get with default", get(obj, "absent", "fallback"), "fallback")
+
+check("object literal preserves order", keys({"z": 1, "a": 2, "m": 3}), ["z", "a", "m"])
+check("empty object", size({}), 0)
+check("empty array", length([]), 0)
+check("bare identifier keys", {a: 1, b: 2}.a, 1)
+check("trailing comma in array", length([1, 2, 3,]), 3)
+
+// ------------------------------------------------------------- truthiness
+
+check("empty string is falsy", if ("") then "t" else "f", "f")
+check("zero is falsy", if (0) then "t" else "f", "f")
+check("null is falsy", if (null) then "t" else "f", "f")
+check("empty array is falsy", if ([]) then "t" else "f", "f")
+check("non-empty array is truthy", if ([0]) then "t" else "f", "t")
+
+// ----------------------------------------------------------------- blocks
+
+val blockValue = {
+  val a = 1
+  val b = 2
+  a + b
+}
+check("block expression value", blockValue, 3)
+
+def blockScoping() {
+  val outer = 1
+  {
+    val inner = 2
+  }
+  outer
+}
+check("block scoping", blockScoping(), 1)
+
+// ------------------------------------------------------------------- eval
+
+check("eval string", eval("1 + 2"), 3)
+check("parse then eval", eval(parse("3 * 4")), 12)
+check("eval sees globals", eval("immutable + 1"), 2)
+
+report("language")

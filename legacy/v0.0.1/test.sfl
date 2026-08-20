@@ -1,0 +1,27 @@
+// This is a test script for the SFL language.
+
+// 1. Variables and Arithmetic
+val x = 10
+val y = 20
+val z = x + y * 2
+print("Result of x + y * 2 is: ")
+print(z) // Expected: 50
+
+// 2. Function Definition and Call
+def my_add(a, b) {
+  a + b
+}
+val sum = my_add(z, 10)
+print("Result of my_add(z, 10) is: ")
+print(sum) // Expected: 60
+
+// 3. Conditional Expression
+val message = if (sum > 50) then {
+  "Sum is greater than 50"
+} else {
+  "Sum is not greater than 50"
+}
+print(message) // Expected: "Sum is greater than 50"
+
+// 4. Print a final message
+print("SFL script execution finished.")

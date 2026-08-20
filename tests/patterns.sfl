@@ -1,0 +1,309 @@
+// Pattern matching: select patterns, val destructuring, for patterns.
+// Every construct here desugars in the parser to ordinary nodes, so this suite
+// doubles as the differential test of that desugaring.
+
+import "lib/assert"
+
+// ---- literals and wildcard --------------------------------------------------
+
+def litMatch(v) = select (v) {
+  case 0: "zero"
+  case 1.5: "one and a half"
+  case "s": "string s"
+  case true: "yes"
+  case null: "nothing"
+  case -2: "minus two"
+  case _: "other"
+}
+check("literal int", litMatch(0), "zero")
+check("literal float", litMatch(1.5), "one and a half")
+check("literal string", litMatch("s"), "string s")
+check("literal bool", litMatch(true), "yes")
+check("literal null", litMatch(null), "nothing")
+check("negative literal", litMatch(-2), "minus two")
+check("wildcard", litMatch([1]), "other")
+check("int equals float literal", litMatch(0.0), "zero")
+
+// ---- binding, pinning, guards ----------------------------------------------
+
+def describe(v) = select (v) {
+  case 0: "zero"
+  case n if isInt(n) && n < 0: "negative " + n
+  case n if isInt(n): "positive " + n
+  case other: "not an int: " + toString(other)
+}
+check("guarded binding negative", describe(-3), "negative -3")
+check("guarded binding positive", describe(7), "positive 7")
+check("fallthrough binding", describe("x"), "not an int: x")
+
+val limit = 10
+def pinned(v) = select (v) {
+  case $limit: "at limit"
+  case _: "elsewhere"
+}
+check("pinned matches current value", pinned(10), "at limit")
+check("pinned rejects others", pinned(11), "elsewhere")
+
+// ---- arrays -----------------------------------------------------------------
+
+def arr(v) = select (v) {
+  case []: "empty"
+  case [x]: "one: " + x
+  case [x, y]: "two: " + x + "," + y
+  case [first, ...rest]: "first " + first + " plus " + size(rest)
+}
+check("empty array", arr([]), "empty")
+check("one element", arr([5]), "one: 5")
+check("two elements", arr([1, 2]), "two: 1,2")
+check("rest pattern", arr([1, 2, 3, 4]), "first 1 plus 3")
+
+def middle(v) = select (v) {
+  case [a, ...mid, z]: toString(a) + "|" + toString(mid) + "|" + toString(z)
+  case _: "no"
+}
+check("rest in the middle", middle([1, 2, 3, 4]), "1|[2, 3]|4")
+check("middle rest can be empty", middle([1, 2]), "1|[]|2")
+check("middle rest needs both ends", middle([1]), "no")
+
+check("nested arrays", select ([1, [2, 3]]) { case [a, [b, c]]: a + b + c }, 6)
+check("array pattern rejects tuple", select ((1, 2)) { case [a, b]: "arr" case _: "no" }, "no")
+
+// ---- tuples -----------------------------------------------------------------
+
+check("tuple pattern", select ((1, 2)) { case (a, b): a + b }, 3)
+check("tuple pattern rejects array", select ([1, 2]) { case (a, b): "tup" case _: "no" }, "no")
+check("tuple arity is exact", select ((1, 2, 3)) { case (a, b): "two" case (a, b, c): "three" }, "three")
+check("nested tuple in array", select ([(1, 2), (3, 4)]) {
+  case [(a, _), (_, d)]: a + d
+}, 5)
+
+// ---- objects ----------------------------------------------------------------
+
+def obj(v) = select (v) {
+  case {"kind": "circle", "r": r}: "circle " + r
+  case {"kind": "rect", "w": w, "h": h}: "rect " + (w * h)
+  case {kind}: "unknown kind " + kind
+  case _: "not a shape"
+}
+check("object pattern", obj({"kind": "circle", "r": 2}), "circle 2")
+check("object pattern two keys", obj({"kind": "rect", "w": 3, "h": 4}), "rect 12")
+check("shorthand binds the key", obj({"kind": "blob"}), "unknown kind blob")
+check("missing key falls through", obj({"size": 1}), "not a shape")
+check("extra keys are fine", obj({"kind": "circle", "r": 1, "extra": true}), "circle 1")
+
+// ---- alternatives, binder ---------------------------------------------------
+
+def alt(v) = select (v) {
+  case 1 | 2 | 3: "small"
+  case "a" | "b": "letter"
+  case _: "other"
+}
+check("alternative ints", alt(2), "small")
+check("alternative strings", alt("b"), "letter")
+check("alternative fallthrough", alt(9), "other")
+
+check("binder on whole", select ([1, 2]) { case all @ [x, _]: toString(all) + ":" + x }, "[1, 2]:1")
+check("binder nested", select ([1, [2, 3]]) {
+  case [a, inner @ [b, _]]: a + b + size(inner)
+}, 5)
+
+// ---- type extractors --------------------------------------------------------
+
+def typed(v) = select (v) {
+  case int(n): "int " + n
+  case float(f): "float " + f
+  case string(s): "str " + s
+  case bool(b): "bool " + b
+  case array(a): "arr " + size(a)
+  case tuple(t): "tup " + size(t)
+  case object(o): "obj " + size(o)
+  case function(_): "fn"
+  case _: "other"
+}
+check("int extractor", typed(1), "int 1")
+check("float extractor", typed(1.5), "float 1.5")
+check("string extractor", typed("x"), "str x")
+check("bool extractor", typed(false), "bool false")
+check("array extractor", typed([1, 2]), "arr 2")
+check("tuple extractor", typed((1, 2)), "tup 2")
+check("object extractor", typed({"a": 1}), "obj 1")
+check("function extractor", typed(typed), "fn")
+check("null reaches the wildcard", typed(null), "other")
+check("number extractor", select (2.5) { case number(n): n * 2 }, 5.0)
+check("type extractor with inner pattern", select (5) { case int(x @ _): x * 2 }, 10)
+
+// ---- user extractors --------------------------------------------------------
+
+def halves(v) = if (isInt(v) && v % 2 == 0) then [v / 2, v / 2] else null
+check("extractor match", select (10) { case halves(a, b): a + b case _: "no" }, 10)
+check("extractor no-match", select (3) { case halves(a, b): a + b case _: "no" }, "no")
+
+def positive(v) = isNumber(v) && v > 0
+check("zero-arg extractor is a predicate", select (5) { case positive(): "pos" case _: "no" }, "pos")
+check("zero-arg extractor rejects", select (-5) { case positive(): "pos" case _: "no" }, "no")
+
+def firstRest(v) = if (isArray(v) && size(v) > 0) then [first(v), drop(v, 1)] else null
+check("extractor with nested patterns", select ([1, 2, 3]) {
+  case firstRest(h, [a, b]): h * 100 + a * 10 + b
+  case _: "no"
+}, 123)
+
+// A local function works as an extractor too.
+def localExtract() {
+  def wrap(v) = [v, v * 2]
+  select (7) { case wrap(a, b): a + b }
+}
+check("local extractor", localExtract(), 21)
+
+// ---- dotted extractors --------------------------------------------------------
+
+// The callee may be a member chain, read exactly as an expression reads it, so an
+// object holding its extractors works as a small namespace of patterns.
+val Shape = {
+  "circle": v -> if (isObject(v) && v?.kind == "circle") then [v.r] else null,
+  "rect":   v -> if (isObject(v) && v?.kind == "rect") then [v.w, v.h] else null,
+  "any":    v -> isObject(v) && has(v, "kind")
+}
+def shapeArea(s) = select (s) {
+  case Shape.circle(r): r * r
+  case Shape.rect(w, h): w * h
+  case _: "no"
+}
+check("dotted extractor", shapeArea({"kind": "circle", "r": 2}), 4)
+check("dotted extractor two values", shapeArea({"kind": "rect", "w": 3, "h": 4}), 12)
+check("dotted extractor no-match", shapeArea(5), "no")
+check("dotted zero-arg extractor is a predicate",
+  select ({"kind": "x"}) { case Shape.any(): "tagged" case _: "no" }, "tagged")
+
+val lib = {"Shape": Shape}
+check("two-hop dotted extractor",
+  select ({"kind": "circle", "r": 1}) { case lib.Shape.circle(r): r case _: "no" }, 1)
+
+// A lone dot inside an element list is callee text, not a rest marker.
+check("dotted extractor as array element",
+  select ([{"kind": "circle", "r": 5}]) { case [Shape.circle(r)]: r case _: "no" }, 5)
+check("two dotted extractors in one array",
+  select ([{"kind": "circle", "r": 1}, {"kind": "rect", "w": 2, "h": 3}]) {
+    case [Shape.circle(r), Shape.rect(w, h)]: r + w * h
+    case _: "no"
+  }, 7)
+check("dotted extractor beside a rest",
+  select ([{"kind": "circle", "r": 9}, 1, 2]) {
+    case [Shape.circle(r), ...more]: r + size(more)
+    case _: "no"
+  }, 11)
+
+check("dotted extractor with guard",
+  select ({"kind": "circle", "r": 3}) {
+    case Shape.circle(r) if r > 2: "big"
+    case Shape.circle(_): "small"
+    case _: "no"
+  }, "big")
+
+val Shape.circle(dottedR) = {"kind": "circle", "r": 7}
+check("dotted extractor in val destructuring", dottedR, 7)
+
+var dottedSum = 0
+for (Shape.circle(r) in [{"kind": "circle", "r": 1}, {"kind": "rect", "w": 1, "h": 1}, {"kind": "circle", "r": 2}]) {
+  dottedSum += r
+}
+check("dotted extractor filters a loop", dottedSum, 3)
+
+// ---- select semantics preserved ---------------------------------------------
+
+check("no match without default is null", select (99) { case 1: "one" }, null)
+check("select still yields a value", 1 + select (2) { case 2: 10 default: 0 }, 11)
+
+var effects = 0
+def bump() { effects += 1; effects }
+select (bump()) { case 1: "a" case n: "b" }
+check("subject evaluates exactly once", effects, 1)
+
+// ---- val destructuring ------------------------------------------------------
+
+val [va, vb] = [1, 2]
+check("val array destructure", va + vb, 3)
+
+val [vh, ...vt] = [1, 2, 3, 4]
+check("val rest destructure", [vh, vt], [1, [2, 3, 4]])
+
+val (t1, t2) = (10, 20)
+check("val tuple destructure", t1 + t2, 30)
+
+val {"x": px, "y": py} = {"x": 3, "y": 4}
+check("val object destructure", px * py, 12)
+
+val {name, age} = {"name": "z", "age": 9}
+check("val shorthand destructure", name + age, "z9")
+
+val [[na, nb], [nc, nd]] = [[1, 2], [3, 4]]
+check("nested val destructure", na + nb + nc + nd, 10)
+
+val all @ [ba, _] = [7, 8]
+check("val binder destructure", [all, ba], [[7, 8], 7])
+
+var [ma, mb] = [1, 2]
+ma = 100
+check("var destructure is mutable", ma + mb, 102)
+
+checkFails("val destructure mismatch raises", () -> { val [a, b] = [1]; a }, "pattern does not match")
+checkFails("val destructure names the pattern", () -> { val [a, b] = [1]; a }, "[a, b]")
+checkFails("val destructure on wrong type", () -> { val (a, b) = [1, 2]; a }, "pattern does not match")
+
+// ---- for patterns -----------------------------------------------------------
+
+val pairs = [[1, "a"], [2, "b"], [3, "c"]]
+var collected = ""
+for ([n, s] in pairs) { collected += s + n }
+check("for array pattern", collected, "a1b2c3")
+
+var tsum = 0
+for ((a, b) in [(1, 2), (3, 4)]) { tsum += a * b }
+check("for tuple pattern", tsum, 14)
+
+// Scala semantics: elements the pattern does not match are skipped.
+var evens = []
+def even2(v) = if (isInt(v) && v % 2 == 0) then [v] else null
+for (even2(e) in [1, 2, 3, 4, 5, 6]) { push(evens, e) }
+check("for filters non-matching", evens, [2, 4, 6])
+
+var kvs = ""
+for ({key} in [{"key": "a"}, {"nokey": 1}, {"key": "b"}]) { kvs += key }
+check("for object pattern filters", kvs, "ab")
+
+// Closures in a pattern-loop body still capture per iteration.
+def loopClosures() {
+  val out = []
+  for ([x, y] in [[1, 2], [3, 4]]) { push(out, () -> x * 10 + y) }
+  [out[0](), out[1]()]
+}
+check("per-iteration capture with patterns", loopClosures(), [12, 34])
+
+// ---- interactions -----------------------------------------------------------
+
+// Patterns inside a lambda inside a case body.
+val classify = (v) -> select (v) {
+  case [kind, payload] if kind == "wrap": (x) -> select (x) {
+    case int(n): n + payload
+    case _: payload
+  }
+  case _: null
+}
+check("nested selects with patterns", classify(["wrap", 100])(5), 105)
+
+// Tail calls from case bodies still run in constant stack.
+def countdown(v) = select (v) {
+  case 0: "done"
+  case n: countdown(n - 1)
+}
+check("tail call in a case body", countdown(50000), "done")
+
+// A pattern variable scopes to its case, like any block-local.
+def shadowTest() {
+  val shadow = "outer"
+  val inside = select (1) { case shadow: "in:" + shadow }
+  [inside, shadow]
+}
+check("case binding shadows and unwinds", shadowTest(), ["in:1", "outer"])
+
+report("patterns")

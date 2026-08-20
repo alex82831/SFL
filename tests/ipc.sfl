@@ -1,0 +1,404 @@
+// Inter-process communication: subprocess pipes, TCP sockets, file streams,
+// named pipes and signals.
+//
+// Every test either drives both ends itself or waits for a definite result, so nothing
+// here depends on a sleep to pass.
+
+import "lib/assert"
+
+// "darwin" contains "win", so this asks whether the name *starts* with it.
+val onUnix = !startsWith(toLower(osName()), "windows")
+
+// --------------------------------------------------- subprocesses over pipes
+
+// Write, close the input so the child sees end of stream, then read what came back.
+val upper = processStart(["tr", "a-z", "A-Z"])
+processWriteLine(upper, "hello pipes")
+processWriteLine(upper, "second line")
+processCloseInput(upper)
+check("a child transforms what we send it", processReadLine(upper), "HELLO PIPES")
+check("and keeps going", processReadLine(upper), "SECOND LINE")
+check("the stream ends with null", processReadLine(upper), null)
+check("the child exits cleanly", processWait(upper), 0)
+check("and is no longer alive", processAlive(upper), false)
+
+// A long-lived child, driven one message at a time.
+val echo = processStart(["cat"])
+var replies = []
+for (i in range(3)) {
+  processWriteLine(echo, "msg-" + i)
+  push(replies, processReadLine(echo))
+}
+processCloseInput(echo)
+processWait(echo)
+check("a conversation with a live child", replies, ["msg-0", "msg-1", "msg-2"])
+
+// Shell form, output read in one go.
+val counted = processStart("printf 'a\\nb\\nc\\n'")
+processCloseInput(counted)
+check("processReadAll collects everything", lines(trim(processReadAll(counted))), ["a", "b", "c"])
+check("shell commands report their exit code", processWait(counted), 0)
+
+val failing = processStart("exit 7")
+processCloseInput(failing)
+check("a non-zero exit is visible", processWait(failing), 7)
+
+// The error stream is separate from the output stream.
+val noisy = processStart("echo out; echo err 1>&2")
+processCloseInput(noisy)
+check("standard output", trim(processReadLine(noisy)), "out")
+check("standard error", trim(processReadErrLine(noisy)), "err")
+processWait(noisy)
+
+// argv form: no shell involved, so the argument keeps its spaces.
+val spaced = processStart(["echo", "one two"])
+processCloseInput(spaced)
+check("argv form does not word-split", trim(processReadLine(spaced)), "one two")
+processWait(spaced)
+
+// Killing a child that would otherwise run for ages.
+val sleeper = processStart("sleep 30")
+check("the child starts alive", processAlive(sleeper), true)
+check("waiting with a timeout gives null", processWait(sleeper, 50), null)
+processKill(sleeper, true)
+checkTrue("a killed child reports a signal exit", processWait(sleeper, 3000) != 0)
+check("and stops being alive", processAlive(sleeper), false)
+
+checkFails("an unknown handle is rejected", () -> processReadLine("not a process"), "must be a process")
+
+// ---------------------------------------------------------------- TCP sockets
+
+// Port 0 asks the system for a free port, so the test cannot collide with anything.
+val srv = serverSocket(0)
+val port = serverPort(srv)
+checkTrue("the server picked a real port", port > 0)
+
+val server = spawn(() -> {
+  val conn = accept(srv, 5000)
+  if (isNull(conn)) then "no client" else {
+    val greeting = socketReadLine(conn, 5000)
+    socketWriteLine(conn, "echo:" + greeting)
+    val second = socketReadLine(conn, 5000)
+    socketWriteLine(conn, "echo:" + second)
+    closeSocket(conn)
+    "served"
+  }
+})
+
+val client = connect("127.0.0.1", port)
+checkTrue("the peer address is reported", contains(socketPeer(client), toString(port)))
+socketWriteLine(client, "ping")
+check("the server answered", socketReadLine(client, 5000), "echo:ping")
+socketWriteLine(client, "again")
+check("the connection stays open", socketReadLine(client, 5000), "echo:again")
+closeSocket(client)
+check("the server thread finished", await(server), "served")
+closeServer(srv)
+
+// accept() returns null rather than hanging when nobody connects.
+val idle = serverSocket(0)
+check("accept times out to null", accept(idle, 100), null)
+closeServer(idle)
+
+checkFails("connecting to a closed port fails", () -> connect("127.0.0.1", 1), "connect")
+
+// A tiny request/response server, exercised concurrently by several clients.
+val calcSrv = serverSocket(0)
+val calcPort = serverPort(calcSrv)
+val calc = spawn(() -> {
+  var served = 0
+  while (served < 4) {
+    val c = accept(calcSrv, 5000)
+    if (!isNull(c)) {
+      val line = socketReadLine(c, 5000)
+      socketWriteLine(c, toString(toInt(line) * 10))
+      closeSocket(c)
+      served += 1
+    } else {
+      served = 4
+    }
+  }
+  served
+})
+val answers = parallelMap(range(1, 5), (n) -> {
+  val c = connect("127.0.0.1", calcPort)
+  socketWriteLine(c, toString(n))
+  val reply = socketReadLine(c, 5000)
+  closeSocket(c)
+  toInt(reply)
+}, 4)
+check("four clients each got their answer", sort(answers), [10, 20, 30, 40])
+check("the server handled them all", await(calc), 4)
+closeServer(calcSrv)
+
+// ---------------------------------------------------------- file streams
+
+val path = tempFile(".sfl-ipc")
+val w = openFile(path, "w")
+fileWriteLine(w, "first")
+fileWrite(w, "second")
+fileWriteLine(w, " part")
+fileClose(w)
+
+val r = openFile(path)
+check("lines come back in order", fileReadLine(r), "first")
+check("unterminated writes join the same line", fileReadLine(r), "second part")
+check("end of file reads as null", fileReadLine(r), null)
+fileClose(r)
+
+val ap = openFile(path, "a")
+fileWriteLine(ap, "appended")
+fileClose(ap)
+check("append keeps what was there and adds to the end",
+  filter(readLines(path), (l) -> l != ""), ["first", "second part", "appended"])
+
+// Opening for writing truncates, which is what distinguishes it from append.
+val tr = openFile(path, "w")
+fileWriteLine(tr, "only line")
+fileClose(tr)
+check("write mode truncates", filter(readLines(path), (l) -> l != ""), ["only line"])
+
+checkFails("writing to a read handle is refused", () -> {
+  val h = openFile(path)
+  try(() -> fileWriteLine(h, "x"), (e) -> { fileClose(h); error(e) })
+}, "open for reading")
+checkFails("an unknown mode is rejected", () -> openFile(path, "z"), "unknown mode")
+removeFile(path)
+
+// ------------------------------------------------------------- named pipes
+
+if (onUnix) {
+  val fifo = joinPath(dirName(tempFile(".probe")), "sfl-test-fifo-" + toString(pid()))
+  removeFile(fifo)
+  mkfifo(fifo)
+  check("the fifo exists", exists(fifo), true)
+
+  // Opening a FIFO for reading blocks until a writer arrives, so the two ends must run
+  // on different threads.
+  val reader = spawn(() -> {
+    val fr = openFile(fifo)
+    val got = [fileReadLine(fr), fileReadLine(fr)]
+    fileClose(fr)
+    got
+  })
+  val fw = openFile(fifo, "w")
+  fileWriteLine(fw, "through the pipe")
+  fileWriteLine(fw, "and again")
+  fileClose(fw)
+  check("the fifo carried both lines", await(reader), ["through the pipe", "and again"])
+  removeFile(fifo)
+  check("the fifo is gone", exists(fifo), false)
+} else {
+  checkTrue("named pipes: skipped off Unix", true)
+}
+
+// -------------------------------------------------------- process identity
+
+checkTrue("pid() is a real process id", pid() > 0)
+check("signal numbers", [SIGINT(), SIGKILL(), SIGTERM(), SIGHUP()], [2, 9, 15, 1])
+checkTrue("the user signals differ", SIGUSR1() != SIGUSR2())
+
+if (onUnix) {
+  // Signal a child we started ourselves, then confirm it died.
+  val victim = processStart("sleep 30")
+  processKill(victim)
+  checkTrue("SIGTERM ends the child", processWait(victim, 3000) != 0)
+  checkFails("signalling a process that is not there fails",
+    () -> signalProcess(2147483, SIGTERM()), "could not signal")
+} else {
+  checkTrue("signals: skipped off Unix", true)
+}
+
+// ------------------------------------------- threads and IPC used together
+
+// Fan work out to subprocesses in parallel and collect the results through a channel.
+val out = channel()
+val fanned = map(["1 + 1", "6 * 7", "100 - 1"], (expr) -> spawn(() -> {
+  val p = processStart("echo $((" + expr + "))")
+  processCloseInput(p)
+  val answer = trim(processReadAll(p))
+  processWait(p)
+  send(out, toInt(answer))
+}))
+awaitAll(fanned)
+closeChannel(out)
+check("results gathered from three child processes", sort(channelToArray(out)), [2, 42, 99])
+
+// ------------------------------------------------- byte buffers over sockets
+
+// Lines first, bytes after: socketReadToBuf must hand over what the line reader
+// buffered — including the '\n' still owed by a line that ended at '\r' — and
+// byte counts are bytes, not code points.
+val byteSrv = serverSocket(0)
+val byteConn = spawn(() -> {
+  val c = accept(byteSrv, 10000)
+  // One write: headers CRLF-framed, then a body with multi-byte characters.
+  socketWrite(c, "первый\r\nBODY-中文-BYTES")
+  closeSocket(c)
+  closeServer(byteSrv)
+  true
+})
+val byteC = connect("127.0.0.1", serverPort(byteSrv))
+check("the line before the bytes", socketReadLine(byteC), "первый")
+val byteBuf = bufNew()
+check("a fresh buffer is empty", bufSize(byteBuf), 0)
+var byteGot = 0
+while (true) {
+  val n = socketReadToBuf(byteC, byteBuf, 4096)
+  if (n == 0) { break }
+  byteGot += n
+}
+check("the body arrives byte-complete", bufString(byteBuf), "BODY-中文-BYTES")
+check("and its size counts bytes", bufSize(byteBuf), utf8Length("BODY-中文-BYTES"))
+check("which the loop counted too", byteGot, utf8Length("BODY-中文-BYTES"))
+bufClear(byteBuf)
+check("bufClear empties the buffer", bufSize(byteBuf), 0)
+check("an empty buffer decodes to the empty string", bufString(byteBuf), "")
+closeSocket(byteC)
+await(byteConn)
+checkFails("byte reads on a closed socket raise",
+  () -> socketReadToBuf(byteC, byteBuf, 4096), "Socket closed")
+
+// socketWriteBuf pumps raw bytes: read into a buffer from one connection and
+// write them to another without a decode in between.
+val pumpASrv = serverSocket(0)
+val pumpAT = spawn(() -> {
+  val c = accept(pumpASrv, 10000)
+  socketWrite(c, "pump-载荷")
+  closeSocket(c)
+  closeServer(pumpASrv)
+  true
+})
+val pumpBSrv = serverSocket(0)
+val pumpBT = spawn(() -> {
+  val c = accept(pumpBSrv, 10000)
+  val b = bufNew()
+  while (socketReadToBuf(c, b, 4096) != 0) { null }
+  closeSocket(c)
+  closeServer(pumpBSrv)
+  bufString(b)
+})
+val pumpIn = connect("127.0.0.1", serverPort(pumpASrv))
+val pumpOut = connect("127.0.0.1", serverPort(pumpBSrv))
+val pumpBuf = bufNew()
+while (socketReadToBuf(pumpIn, pumpBuf, 4096) != 0) { null }
+socketWriteBuf(pumpOut, pumpBuf)
+closeSocket(pumpIn)
+closeSocket(pumpOut)
+await(pumpAT)
+check("bytes pumped through untouched", await(pumpBT), "pump-载荷")
+
+// ------------------------------------------------- byte arrays over sockets
+
+// socketReadBytes/socketWriteBytes carry arrays of ints 0..255, the currency
+// wire protocols are built from. They interleave with line reads exactly as
+// the buffer reads above do, and a '\n' among the bytes stays a byte.
+val rawSrv = serverSocket(0)
+val rawT = spawn(() -> {
+  val c = accept(rawSrv, 10000)
+  socketWriteLine(c, "greeting")
+  socketWriteBytes(c, [0, 1, 128, 255, 10, 13, 10, 7])
+  val got = socketReadBytes(c, 4, 10000)
+  socketWriteBytes(c, got)
+  closeSocket(c)
+  closeServer(rawSrv)
+  true
+})
+val rawC = connect("127.0.0.1", serverPort(rawSrv))
+check("the line before the raw bytes", socketReadLine(rawC), "greeting")
+var rawAcc = []
+while (length(rawAcc) < 8) {
+  val chunk = socketReadBytes(rawC, 8 - length(rawAcc), 10000)
+  if (chunk == null || length(chunk) == 0) then break
+  rawAcc = concat(rawAcc, chunk)
+}
+check("raw bytes arrive exactly, newlines included", rawAcc, [0, 1, 128, 255, 10, 13, 10, 7])
+socketWriteBytes(rawC, [222, 173, 190, 239])
+var rawEcho = []
+while (length(rawEcho) < 4) {
+  val chunk = socketReadBytes(rawC, 4 - length(rawEcho), 10000)
+  if (chunk == null || length(chunk) == 0) then break
+  rawEcho = concat(rawEcho, chunk)
+}
+check("and echo back exactly", rawEcho, [222, 173, 190, 239])
+check("end of stream reads as []", socketReadBytes(rawC, 4, 10000), [])
+checkFails("socketWriteBytes checks its bytes",
+  () -> socketWriteBytes(rawC, [1, 999]), "has 999 at index 1, expected 0..255")
+checkFails("socketReadBytes wants a positive count",
+  () -> socketReadBytes(rawC, 0), "maxBytes must be positive")
+closeSocket(rawC)
+await(rawT)
+checkFails("byte writes on a closed socket raise",
+  () -> socketWriteBytes(rawC, [1]), "Socket closed")
+
+// The timeout is null here too, and a byte read drains what a timed-out line
+// read was forced to hold.
+val slowSrv = serverSocket(0)
+val slowT = spawn(() -> {
+  val c = accept(slowSrv, 10000)
+  socketWrite(c, "partial")   // no newline: a line read must time out and hold it
+  sleep(250)
+  closeSocket(c)
+  closeServer(slowSrv)
+  true
+})
+val slowC = connect("127.0.0.1", serverPort(slowSrv))
+check("a line read without a newline times out", socketReadLine(slowC, 100), null)
+check("the byte read hands the held bytes over", socketReadBytes(slowC, 64, 2000),
+  utf8Encode("partial"))
+check("then times out to null", socketReadBytes(slowC, 64, 60), null)
+closeSocket(slowC)
+await(slowT)
+
+// ------------------------------------------------------------------ UDP sockets
+
+// A bound socket reports its port; datagrams round-trip with the sender's address.
+val udpA = udpSocket()
+val udpB = udpSocket()
+checkTrue("an ephemeral UDP port is picked", udpPort(udpA) > 0)
+check("udp handles have their own type", typeOf(udpA), "udp")
+udpSend(udpA, "127.0.0.1", udpPort(udpB), "ping-报文")
+val gotB = udpReceive(udpB, 5000)
+check("the datagram arrives whole", gotB.data, "ping-报文")
+check("with the sender's address", gotB.host, "127.0.0.1")
+check("and the sender's port", gotB.port, udpPort(udpA))
+
+// Replies go back to what receive reported — the request/response shape.
+udpSend(udpB, gotB.host, gotB.port, "pong")
+check("a reply reaches the first socket", udpReceive(udpA, 5000).data, "pong")
+
+// A timeout is null, exactly like the stream reads.
+check("udpReceive times out to null", udpReceive(udpA, 60), null)
+
+// poll() multiplexes UDP readiness alongside everything else.
+check("poll sees no ready datagrams", length(poll([udpA, udpB], 60)), 0)
+udpSend(udpA, "127.0.0.1", udpPort(udpB), "wake")
+val readyUdp = poll([udpA, udpB], 5000)
+check("poll wakes for the socket with a datagram", readyUdp, [udpB])
+check("which then reads it", udpReceive(udpB, 5000).data, "wake")
+
+// Datagram sends and receives from spawned threads: the async story is threads.
+val udpEcho = udpSocket()
+val udpEchoT = spawn(() -> {
+  val m = udpReceive(udpEcho, 10000)
+  udpSend(udpEcho, m.host, m.port, "echo:${m.data}")
+  true
+})
+udpSend(udpA, "127.0.0.1", udpPort(udpEcho), "threaded")
+check("a threaded UDP echo answers", udpReceive(udpA, 10000).data, "echo:threaded")
+await(udpEchoT)
+
+// Errors keep the socket wordings. (Resolution failures are not asserted here:
+// a wildcard DNS on the local network can resolve anything, and macOS treats an
+// empty name as the loopback.)
+checkFails("udp builtins check their handle",
+  () -> udpSend(byteBuf, "127.0.0.1", 9, "x"), "udpSend: argument 1 must be a udp, got buffer")
+checkFails("ports are checked", () -> udpSend(udpA, "127.0.0.1", 65536, "x"), "port out of range")
+closeUdp(udpEcho)
+closeUdp(udpB)
+closeUdp(udpA)
+closeUdp(udpA) // close() twice is a no-op
+checkFails("use after close raises", () -> udpReceive(udpA, 10), "Socket closed")
+checkFails("poll refuses a closed udp socket", () -> poll([udpA], 10), "Socket closed")
+
+report("ipc")

@@ -1,0 +1,387 @@
+// The HTTP client (stdlib/http.sfl) against servers this file runs itself: every
+// test drives both ends, so nothing depends on the network or on a clock race.
+// The TLS block at the end needs the `openssl` command and is skipped without it.
+
+import "lib/assert"
+
+// The suite owns the proxy environment: real machines carry HTTP(S)_PROXY and
+// NO_PROXY, and every request here must stay local and explicit. Empty means
+// unset to the client (and to curl, whose rules it follows).
+for (v in ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY",
+           "all_proxy", "ALL_PROXY", "no_proxy", "NO_PROXY"]) {
+  setEnv(v, "")
+}
+
+// ---------------------------------------------------------------- a tiny server
+
+// One full request off a connection: [requestLine, headersByLowerName, body].
+def readRequest(c) {
+  val reqLine = socketReadLine(c)
+  val hdrs = {}
+  while (true) {
+    val line = socketReadLine(c)
+    if (line == null || line == "") { break }
+    val ci = indexOf(line, ":")
+    if (ci > 0) {
+      hdrs[toLower(trim(substring(line, 0, ci)))] = trim(substring(line, ci + 1))
+    }
+  }
+  var body = ""
+  val cl = get(hdrs, "content-length", null)
+  if (cl != null && parseInt(cl) > 0) {
+    val b = bufNew()
+    var left = parseInt(cl)
+    while (left > 0) {
+      val got = socketReadToBuf(c, b, left)
+      if (got == null || got == 0) { break }
+      left = left - got
+    }
+    body = bufString(b)
+  }
+  [reqLine, hdrs, body]
+}
+
+def sendResponse(c, status, headers, body) {
+  socketWrite(c, "HTTP/1.1 ${status}\r\n")
+  for (h in headers) { socketWrite(c, "${h}\r\n") }
+  socketWrite(c, "\r\n")
+  if (body != "") { socketWrite(c, body) }
+}
+
+// Serves exactly one connection; the spawned thread's result is what it saw,
+// so the main thread asserts on it after await — no cross-thread counters. The
+// accept has a deadline so a failing client cannot leave the suite hanging.
+def serve1(respond) {
+  val srv = serverSocket(0)
+  val port = serverPort(srv)
+  val t = spawn(() -> {
+    val c = accept(srv, 10000)
+    if (c == null) {
+      closeServer(srv)
+      null
+    } else {
+      val req = readRequest(c)
+      val r = respond(req)
+      sendResponse(c, r[0], r[1], r[2])
+      closeSocket(c)
+      closeServer(srv)
+      req
+    }
+  })
+  [port, t]
+}
+
+// accept with the same no-hang deadline, for the hand-driven servers below.
+def accept1(srv) {
+  val c = accept(srv, 10000)
+  if (c == null) { error("test server: nobody connected") }
+  c
+}
+
+// ------------------------------------------------------------------ plain requests
+
+// The request on the wire: method, path, and the headers the contract promises.
+val [p1, t1] = serve1(req -> ["200 OK", ["Content-Length: 5"], "hello"])
+check("httpGet returns the body", httpGet("http://127.0.0.1:${p1}/hello?q=1"), "hello")
+val seen1 = await(t1)
+check("the request line carries the path and query", seen1[0], "GET /hello?q=1 HTTP/1.1")
+check("Host names the origin", get(seen1[1], "host", null), "127.0.0.1:${p1}")
+check("every request says Connection: close", get(seen1[1], "connection", null), "close")
+check("Accept is curl's */*", get(seen1[1], "accept", null), "*/*")
+check("a GET carries no Content-Length", has(seen1[1], "content-length"), false)
+
+// Caller headers replace computed ones case-insensitively and add new ones.
+val [p2, t2] = serve1(req -> ["200 OK", ["Content-Length: 2"], "ok"])
+httpGet("http://127.0.0.1:${p2}/", {"HOST": "override.example", "X-Token": "t-1"})
+val seen2 = await(t2)
+check("a caller Host wins over the computed one", get(seen2[1], "host", null), "override.example")
+check("caller headers are sent", get(seen2[1], "x-token", null), "t-1")
+
+// httpPost: default content type, byte-counted Content-Length, body delivered.
+val [p3, t3] = serve1(req -> ["200 OK", ["Content-Length: ${utf8Length(req[2])}"], req[2]])
+check("httpPost echoes through", httpPost("http://127.0.0.1:${p3}/", "你好, post"), "你好, post")
+val seen3 = await(t3)
+check("the default content type is curl-era text/plain",
+      get(seen3[1], "content-type", null), "text/plain; charset=utf-8")
+check("Content-Length counts bytes, not code points",
+      get(seen3[1], "content-length", null), "${utf8Length("你好, post")}")
+
+val [p4, t4] = serve1(req -> ["200 OK", ["Content-Length: 0"], ""])
+httpPost("http://127.0.0.1:${p4}/", "{}", "application/json")
+check("an explicit content type is sent", get(await(t4)[1], "content-type", null), "application/json")
+
+// httpRequest hands back {status, body} and never raises on a failing status.
+val [p5, t5] = serve1(req -> ["404 Not Found", ["Content-Length: 4"], "gone"])
+check("httpRequest reports status and body",
+      httpRequest("delete", "http://127.0.0.1:${p5}/x"), {"status": 404, "body": "gone"})
+check("the method arrives uppercased", startsWith(await(t5)[0], "DELETE /x "), true)
+
+// HEAD and 204 have no body to read, Content-Length notwithstanding.
+val [p6, t6] = serve1(req -> ["200 OK", ["Content-Length: 5"], ""])
+check("HEAD reads no body", httpRequest("HEAD", "http://127.0.0.1:${p6}/"), {"status": 200, "body": ""})
+await(t6)
+val [p7, t7] = serve1(req -> ["204 No Content", [], ""])
+check("204 has no body", httpRequest("GET", "http://127.0.0.1:${p7}/"), {"status": 204, "body": ""})
+await(t7)
+
+// ---------------------------------------------------------------------- framings
+
+// Chunked, with a size extension and a trailer; CJK content keeps the
+// single-decode path honest across chunk boundaries.
+val chunkSrv = serverSocket(0)
+val chunkPort = serverPort(chunkSrv)
+val chunkT = spawn(() -> {
+  val c = accept1(chunkSrv)
+  readRequest(c)
+  socketWrite(c, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+  socketWrite(c, "8;note=1\r\nchunked-\r\n")
+  socketWrite(c, "6\r\n中文\r\n")
+  socketWrite(c, "3\r\n-ok\r\n")
+  socketWrite(c, "0\r\nX-Trailer: t\r\n\r\n")
+  closeSocket(c)
+  closeServer(chunkSrv)
+  true
+})
+check("chunked bodies reassemble", httpGet("http://127.0.0.1:${chunkPort}/"), "chunked-中文-ok")
+await(chunkT)
+
+// No framing at all: the body is everything until the peer closes.
+val eofSrv = serverSocket(0)
+val eofPort = serverPort(eofSrv)
+val eofT = spawn(() -> {
+  val c = accept1(eofSrv)
+  readRequest(c)
+  socketWrite(c, "HTTP/1.1 200 OK\r\n\r\nuntil-close")
+  closeSocket(c)
+  closeServer(eofSrv)
+  true
+})
+check("an unframed body runs to end of stream", httpGet("http://127.0.0.1:${eofPort}/"), "until-close")
+await(eofT)
+
+// A 100 Continue interim response is read past, like curl reads past it.
+val contSrv = serverSocket(0)
+val contPort = serverPort(contSrv)
+val contT = spawn(() -> {
+  val c = accept1(contSrv)
+  readRequest(c)
+  socketWrite(c, "HTTP/1.1 100 Continue\r\n\r\n")
+  socketWrite(c, "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nreal")
+  closeSocket(c)
+  closeServer(contSrv)
+  true
+})
+check("interim 1xx responses are skipped", httpGet("http://127.0.0.1:${contPort}/"), "real")
+await(contT)
+
+// --------------------------------------------------------------------- redirects
+
+// A POST through 302 becomes a GET without body; credentials in the URL become
+// Basic auth and are dropped when the redirect changes origin (here: the port).
+val hop2Srv = serverSocket(0)
+val hop2Port = serverPort(hop2Srv)
+val hop2T = spawn(() -> {
+  val c = accept1(hop2Srv)
+  val req = readRequest(c)
+  sendResponse(c, "200 OK", ["Content-Length: 7"], "arrived")
+  closeSocket(c)
+  closeServer(hop2Srv)
+  req
+})
+val hop1Srv = serverSocket(0)
+val hop1Port = serverPort(hop1Srv)
+val hop1T = spawn(() -> {
+  val c = accept1(hop1Srv)
+  val req = readRequest(c)
+  sendResponse(c, "302 Found", ["Location: http://127.0.0.1:${hop2Port}/land"], "")
+  closeSocket(c)
+  closeServer(hop1Srv)
+  req
+})
+check("a redirect chain lands", httpPost("http://user:pass@127.0.0.1:${hop1Port}/start", "data"), "arrived")
+val hop1Seen = await(hop1T)
+val hop2Seen = await(hop2T)
+check("the first hop was the POST", startsWith(hop1Seen[0], "POST /start "), true)
+check("URL credentials become Basic auth", get(hop1Seen[1], "authorization", null),
+      "Basic ${base64Encode("user:pass")}")
+check("302 turns the POST into a GET", startsWith(hop2Seen[0], "GET /land "), true)
+check("the rewritten GET carries no body", has(hop2Seen[1], "content-length"), false)
+check("credentials do not cross origins", has(hop2Seen[1], "authorization"), false)
+
+// A relative Location resolves against the directory of the current path.
+val relSrv = serverSocket(0)
+val relPort = serverPort(relSrv)
+val relT = spawn(() -> {
+  val c = accept1(relSrv)
+  readRequest(c)
+  sendResponse(c, "302 Found", ["Location: next"], "")
+  closeSocket(c)
+  val c2 = accept1(relSrv)
+  val req2 = readRequest(c2)
+  sendResponse(c2, "200 OK", ["Content-Length: 3"], "rel")
+  closeSocket(c2)
+  closeServer(relSrv)
+  req2
+})
+check("a relative Location resolves", httpGet("http://127.0.0.1:${relPort}/dir/page"), "rel")
+check("against the path's directory", startsWith(await(relT)[0], "GET /dir/next "), true)
+
+// The 33rd redirect is one too many; the server counts what it served.
+val loopSrv = serverSocket(0)
+val loopPort = serverPort(loopSrv)
+val loopT = spawn(() -> {
+  var served = 0
+  while (true) {
+    val c = accept(loopSrv, 2000)
+    if (c == null) { break }
+    readRequest(c)
+    sendResponse(c, "302 Found", ["Location: /again"], "")
+    closeSocket(c)
+    served += 1
+  }
+  closeServer(loopSrv)
+  served
+})
+checkFails("an endless redirect is cut off",
+  () -> httpGet("http://127.0.0.1:${loopPort}/"), "maximum (32) redirects followed")
+check("after exactly 33 requests", await(loopT), 33)
+
+// ----------------------------------------------------------------------- proxies
+
+// An explicit proxy sees the absolute-URI form and the target Host; the origin
+// here never resolves, so only the proxy can have answered.
+val proxSrv = serverSocket(0)
+val proxPort = serverPort(proxSrv)
+val proxT = spawn(() -> {
+  val c = accept1(proxSrv)
+  val req = readRequest(c)
+  sendResponse(c, "200 OK", ["Content-Length: 9"], "via-proxy")
+  closeSocket(c)
+  closeServer(proxSrv)
+  req
+})
+check("httpGetProxy goes through the proxy",
+      httpGetProxy("http://origin.invalid/thing", "127.0.0.1:${proxPort}"), "via-proxy")
+val proxSeen = await(proxT)
+check("a proxied request is absolute-form", proxSeen[0], "GET http://origin.invalid:80/thing HTTP/1.1")
+check("Host still names the origin", get(proxSeen[1], "host", null), "origin.invalid")
+
+// Proxy credentials ride Proxy-Authorization; the environment variables steer
+// requests the same way, and no_proxy exempts a host from them. The origin is a
+// real local server, so the exemption is proven by who answers.
+val originSrv = serverSocket(0)
+val originPort = serverPort(originSrv)
+val originT = spawn(() -> {
+  val c = accept1(originSrv)
+  readRequest(c)
+  sendResponse(c, "200 OK", ["Content-Length: 6"], "direct")
+  closeSocket(c)
+  closeServer(originSrv)
+  true
+})
+val prox2Srv = serverSocket(0)
+val prox2Port = serverPort(prox2Srv)
+val prox2T = spawn(() -> {
+  val c = accept1(prox2Srv)
+  val req = readRequest(c)
+  sendResponse(c, "200 OK", ["Content-Length: 4"], "env!")
+  closeSocket(c)
+  closeServer(prox2Srv)
+  req
+})
+setEnv("http_proxy", "http://pu:pw@127.0.0.1:${prox2Port}")
+check("http_proxy is honoured", httpGet("http://127.0.0.1:${originPort}/"), "env!")
+check("with Proxy-Authorization from the proxy URL",
+      get(await(prox2T)[1], "proxy-authorization", null), "Basic ${base64Encode("pu:pw")}")
+setEnv("no_proxy", "127.0.0.1")
+check("no_proxy exempts the host, and the origin answers directly",
+      httpGet("http://127.0.0.1:${originPort}/"), "direct")
+await(originT)
+setEnv("http_proxy", "")
+setEnv("no_proxy", "")
+
+// ------------------------------------------------------------------------ errors
+
+checkFails("a URL needs a scheme", () -> httpGet("nope"), "unsupported URL")
+checkFails("only http and https are spoken", () -> httpGet("ftp://x/"), "unsupported protocol 'ftp'")
+checkFails("httpGet checks the URL type", () -> httpGet(42), "httpGet: argument 1 must be a string")
+checkFails("httpGet checks the headers type", () -> httpGet("http://127.0.0.1/", 5),
+  "httpGet: argument 2 must be an object")
+checkFails("httpRequest checks the method type", () -> httpRequest(1, "http://x/"),
+  "httpRequest: argument 1 must be a string")
+val deadSrv = serverSocket(0)
+val deadPort = serverPort(deadSrv)
+closeServer(deadSrv)
+checkFails("a refused connection is a transport failure",
+  () -> httpGet("http://127.0.0.1:${deadPort}/"), "HTTP request failed:")
+
+// --------------------------------------------------------------------------- TLS
+
+// Needs the openssl command for a certificate and an https server; skipped
+// without it. SSL_CERT_FILE is set before the first tlsWrap anywhere, because
+// the shared verifying context reads the trust store exactly once.
+val hasOpenssl = execute("which openssl").code == 0
+if (!hasOpenssl) {
+  println("skip: the TLS tests need the openssl command")
+} else {
+  val key = tempFile(".key")
+  val cert = tempFile(".pem")
+  val gen = execute("openssl req -x509 -newkey rsa:2048 -keyout '${key}' -out '${cert}'" +
+    " -days 2 -nodes -subj '/CN=localhost'" +
+    " -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' 2>/dev/null")
+  if (gen.code != 0) {
+    println("skip: could not generate a test certificate")
+  } else {
+    setEnv("SSL_CERT_FILE", cert)
+    val portProbe = serverSocket(0)
+    val tlsPort = serverPort(portProbe)
+    closeServer(portProbe)
+    val server = processStart("openssl s_server -accept ${tlsPort} -key '${key}' -cert '${cert}' -www -quiet")
+    var ready = false
+    for (i in range(100)) {
+      if (!ready) {
+        val probe = try(() -> connect("127.0.0.1", tlsPort, 200), e -> null)
+        if (probe != null) {
+          closeSocket(probe)
+          ready = true
+        } else {
+          sleep(50)
+        }
+      }
+    }
+    checkTrue("the TLS test server came up", ready)
+    if (ready) {
+      // The whole client stack over TLS: s_server's -www page is unframed (HTTP/1.0,
+      // no Content-Length), so this also exercises the read-to-close path.
+      val page = httpGet("https://localhost:${tlsPort}/")
+      checkTrue("httpGet speaks https", contains(page, "s_server"))
+
+      // tlsWrap by hand, trusting the test certificate explicitly.
+      val c = connect("localhost", tlsPort, 5000)
+      tlsWrap(c, "localhost", cert, 5000)
+      socketWrite(c, "GET / HTTP/1.0\r\n\r\n")
+      checkTrue("a wrapped socket reads the status line",
+        contains(socketReadLine(c, 5000), "200"))
+      closeSocket(c)
+
+      // Verification is real: a trust store without this server rejects it.
+      val otherKey = tempFile(".key")
+      val otherCert = tempFile(".pem")
+      execute("openssl req -x509 -newkey rsa:2048 -keyout '${otherKey}' -out '${otherCert}'" +
+        " -days 2 -nodes -subj '/CN=other' 2>/dev/null")
+      val c2 = connect("localhost", tlsPort, 5000)
+      checkFails("the wrong trust store is refused",
+        () -> tlsWrap(c2, "localhost", otherCert, 5000), "certificate verify failed")
+      closeSocket(c2)
+      removeFile(otherKey)
+      removeFile(otherCert)
+
+      processKill(server, true)
+      processWait(server)
+    }
+    removeFile(key)
+    removeFile(cert)
+  }
+}
+
+report("http")

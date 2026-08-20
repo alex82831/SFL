@@ -1,0 +1,120 @@
+// Part of the SFL standard library: futures over threads — spawn with a result in
+// mind. async starts work, andThen chains it, race and withTimeout bound it, and
+// allSettled collects every outcome without letting one failure hide the rest.
+//
+// Every function here has a native twin in the interpreter (the "Futures" section
+// of BuiltinsThread.scala), and the two are run against the same suite, so which
+// argument is checked first and the wording of every error have to agree as well.
+// The twins lean on the same registered builtins this module calls — spawn, await,
+// awaitAny — which is what keeps that agreement structural rather than copied.
+//
+// `then` would be the natural name for andThen, but it is the keyword of
+// `if (c) then a else b`, so neither engine could ever parse it as a call.
+
+// ---------------------------------------------------------------- argument checks
+
+// The wording of Builtins.bad, including Err.show's shortening (see coll.sfl).
+def _bad(fn, pos, want, v) {
+  val text = jsonStringify(v)
+  val shown = if (length(text) <= 48) then text else "${substring(text, 0, 45)}..."
+  error("${fn}: argument ${pos} must be ${want}, got ${typeOf(v)} ${shown}")
+}
+
+def _fn(fn, pos, v) = if (isFunction(v)) then v else _bad(fn, pos, "a function", v)
+
+def _arr(fn, pos, v) = if (isArray(v)) then v else _bad(fn, pos, "an array", v)
+
+// handleOf's wording, which shows no value: a handle's repr says nothing useful.
+def _thread(fn, pos, v) {
+  if (typeOf(v) != "thread") {
+    error("${fn}: argument ${pos} must be a thread, got ${typeOf(v)}")
+  }
+  v
+}
+
+// "This argument was not passed": functions compare by identity, so no caller can
+// forge it, and the arity the module reports stays exact — the same trick coll.sfl
+// and fn.sfl use for their optional arguments.
+val _absent = () -> null
+
+// ------------------------------------------------------------------------ futures
+
+// spawn, under the name future-flavoured code reads naturally: the work starts
+// now, and the handle is the promise of its result. No spread call exists, so the
+// computed argument list becomes a jump table on its length — apply()'s idiom from
+// fn.sfl, but calling the real spawn so the new thread runs f itself.
+def async(f, ...args) {
+  _fn("async", 1, f)
+  select (length(args)) {
+    case 0: spawn(f)
+    case 1: spawn(f, args[0])
+    case 2: spawn(f, args[0], args[1])
+    case 3: spawn(f, args[0], args[1], args[2])
+    case 4: spawn(f, args[0], args[1], args[2], args[3])
+    case 5: spawn(f, args[0], args[1], args[2], args[3], args[4])
+    case 6: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5])
+    case 7: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+    case 8: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                  args[7])
+    case 9: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                  args[7], args[8])
+    case 10: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                   args[7], args[8], args[9])
+    case 11: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                   args[7], args[8], args[9], args[10])
+    case 12: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                   args[7], args[8], args[9], args[10], args[11])
+    case 13: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                   args[7], args[8], args[9], args[10], args[11], args[12])
+    case 14: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                   args[7], args[8], args[9], args[10], args[11], args[12], args[13])
+    case 15: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                   args[7], args[8], args[9], args[10], args[11], args[12], args[13],
+                   args[14])
+    case 16: spawn(f, args[0], args[1], args[2], args[3], args[4], args[5], args[6],
+                   args[7], args[8], args[9], args[10], args[11], args[12], args[13],
+                   args[14], args[15])
+    default: error("async: cannot call a function with more than 16 arguments")
+  }
+}
+
+// The future-chaining `then`: a thread that waits for t and applies f to what it
+// produced. If t failed, the await inside re-raises on the new thread, so the
+// failure travels down the chain and await(andThen(t, f)) reports it.
+def andThen(t, f) {
+  _thread("andThen", 1, t)
+  _fn("andThen", 2, f)
+  spawn(() -> f(await(t)))
+}
+
+// First across the line: [index, value] of the winner, or null when the timeout
+// expires before anyone finishes. A winner that failed re-raises here — asking for
+// its value is what race does — and the losers keep running; nothing cancels them.
+// The element and timeout checks are awaitAny's own, prefix and all.
+def race(ts, timeoutMs = _absent) {
+  _arr("race", 1, ts)
+  val idx = if (timeoutMs == _absent) then awaitAny(ts) else awaitAny(ts, timeoutMs)
+  if (idx == -1) then null else [idx, await(ts[idx])]
+}
+
+// await with a verdict instead of an error: [true, value] within the limit,
+// [false, null] past it. The thread itself keeps running either way, and a later
+// await can still collect it.
+def withTimeout(t, ms) {
+  _thread("withTimeout", 1, t)
+  val idx = awaitAny([t], ms)
+  if (idx == -1) then [false, null] else [true, await(t)]
+}
+
+// Every outcome, in order, no failure hiding the rest: {"ok": true, "value": v} or
+// {"ok": false, "error": message}. try hands its handler the message string, so a
+// failed thread's entry reads exactly as await would have reported it.
+def allSettled(ts) {
+  _arr("allSettled", 1, ts)
+  val out = []
+  for (t in ts) {
+    push(out, try(() -> {"ok": true, "value": await(t)},
+                  e -> {"ok": false, "error": e}))
+  }
+  out
+}

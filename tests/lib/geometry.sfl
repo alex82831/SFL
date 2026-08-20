@@ -1,0 +1,14 @@
+// A module used by tests/imports.sfl.
+
+val TAU = 6.283185307179586
+
+def circleArea(r) = PI() * r * r
+def circumference(r) = TAU * r
+
+// Records how many times this file has been executed, so the test can prove that
+// importing the same module twice runs it only once.
+if (isNull(get(globalCounters, "geometry", null))) {
+  geometryLoads = 1
+} else {
+  geometryLoads = geometryLoads + 1
+}

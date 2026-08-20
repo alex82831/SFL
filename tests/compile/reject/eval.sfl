@@ -1,0 +1,3 @@
+// EXPECT: is not available in compiled programs
+// eval needs the interpreter itself, which a compiled binary does not carry.
+println(eval("1 + 1"))

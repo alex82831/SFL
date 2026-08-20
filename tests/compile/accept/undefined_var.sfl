@@ -1,0 +1,29 @@
+// An undefined variable renders identically under both engines: the same
+// suggestion (searched over the same names, in the same order, defined-only),
+// the same situational help line, and the same caret position — pinned to the
+// innermost enclosing call, exactly where the interpreter's Node.locate puts it.
+val nearby = 42
+
+// The suggestion comes from the program's own globals once they hold a value...
+println(attempt(() -> nearbyy).error.help)
+// ...never from the misspelled name itself, and a hopeless typo gets no
+// suggestion at all, only the assignment note.
+println(attempt(() -> zzqqxjw).error.help)
+// A '_' name explains privacy instead of assignment order.
+println(attempt(() -> _hidden).error.help)
+// A builtin can be the nearest match too.
+println(attempt(() -> lenn([1])).error.help)
+
+// Inside a function body the error reports the call that entered it, and the
+// traceback names that call site — one frame, even through the tail call the
+// arrow lambda makes.
+def f() {
+    totallyUndefined
+}
+val r = attempt(() -> f())
+println(r.error.message, r.error.trace)
+
+// Uncaught, on the last line, inside a nested call: stderr must carry the same
+// message, the same "--> file:line:col", the same caret column, both help
+// lines, and exit status 1 under both engines.
+println(max(1, x))
