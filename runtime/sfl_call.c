@@ -640,8 +640,19 @@ static char *stack_low;
  * arithmetic, which is exactly where a counter would cost the most — compare their
  * frame address against this instead, three instructions with no memory written.
  * The margin leaves room for the error to be built and for a handler to run.
+ *
+ * Thread-local, because every thread has its own stack at its own address: the
+ * main thread's is sized by RLIMIT_STACK (install_stack_guard), a spawned one by
+ * THREAD_STACK_BYTES (sfl_thread_stack_init). One shared boundary would sit in
+ * some unrelated part of the address space for every stack but the one that
+ * computed it, and fire — or never fire — by accident of layout.
  */
-char *sfl_stack_limit;
+_Thread_local char *sfl_stack_limit;
+
+/* A spawned thread's boundary, from its entry frame and its known stack size. */
+void sfl_thread_stack_init(void *bottom, size_t size) {
+  sfl_stack_limit = (char *)bottom - size + (256 << 10);
+}
 
 static void on_segv(int sig, siginfo_t *info, void *ctx) {
   (void)sig;

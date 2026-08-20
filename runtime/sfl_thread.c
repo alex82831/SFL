@@ -493,6 +493,7 @@ static void *thread_entry(void *arg) {
   Task *t = (Task *)arg;
   void *bottom = (void *)&t;
   sfl_gc_thread_attach(bottom);
+  sfl_thread_stack_init(bottom, THREAD_STACK_BYTES);
   self_task = t;
 
   /* Tell the spawner we are registered. It waits for this, which is what keeps the
