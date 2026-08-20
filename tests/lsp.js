@@ -313,6 +313,59 @@ async function main() {
   });
   check('references finds both uses', refs.result.length === 2, JSON.stringify(refs.result));
 
+  // -- project-local packages resolve via the server's cwd ------------------------
+  // The plugins launch `sfl lsp` with cwd = project root precisely so that the
+  // importer's cwd-relative roots (./sfl_packages, ./packages) mean the project's
+  // own directories. This spawns a second server inside such a project to pin
+  // that contract.
+  const proj = fs.mkdtempSync(pathmod.join(os.tmpdir(), 'sfl-lsp-proj-'));
+  fs.mkdirSync(pathmod.join(proj, 'packages', 'toolkit', '0.1.0'), { recursive: true });
+  fs.writeFileSync(pathmod.join(proj, 'packages', 'toolkit', '0.1.0', 'sfl.pkg'),
+    '{ "name": "toolkit", "version": "0.1.0", "main": "main" }\n');
+  fs.writeFileSync(pathmod.join(proj, 'packages', 'toolkit', '0.1.0', 'main.sfl'),
+    'def greet(who) = "hi, " + who\n');
+  fs.mkdirSync(pathmod.join(proj, 'src'));
+  const projMain = pathmod.join(proj, 'src', 'main.sfl');
+  fs.writeFileSync(projMain, 'import "toolkit"\nprintln(greet("sfl"))\n');
+
+  const proc2 = spawn(sfl, ['lsp'], { stdio: ['pipe', 'pipe', 'inherit'], cwd: proj });
+  const got = await new Promise((resolve, reject) => {
+    let buf2 = Buffer.alloc(0);
+    let sent = false;
+    proc2.stdout.on('data', (chunk) => {
+      buf2 = Buffer.concat([buf2, chunk]);
+      for (;;) {
+        const h = buf2.indexOf('\r\n\r\n');
+        if (h < 0) return;
+        const m = /Content-Length:\s*(\d+)/i.exec(buf2.slice(0, h).toString('ascii'));
+        const len = parseInt(m[1], 10);
+        if (buf2.length < h + 4 + len) return;
+        const msg = JSON.parse(buf2.slice(h + 4, h + 4 + len).toString('utf8'));
+        buf2 = buf2.slice(h + 4 + len);
+        if (msg.method === 'textDocument/publishDiagnostics') resolve(msg.params.diagnostics);
+      }
+    });
+    const send2 = (obj) => {
+      const b = Buffer.from(JSON.stringify(obj), 'utf8');
+      proc2.stdin.write(`Content-Length: ${b.length}\r\n\r\n`);
+      proc2.stdin.write(b);
+    };
+    send2({ seq: 1, id: 1, type: 'request', jsonrpc: '2.0', method: 'initialize',
+      params: { processId: null, rootUri: 'file://' + proj, capabilities: {} } });
+    setTimeout(() => {
+      if (!sent) {
+        sent = true;
+        send2({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: {
+          textDocument: { uri: 'file://' + projMain, languageId: 'sfl', version: 1,
+            text: fs.readFileSync(projMain, 'utf8') } } });
+      }
+    }, 200);
+    setTimeout(() => reject(new Error('timeout waiting for project diagnostics')), 10000);
+  });
+  check('project-local packages resolve with cwd at project root', got.length === 0,
+    JSON.stringify(got));
+  proc2.kill();
+
   // -- shutdown ---------------------------------------------------------------------
   const bye = await request('shutdown', null);
   check('shutdown acknowledged', bye.result === null);

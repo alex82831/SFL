@@ -22,7 +22,7 @@ public final class SflLanguageServerFactory
 
     @Override
     public @NotNull StreamConnectionProvider createConnectionProvider(@NotNull Project project) {
-        return new SflLanguageServer();
+        return new SflLanguageServer(project.getBasePath());
     }
 
     /**

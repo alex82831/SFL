@@ -19,7 +19,7 @@ SFL 语言支持，**Community 与 Ultimate 都能用**（LSP 客户端走 Red H
 | 项 | 说明 |
 | --- | --- |
 | Path to the sfl binary | 二进制路径，空则自动探测 |
-| SFL_HOME | 包根与 libs 的家目录。**GUI 启动的 IDE 继承不到 shell 的 export**，已安装的包 import 标红就在这里填 |
+| SFL_HOME | 包根与 libs 的家目录，**只有全局安装的包需要它**（项目内 ./packages、./sfl_packages 自动可见——语言服务器以项目根为工作目录，与终端行为一致）。GUI 启动的 IDE 继承不到 shell 的 export，全局包标红就在这里填 |
 | Enable the language server | LSP 总开关 |
 | Flag undefined variables | 未定义变量标红（带 did-you-mean）开关 |
 

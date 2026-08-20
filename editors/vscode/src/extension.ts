@@ -79,10 +79,13 @@ function sflBinary(): string {
 
 async function startClient(context: ExtensionContext): Promise<void> {
   const command = sflBinary();
+  // cwd decides what ./sfl_packages and ./packages mean to the importer —
+  // match the terminal by resolving them against the workspace root.
+  const cwd = workspace.workspaceFolders?.[0]?.uri.fsPath;
   const serverOptions: ServerOptions = {
     command,
     args: ['lsp'],
-    options: { env: sflEnv() },
+    options: { env: sflEnv(), cwd },
   };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [

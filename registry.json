@@ -8,6 +8,7 @@
     "uuid":     { "git": "github.com/alex82831/SFL", "subdir": "packages/uuid" },
     "cli":      { "git": "github.com/alex82831/SFL", "subdir": "packages/cli" },
     "log":      { "git": "github.com/alex82831/SFL", "subdir": "packages/log" },
-    "redis":    { "git": "github.com/alex82831/SFL", "subdir": "packages/redis" }
+    "redis":    { "git": "github.com/alex82831/SFL", "subdir": "packages/redis" },
+    "httpd":    { "git": "github.com/alex82831/SFL", "subdir": "packages/httpd" }
   }
 }

@@ -16,7 +16,7 @@ import java.util.List;
  * binary deleted in between.
  */
 public final class SflLanguageServer extends ProcessStreamConnectionProvider {
-    public SflLanguageServer() {
+    public SflLanguageServer(String projectBasePath) {
         File binary = SflBinaryLocator.resolve();
         if (binary == null) {
             throw new CannotStartProcessException(
@@ -29,5 +29,12 @@ public final class SflLanguageServer extends ProcessStreamConnectionProvider {
         super.setUserEnvironmentVariables(
                 com.fartech.sfl.ide.settings.SflEnvironment.forChildProcesses());
         super.setIncludeSystemEnvironmentVariables(true);
+        // The working directory decides what ./sfl_packages and ./packages mean:
+        // the importer's package roots are cwd-relative, exactly as on the
+        // command line. Without this the server resolves them against wherever
+        // the IDE happened to start, and project-local packages go red.
+        if (projectBasePath != null && !projectBasePath.isBlank()) {
+            super.setWorkingDirectory(projectBasePath);
+        }
     }
 }
