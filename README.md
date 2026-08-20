@@ -227,6 +227,21 @@ a compiled binary quotes and underlines the failing line exactly as the interpre
 
 ## Version history
 
+**0.7.0** — The network release: the HTTP builtins no longer need libcurl. `httpGet`
+and its siblings are now `stdlib/http.sfl` — one HTTP/1.1 client shared by both
+engines — over a socket layer built from C primitives, with TLS reached by `dlopen`
+of the system OpenSSL/LibreSSL (`tlsWrap`, certificate and hostname verification,
+ALPN); plain HTTP needs no external library at all. New primitives fill the layer
+out: byte buffers for byte-counted framing (`bufNew`/`socketReadToBuf`/`bufString`),
+raw byte socket I/O, `utf8Length`, a full synchronous **and** asynchronous UDP
+surface (`udpSocket`/`udpSend`/`udpReceive`, poll-able), server-side TLS with ALPN
+(`tlsAccept`/`tlsProto`), `socketNoDelay` and zero-copy `socketSendFile`. On top of
+these ships **`packages/httpd`**, an HTTP server framework: HTTP/1.1 (keep-alive,
+chunked both ways, 100-continue, conditional and range static files), HTTP/2 (h2c
+and ALPN, multiplexed streams, HPACK, flow control), WebSocket, and server-sent
+events, with a synchronous `listen()` and an asynchronous `start()`/`stop()` over
+one thread-per-connection model. `sfl` no longer links libcurl or sttp.
+
 **0.5.1** — Modules get real namespaces: a top-level name beginning with `_` belongs to
 the file that declares it, and `import "m" as x` puts a module's surface behind `x`
 instead of in the global scope, resolved at parse time so it costs nothing at run time.

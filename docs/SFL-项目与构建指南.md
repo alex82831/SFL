@@ -1,6 +1,6 @@
 # SFL 项目与构建指南
 
-针对 SFL 0.6.0 · 涵盖：项目创建、`build.sfl` 编写参考、构建与测试、部署与分发、IDE 集成。
+针对 SFL 0.7.0 · 涵盖：项目创建、`build.sfl` 编写参考、构建与测试、部署与分发、IDE 集成。
 
 构建工具内置在 `sfl` 二进制里（`sfl build`），**本体用 SFL 编写**（[buildtool/main.sfl](../buildtool/main.sfl)），
 项目文件 `build.sfl` 也是普通 SFL——没有新语法、没有配置语言：构建工具先定义
