@@ -1,0 +1,367 @@
+// The httpd package driven end to end by an in-process client: every test
+// starts a real server on an ephemeral port, talks to it over a real socket
+// (HTTP/1.1 by hand, HTTP/2 by framing bytes, WebSocket by masking frames),
+// and asserts on what comes back. Nothing here needs the network or a sleep to
+// decide pass/fail; the one TLS block needs the openssl command and is skipped
+// without it.
+
+import "lib/assert"
+import "../packages/httpd/main"
+
+// --------------------------------------------------------------- tiny client
+
+// A minimal HTTP/1.1 client: send one request, read status line + headers +
+// body (by Content-Length or chunked), return {status, headers, body}.
+def h1Get(port, method, path, headers = {}, body = null) {
+  val c = connect("127.0.0.1", port, 5000)
+  var req = "${method} ${path} HTTP/1.1\r\nhost: 127.0.0.1\r\n"
+  for (k in keys(headers)) { req = req + "${k}: ${headers[k]}\r\n" }
+  if (body != null) { req = req + "content-length: ${utf8Length(body)}\r\n" }
+  req = req + "connection: close\r\n\r\n"
+  socketWrite(c, req)
+  if (body != null) { socketWrite(c, body) }
+  val res = h1ReadResponse(c, method == "HEAD")
+  closeSocket(c)
+  res
+}
+
+def h1ReadResponse(c, noBody = false) {
+  val statusLine = socketReadLine(c, 5000)
+  val status = parseInt(split(statusLine, " ")[1])
+  val hdrs = {}
+  while (true) {
+    val line = socketReadLine(c, 5000)
+    if (line == null || line == "") { break }
+    val ci = indexOf(line, ":")
+    if (ci > 0) { hdrs[toLower(trim(substring(line, 0, ci)))] = trim(substring(line, ci + 1)) }
+  }
+  var body = ""
+  if (noBody) {
+    // HEAD and 204/304 responses carry headers but no body to read.
+  } else if (toLower(get(hdrs, "transfer-encoding", "")) == "chunked") {
+    val b = bufNew()
+    while (true) {
+      val n = parseInt(trim(socketReadLine(c, 5000)), 16)
+      if (n == 0) { break }
+      var left = n
+      while (left > 0) {
+        val got = socketReadToBuf(c, b, left, 5000)
+        left -= got
+      }
+      socketReadLine(c, 5000)
+    }
+    socketReadLine(c, 5000)
+    body = bufString(b)
+    bufClear(b)
+  } else {
+    val cl = get(hdrs, "content-length", null)
+    if (cl != null && parseInt(cl) > 0) {
+      val b = bufNew()
+      var left = parseInt(cl)
+      while (left > 0) {
+        val got = socketReadToBuf(c, b, left, 5000)
+        if (got == null || got == 0) { break }
+        left -= got
+      }
+      body = bufString(b)
+      bufClear(b)
+    }
+  }
+  {status: status, headers: hdrs, body: body}
+}
+
+// The demo application every non-TLS test shares.
+def demoApp() {
+  routes([
+    GET("/", (req) -> respondText(200, "root")),
+    GET("/users/:id", (req) -> respondJson(200, {id: req.params.id, q: get(req.query, "q", null)})),
+    POST("/echo", (req) -> respondText(200, req.body)),
+    GET("/stream", (req) -> respondStream(200, {"content-type": "text/plain"},
+      (w) -> { w.write("a"); w.write("bc"); w.write("") })),
+    STATIC("/files", staticDir),
+    WS("/ws", {
+      open: (sock) -> sock.send("welcome"),
+      message: (sock, data, isText) -> {
+        if (data == "bye") then sock.close(1000, "done") else sock.send("echo:${data}")
+      }
+    })
+  ])
+}
+
+val staticDir = joinPath(dirName(tempFile(".probe")), "sfl-httpd-static-${pid()}")
+mkdirs(staticDir)
+writeFile(joinPath(staticDir, "hello.txt"), "static content\n")
+writeFile(joinPath(staticDir, "index.html"), "<h1>index</h1>")
+
+// ------------------------------------------------------------------ HTTP/1.1
+
+val srv = httpServer({handler: demoApp(), quiet: true})
+srv.start()
+val port = srv.port()
+checkTrue("the server bound a port", port > 0)
+
+val r1 = h1Get(port, "GET", "/")
+check("a plain GET returns the body", r1.body, "root")
+check("with a 200 status", r1.status, 200)
+check("and a date header", contains(r1.headers, "date"), true)
+check("and the server header", get(r1.headers, "server", null), "sfl-httpd/0.1")
+
+val r2 = h1Get(port, "GET", "/users/42?q=hi")
+check("path params and query are parsed", r2.body, "{\"id\": \"42\", \"q\": \"hi\"}")
+
+val r3 = h1Get(port, "POST", "/echo", {}, "payload 载荷")
+check("a POST body round-trips", r3.body, "payload 载荷")
+check("byte-counted content-length is read", get(r3.headers, "content-length", null),
+      "${utf8Length("payload 载荷")}")
+
+val r4 = h1Get(port, "GET", "/stream")
+check("a streamed response is chunked", get(r4.headers, "transfer-encoding", null), "chunked")
+check("and reassembles", r4.body, "abc")
+
+val r5 = h1Get(port, "GET", "/nope")
+check("an unknown path is 404", r5.status, 404)
+
+val r6 = h1Get(port, "DELETE", "/users/1")
+check("a known path with the wrong method is 405", r6.status, 405)
+check("with an Allow header", get(r6.headers, "allow", null), "GET")
+
+// HEAD carries the headers of GET but no body.
+val r7 = h1Get(port, "HEAD", "/")
+check("HEAD is 200", r7.status, 200)
+check("HEAD has no body", r7.body, "")
+
+// Chunked request body: the server decodes it.
+val cc = connect("127.0.0.1", port, 5000)
+socketWrite(cc, "POST /echo HTTP/1.1\r\nhost: x\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n")
+// " 中" is a space plus a 3-byte character = 4 bytes, so the chunk size is 4.
+socketWrite(cc, "5\r\nhello\r\n4\r\n 中\r\n0\r\n\r\n")
+val rc = h1ReadResponse(cc)
+closeSocket(cc)
+check("a chunked request body is decoded", rc.body, "hello 中")
+
+// Keep-alive: two requests on one connection.
+val ka = connect("127.0.0.1", port, 5000)
+socketWrite(ka, "GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+val kaHdrs = {}
+val kaStatus = split(socketReadLine(ka, 5000), " ")[1]
+while (true) {
+  val line = socketReadLine(ka, 5000)
+  if (line == null || line == "") { break }
+  val ci = indexOf(line, ":")
+  if (ci > 0) { kaHdrs[toLower(trim(substring(line, 0, ci)))] = trim(substring(line, ci + 1)) }
+}
+val kaBody = bufNew()
+var kaLeft = parseInt(get(kaHdrs, "content-length", "0"))
+while (kaLeft > 0) {
+  val got = socketReadToBuf(ka, kaBody, kaLeft, 5000)
+  kaLeft -= got
+}
+check("keep-alive: the first response arrived", bufString(kaBody), "root")
+check("and the connection stays open", get(kaHdrs, "connection", null), "keep-alive")
+bufClear(kaBody)
+socketWrite(ka, "GET /users/7 HTTP/1.1\r\nhost: x\r\nconnection: close\r\n\r\n")
+val ka2 = h1ReadResponse(ka)
+closeSocket(ka)
+check("a second request on the same connection works", ka2.body, "{\"id\": \"7\", \"q\": null}")
+
+// ------------------------------------------------------------- static files
+
+val sf = h1Get(port, "GET", "/files/hello.txt")
+check("a static file is served", sf.body, "static content\n")
+check("with its content type", get(sf.headers, "content-type", null), "text/plain; charset=utf-8")
+check("and an etag", contains(sf.headers, "etag"), true)
+
+val idx = h1Get(port, "GET", "/files/")
+check("a directory serves its index", idx.body, "<h1>index</h1>")
+
+// A conditional request with the matching etag is 304.
+val cond = h1Get(port, "GET", "/files/hello.txt", {"if-none-match": get(sf.headers, "etag", "")})
+check("a matching if-none-match is 304", cond.status, 304)
+
+// A byte range yields 206 with the slice.
+val rng = h1Get(port, "GET", "/files/hello.txt", {"range": "bytes=0-5"})
+check("a range request is 206", rng.status, 206)
+check("and returns the slice", rng.body, "static")
+check("with a content-range", get(rng.headers, "content-range", null), "bytes 0-5/15")
+
+// A path that escapes the root is refused.
+val esc = h1Get(port, "GET", "/files/..%2f..%2fetc%2fpasswd")
+checkTrue("directory traversal is refused", esc.status == 403 || esc.status == 404)
+
+// ------------------------------------------------------------------ WebSocket
+
+def wsHandshake(port, path) {
+  val c = connect("127.0.0.1", port, 5000)
+  val key = base64EncodeBytes(randomBytes(16))
+  socketWrite(c, "GET ${path} HTTP/1.1\r\nhost: x\r\nupgrade: websocket\r\n" +
+    "connection: Upgrade\r\nsec-websocket-key: ${key}\r\nsec-websocket-version: 13\r\n\r\n")
+  val status = split(socketReadLine(c, 5000), " ")[1]
+  while (true) {
+    val line = socketReadLine(c, 5000)
+    if (line == null || line == "") { break }
+  }
+  {conn: c, status: parseInt(status)}
+}
+
+// A client frame: masked, FIN, one fragment.
+def wsSend(c, op, text) {
+  val payload = utf8Encode(text)
+  val out = [bitOr(128, op)]
+  val n = length(payload)
+  val mask = randomBytes(4)
+  if (n < 126) { push(out, bitOr(128, n)) }
+  else {
+    push(out, bitOr(128, 126))
+    push(out, bitAnd(shiftRightU(n, 8), 255))
+    push(out, bitAnd(n, 255))
+  }
+  pushBytes(out, mask)
+  var i = 0
+  while (i < n) {
+    push(out, bitXor(payload[i], mask[i % 4]))
+    i += 1
+  }
+  socketWriteBytes(c, out)
+}
+
+// Read one server frame: {op, text}.
+def wsRecv(c) {
+  val h = readExactBytes(c, 2, 5000)
+  val op = bitAnd(h[0], 15)
+  var len = bitAnd(h[1], 127)
+  if (len == 126) {
+    val ext = readExactBytes(c, 2, 5000)
+    len = ext[0] * 256 + ext[1]
+  }
+  val payload = if (len > 0) then readExactBytes(c, len, 5000) else []
+  {op: op, text: if (op == 1) then utf8Decode(payload) else "", raw: payload}
+}
+
+val ws = wsHandshake(port, "/ws")
+check("a WebSocket upgrade is 101", ws.status, 101)
+check("the server greets on open", wsRecv(ws.conn).text, "welcome")
+wsSend(ws.conn, 1, "hi 世界")
+check("a text message echoes back", wsRecv(ws.conn).text, "echo:hi 世界")
+wsSend(ws.conn, 9, "png") // a ping
+check("a ping is answered by a pong", wsRecv(ws.conn).op, 10)
+wsSend(ws.conn, 1, "bye")
+val closeFrame = wsRecv(ws.conn)
+check("the server closes on request", closeFrame.op, 8)
+check("with the close code", closeFrame.raw[0] * 256 + closeFrame.raw[1], 1000)
+closeSocket(ws.conn)
+
+srv.stop()
+check("the server reports it stopped", srv.stopping(), true)
+
+// ----------------------------------------------------------------- HTTP/2
+
+// A prior-knowledge h2c connection: preface, SETTINGS, one GET, read the reply.
+val h2srv = httpServer({handler: demoApp(), quiet: true})
+h2srv.start()
+val h2port = h2srv.port()
+
+def h2Frame(kind, flags, sid, payload) {
+  val out = []
+  push(out, bitAnd(shiftRightU(length(payload), 16), 255))
+  push(out, bitAnd(shiftRightU(length(payload), 8), 255))
+  push(out, bitAnd(length(payload), 255))
+  push(out, kind)
+  push(out, flags)
+  push(out, bitAnd(shiftRightU(sid, 24), 255))
+  push(out, bitAnd(shiftRightU(sid, 16), 255))
+  push(out, bitAnd(shiftRightU(sid, 8), 255))
+  push(out, bitAnd(sid, 255))
+  pushBytes(out, payload)
+  out
+}
+
+def h2ReadFrame(c) {
+  val h = readExactBytes(c, 9, 5000)
+  if (h == null) { return null }
+  val len = (h[0] * 256 + h[1]) * 256 + h[2]
+  val payload = if (len > 0) then readExactBytes(c, len, 5000) else []
+  {kind: h[3], flags: h[4], sid: be32(h, 5), payload: payload}
+}
+
+val h2c = connect("127.0.0.1", h2port, 5000)
+socketWrite(h2c, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n")
+socketWriteBytes(h2c, h2Frame(4, 0, 0, [])) // empty SETTINGS
+
+// Encode a GET / request block with our own hpack encoder (the server decodes it).
+import "../packages/httpd/hpack"
+val reqBlock = hpackEncode([[":method", "GET"], [":scheme", "http"],
+                            [":path", "/"], [":authority", "127.0.0.1"]])
+socketWriteBytes(h2c, h2Frame(1, 5, 1, reqBlock)) // HEADERS, END_STREAM | END_HEADERS
+
+// Read frames until we see this stream's headers and data.
+val h2dec = hpackDecoder()
+var h2status = null
+var h2body = ""
+var h2done = false
+var guard = 0
+while (!h2done && guard < 50) {
+  val f = h2ReadFrame(h2c)
+  guard += 1
+  if (f == null) { h2done = true }
+  else if (f.kind == 4 && bitAnd(f.flags, 1) == 0) {
+    socketWriteBytes(h2c, h2Frame(4, 1, 0, [])) // ACK their SETTINGS
+  } else if (f.kind == 1 && f.sid == 1) {
+    for (h in h2dec.decode(f.payload)) {
+      if (h[0] == ":status") { h2status = h[1] }
+    }
+    if (bitAnd(f.flags, 1) != 0) { h2done = true }
+  } else if (f.kind == 0 && f.sid == 1) {
+    h2body = h2body + utf8Decode(f.payload)
+    if (bitAnd(f.flags, 1) != 0) { h2done = true }
+  }
+}
+closeSocket(h2c)
+check("HTTP/2 prior-knowledge: the status is 200", h2status, "200")
+check("and the body arrived over a DATA frame", h2body, "root")
+
+h2srv.stop()
+
+// Clean up the static fixtures.
+removeFile(joinPath(staticDir, "hello.txt"))
+removeFile(joinPath(staticDir, "index.html"))
+
+// ----------------------------------------------------------------------- TLS
+
+val hasOpenssl = execute("which openssl").code == 0
+if (!hasOpenssl) {
+  println("skip: the TLS tests need the openssl command")
+} else {
+  val key = tempFile(".key")
+  val cert = tempFile(".pem")
+  val gen = execute("openssl req -x509 -newkey rsa:2048 -keyout '${key}' -out '${cert}'" +
+    " -days 2 -nodes -subj '/CN=localhost'" +
+    " -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' 2>/dev/null")
+  if (gen.code != 0) {
+    println("skip: could not generate a test certificate")
+  } else {
+    val tsrv = httpServer({handler: demoApp(), quiet: true, tls: {cert: cert, key: key}})
+    tsrv.start()
+    val tport = tsrv.port()
+    // The client stack over TLS: connect, wrap with ALPN, negotiate, and — since
+    // the demo speaks HTTP/1.1 after http/1.1 ALPN — do a plain request.
+    val tc = connect("127.0.0.1", tport, 5000)
+    tlsWrap(tc, "localhost", cert, 5000, ["http/1.1"])
+    check("ALPN negotiated http/1.1", tlsProto(tc), "http/1.1")
+    socketWrite(tc, "GET / HTTP/1.1\r\nhost: localhost\r\nconnection: close\r\n\r\n")
+    val tstatus = socketReadLine(tc, 5000)
+    checkTrue("a request over TLS gets a response", contains(tstatus, "200"))
+    closeSocket(tc)
+
+    // h2 over TLS: ALPN picks h2, and a prior-knowledge exchange runs.
+    val tc2 = connect("127.0.0.1", tport, 5000)
+    tlsWrap(tc2, "localhost", cert, 5000, ["h2", "http/1.1"])
+    check("ALPN can select h2", tlsProto(tc2), "h2")
+    closeSocket(tc2)
+
+    tsrv.stop()
+    removeFile(key)
+    removeFile(cert)
+  }
+}
+
+report("httpd")

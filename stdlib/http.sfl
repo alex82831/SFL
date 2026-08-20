@@ -284,11 +284,15 @@ def _readBody(c, method, status, hdrs, deadline) {
       if (n == null || n < 0) { _fail("malformed Content-Length '${cl}'") }
       _exactly(c, b, n, deadline)
     } else {
-      // No framing given: the body is everything until the peer closes.
-      while (true) {
-        val got = socketReadToBuf(c, b, 65536, _left(deadline))
+      // No framing given: the body is everything until the peer closes — and a
+      // peer that closes rudely (reset, or TLS without a close_notify) still
+      // ends the body. Identity framing makes no integrity promise, and curl
+      // accepts these bodies too; openssl s_server on some platforms is one.
+      var reading = true
+      while (reading) {
+        val got = try(() -> socketReadToBuf(c, b, 65536, _left(deadline)), (e) -> 0)
         if (got == null) { error("HTTP request failed: timed out") }
-        if (got == 0) { break }
+        if (got == 0) { reading = false }
       }
     }
   }

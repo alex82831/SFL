@@ -1,0 +1,197 @@
+// httpd/ws — WebSocket (RFC 6455), server side.
+//
+// A WS route's hooks run on the connection's own thread:
+//   {open?: (sock) -> _, message?: (sock, data, isText) -> _, close?: (sock, code, reason) -> _}
+// `sock` is what the hooks (and anything they hand it to) use to talk back:
+//   sock.send(text)  sock.sendBinary(bytes)  sock.close(code?, reason?)
+//   sock.ping()  sock.req  sock.isOpen()
+// Sends are mutex-serialised, so other threads may hold `sock` and push frames
+// whenever they like — a subscription hub works without further locking.
+//
+// The server obeys the RFC's rules: client frames must be masked (1002 when
+// not), control frames fit in one unmasked reply, fragmented messages
+// reassemble up to maxMessageBytes (1009 past it), a close is echoed once.
+
+val _wsGuid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+def _wsAccept(key) = base64EncodeBytes(digestBytes("sha1", utf8Encode(key + _wsGuid)))
+
+// One frame off the wire: {fin, op, payload} or null when the peer vanished.
+def _readFrame(c, maxBytes, timeoutMs) {
+  val h = readExactBytes(c, 2, timeoutMs)
+  if (h == null) { return null }
+  val fin = bitAnd(h[0], 128) != 0
+  val rsv = bitAnd(h[0], 112)
+  val op = bitAnd(h[0], 15)
+  val masked = bitAnd(h[1], 128) != 0
+  var len = bitAnd(h[1], 127)
+  if (rsv != 0) { return {bad: 1002} } // no extension negotiated, RSV must be 0
+  if (len == 126) {
+    val ext = readExactBytes(c, 2, timeoutMs)
+    if (ext == null) { return null }
+    len = be16(ext, 0)
+  } else if (len == 127) {
+    val ext = readExactBytes(c, 8, timeoutMs)
+    if (ext == null) { return null }
+    // The top four bytes must be zero for any size this server accepts.
+    if (be32(ext, 0) != 0) { return {bad: 1009} }
+    len = be32(ext, 4)
+  }
+  if (!masked) { return {bad: 1002} } // clients must mask
+  if (op >= 8 && (len > 125 || !fin)) { return {bad: 1002} }
+  if (len > maxBytes) { return {bad: 1009} }
+  val mask = readExactBytes(c, 4, timeoutMs)
+  if (mask == null) { return null }
+  var payload = []
+  if (len > 0) {
+    payload = readExactBytes(c, len, timeoutMs)
+    if (payload == null) { return null }
+    var i = 0
+    while (i < len) {
+      payload[i] = bitXor(payload[i], mask[i % 4])
+      i += 1
+    }
+  }
+  {fin: fin, op: op, payload: payload}
+}
+
+// A server frame: unmasked, always FIN (this server does not fragment output).
+def _frameBytes(op, payload) {
+  val out = [bitOr(128, op)]
+  val n = length(payload)
+  if (n < 126) { push(out, n) }
+  else if (n < 65536) {
+    push(out, 126)
+    pushBe16(out, n)
+  } else {
+    push(out, 127)
+    pushBe32(out, 0)
+    pushBe32(out, n)
+  }
+  pushBytes(out, payload)
+  out
+}
+
+// Runs a WebSocket endpoint over an upgraded connection. Called by the h1
+// driver on a matched WS route; never returns the connection to HTTP.
+def wsServe(c, srv, req, route) {
+  val key = get(req.headers, "sec-websocket-key", null)
+  val upgrade = toLower(get(req.headers, "upgrade", ""))
+  if (key == null || !contains(upgrade, "websocket") || req.method != "GET") {
+    socketWrite(c, "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+    return null
+  }
+  socketWrite(c, "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\n" +
+    "connection: Upgrade\r\nsec-websocket-accept: ${_wsAccept(key)}\r\n\r\n")
+
+  val hooks = route.hooks
+  val maxMsg = get(route.wsOpts, "maxMessageBytes", 4 * 1024 * 1024)
+  val idleMs = get(route.wsOpts, "idleMs", 300000)
+  val state = {open: true, sentClose: false, lock: mutex()}
+
+  def sendFrame(op, payload) {
+    if (!state.open) { return false }
+    withLock(state.lock, () -> {
+      try(() -> {
+        socketWriteBytes(c, _frameBytes(op, payload))
+        true
+      }, (e) -> {
+        state.open = false
+        false
+      })
+    })
+  }
+
+  def sendClose(code, reason) {
+    if (!state.sentClose) {
+      state.sentClose = true
+      val payload = []
+      pushBe16(payload, code)
+      pushBytes(payload, utf8Encode(reason))
+      sendFrame(8, payload)
+    }
+    null
+  }
+
+  val sock = {
+    req: req,
+    isOpen: () -> state.open,
+    send: (text) -> sendFrame(1, utf8Encode("${text}")),
+    sendBinary: (bytes) -> sendFrame(2, bytes),
+    ping: () -> sendFrame(9, []),
+    close: (code = 1000, reason = "") -> {
+      sendClose(code, reason)
+      null
+    }
+  }
+
+  def fire(hook, f) = try(f, (e) -> srv.logError(req, "ws ${hook}: ${e}"))
+
+  if (contains(hooks, "open")) { fire("open", () -> hooks.open(sock)) }
+
+  // The read loop: reassemble fragments, answer pings, echo the close.
+  var closeCode = 1005
+  var closeReason = ""
+  var assembling = null
+  var assembleText = true
+  var running = true
+  while (running) {
+    val f = _readFrame(c, maxMsg, idleMs)
+    if (f == null) {
+      closeCode = 1006
+      running = false
+    } else if (contains(f, "bad")) {
+      sendClose(f.bad, "")
+      closeCode = f.bad
+      running = false
+    } else if (f.op == 8) {
+      if (length(f.payload) >= 2) {
+        closeCode = be16(f.payload, 0)
+        closeReason = utf8Decode(slice(f.payload, 2, length(f.payload)))
+      } else {
+        closeCode = 1005
+      }
+      sendClose(if (closeCode == 1005) then 1000 else closeCode, "")
+      running = false
+    } else if (f.op == 9) {
+      sendFrame(10, f.payload) // pong echoes the ping's payload
+    } else if (f.op == 10) {
+      null // unsolicited pong: fine, ignore
+    } else if (f.op == 1 || f.op == 2 || f.op == 0) {
+      if (f.op != 0) {
+        if (assembling != null) {
+          sendClose(1002, "")
+          running = false
+        } else {
+          assembling = f.payload
+          assembleText = f.op == 1
+        }
+      } else {
+        if (assembling == null) {
+          sendClose(1002, "")
+          running = false
+        } else {
+          pushBytes(assembling, f.payload)
+          if (length(assembling) > maxMsg) {
+            sendClose(1009, "")
+            running = false
+          }
+        }
+      }
+      if (running && f.fin && assembling != null) {
+        val data = if (assembleText) then utf8Decode(assembling) else assembling
+        val wasText = assembleText
+        assembling = null
+        if (contains(hooks, "message")) {
+          fire("message", () -> hooks.message(sock, data, wasText))
+        }
+      }
+    } else {
+      sendClose(1002, "")
+      running = false
+    }
+  }
+  state.open = false
+  if (contains(hooks, "close")) { fire("close", () -> hooks.close(sock, closeCode, closeReason)) }
+  null
+}

@@ -1,0 +1,56 @@
+// The httpd package compiles and runs the same under both engines: start a
+// server, drive one deterministic HTTP/1.1 request through it, print the result.
+// No randomness and no openssl, so compiled output equals interpreted output
+// byte for byte — the broader behaviour is exercised by tests/httpd.sfl.
+import "../../../packages/httpd/main"
+
+val srv = httpServer({
+  quiet: true,
+  handler: routes([
+    GET("/", (req) -> respondText(200, "hello")),
+    GET("/users/:id", (req) -> respondJson(200, {id: req.params.id})),
+    POST("/echo", (req) -> respondText(200, req.body))
+  ])
+})
+srv.start()
+val port = srv.port()
+
+def request(method, path, body) {
+  val c = connect("127.0.0.1", port, 5000)
+  var req = "${method} ${path} HTTP/1.1\r\nhost: x\r\n"
+  if (body != null) { req = req + "content-length: ${utf8Length(body)}\r\n" }
+  req = req + "connection: close\r\n\r\n"
+  socketWrite(c, req)
+  if (body != null) { socketWrite(c, body) }
+  val status = split(socketReadLine(c, 5000), " ")[1]
+  val hdrs = {}
+  while (true) {
+    val line = socketReadLine(c, 5000)
+    if (line == null || line == "") { break }
+    val ci = indexOf(line, ":")
+    if (ci > 0) { hdrs[toLower(trim(substring(line, 0, ci)))] = trim(substring(line, ci + 1)) }
+  }
+  var body2 = ""
+  val cl = get(hdrs, "content-length", null)
+  if (cl != null && parseInt(cl) > 0) {
+    val b = bufNew()
+    var left = parseInt(cl)
+    while (left > 0) {
+      val got = socketReadToBuf(c, b, left, 5000)
+      if (got == null || got == 0) { break }
+      left -= got
+    }
+    body2 = bufString(b)
+    bufClear(b)
+  }
+  closeSocket(c)
+  [parseInt(status), body2]
+}
+
+println(request("GET", "/", null))
+println(request("GET", "/users/7", null))
+println(request("POST", "/echo", "ping"))
+println(request("DELETE", "/", null))
+
+srv.stop()
+println("done")

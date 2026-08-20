@@ -1,0 +1,182 @@
+// httpd/mime — the lookup tables and small codecs every HTTP layer leans on:
+// status reason phrases, content types by file extension, IMF-fixdate stamps,
+// percent-decoding, and byte packing for the binary framing above this file.
+//
+// Dates are built from timeParts() with our own English tables rather than
+// formatTime's %a/%b, so the output cannot depend on anyone's locale and the
+// two engines agree by construction.
+
+val _days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+val _months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+def _two(n) = if (n < 10) then "0${n}" else "${n}"
+
+// An IMF-fixdate: "Wed, 20 Aug 2026 07:28:00 GMT". What Date, Last-Modified
+// and Expires headers must look like.
+def httpDate(millis) {
+  val t = timeParts(millis, true)
+  val wd = _days[t.weekday % 7]
+  "${wd}, ${_two(t.day)} ${_months[t.month - 1]} ${t.year} " +
+    "${_two(t.hour)}:${_two(t.minute)}:${_two(t.second)} GMT"
+}
+
+val _reasons = {
+  "100": "Continue", "101": "Switching Protocols",
+  "200": "OK", "201": "Created", "202": "Accepted", "204": "No Content",
+  "206": "Partial Content",
+  "301": "Moved Permanently", "302": "Found", "303": "See Other",
+  "304": "Not Modified", "307": "Temporary Redirect", "308": "Permanent Redirect",
+  "400": "Bad Request", "401": "Unauthorized", "403": "Forbidden",
+  "404": "Not Found", "405": "Method Not Allowed", "406": "Not Acceptable",
+  "408": "Request Timeout", "409": "Conflict", "410": "Gone",
+  "411": "Length Required", "412": "Precondition Failed",
+  "413": "Content Too Large", "414": "URI Too Long",
+  "415": "Unsupported Media Type", "416": "Range Not Satisfiable",
+  "417": "Expectation Failed", "426": "Upgrade Required",
+  "428": "Precondition Required", "429": "Too Many Requests",
+  "431": "Request Header Fields Too Large",
+  "500": "Internal Server Error", "501": "Not Implemented",
+  "502": "Bad Gateway", "503": "Service Unavailable",
+  "504": "Gateway Timeout", "505": "HTTP Version Not Supported"
+}
+
+def statusReason(code) = get(_reasons, "${code}", "Unknown")
+
+val _mimes = {
+  html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
+  css: "text/css; charset=utf-8", js: "text/javascript; charset=utf-8",
+  mjs: "text/javascript; charset=utf-8", json: "application/json",
+  txt: "text/plain; charset=utf-8", md: "text/markdown; charset=utf-8",
+  xml: "application/xml", csv: "text/csv; charset=utf-8",
+  svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg",
+  jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
+  ico: "image/x-icon", avif: "image/avif",
+  woff: "font/woff", woff2: "font/woff2", ttf: "font/ttf", otf: "font/otf",
+  mp3: "audio/mpeg", ogg: "audio/ogg", wav: "audio/wav",
+  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+  pdf: "application/pdf", zip: "application/zip", gz: "application/gzip",
+  tar: "application/x-tar", wasm: "application/wasm",
+  sfl: "text/plain; charset=utf-8"
+}
+
+// The content type a file path suggests; application/octet-stream when unknown.
+def mimeType(path) {
+  val dot = lastIndexOf(path, ".")
+  if (dot < 0) { return "application/octet-stream" }
+  get(_mimes, toLower(substring(path, dot + 1)), "application/octet-stream")
+}
+
+// ------------------------------------------------------------- percent coding
+
+def _hexVal(c) {
+  val o = ord(c)
+  if (o >= 48 && o <= 57) then o - 48
+  else if (o >= 97 && o <= 102) then o - 87
+  else if (o >= 65 && o <= 70) then o - 55
+  else -1
+}
+
+// Percent-decodes a URI component. `plusIsSpace` is the form/query rule where
+// '+' spells a space; paths leave '+' alone. Decoding works on bytes — a %E4
+// %B8 %AD sequence reassembles into one character — by collecting the raw
+// bytes and decoding them in one piece at the end.
+def uriDecode(s, plusIsSpace = false) {
+  if (indexOf(s, "%") < 0 && (!plusIsSpace || indexOf(s, "+") < 0)) { return s }
+  val bytes = utf8Encode(s)
+  val out = []
+  var i = 0
+  val n = length(bytes)
+  while (i < n) {
+    val b = bytes[i]
+    if (b == 37 && i + 2 < n) { // '%'
+      val hi = _hexVal(chr(bytes[i + 1]))
+      val lo = _hexVal(chr(bytes[i + 2]))
+      if (hi >= 0 && lo >= 0) {
+        push(out, hi * 16 + lo)
+        i += 3
+      } else {
+        push(out, b)
+        i += 1
+      }
+    } else if (plusIsSpace && b == 43) { // '+'
+      push(out, 32)
+      i += 1
+    } else {
+      push(out, b)
+      i += 1
+    }
+  }
+  utf8Decode(out)
+}
+
+// Splits "a=1&b=%20x" into an object; later keys win, valueless keys map to "".
+def parseQuery(raw) {
+  val out = {}
+  if (raw == null || raw == "") { return out }
+  for (pair in split(raw, "&")) {
+    if (pair != "") {
+      val eq = indexOf(pair, "=")
+      if (eq < 0) { out[uriDecode(pair, true)] = "" }
+      else { out[uriDecode(substring(pair, 0, eq), true)] = uriDecode(substring(pair, eq + 1), true) }
+    }
+  }
+  out
+}
+
+// --------------------------------------------------------------- byte packing
+
+// Big-endian readers/writers over byte arrays (ints 0..255), the shape HTTP/2
+// frames and WebSocket lengths come in.
+
+def be16(b, at) = b[at] * 256 + b[at + 1]
+
+def be24(b, at) = (b[at] * 256 + b[at + 1]) * 256 + b[at + 2]
+
+def be32(b, at) = ((b[at] * 256 + b[at + 1]) * 256 + b[at + 2]) * 256 + b[at + 3]
+
+def pushBe16(out, v) {
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(v, 0xff))
+  out
+}
+
+def pushBe24(out, v) {
+  push(out, bitAnd(shiftRightU(v, 16), 0xff))
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(v, 0xff))
+  out
+}
+
+def pushBe32(out, v) {
+  push(out, bitAnd(shiftRightU(v, 24), 0xff))
+  push(out, bitAnd(shiftRightU(v, 16), 0xff))
+  push(out, bitAnd(shiftRightU(v, 8), 0xff))
+  push(out, bitAnd(v, 0xff))
+  out
+}
+
+// Appends src[from, until) to dst and returns dst.
+def pushBytes(dst, src, from = 0, until = -1) {
+  val end = if (until < 0) then length(src) else until
+  var i = from
+  while (i < end) {
+    push(dst, src[i])
+    i += 1
+  }
+  dst
+}
+
+// Reads exactly n bytes off a connection, or null when the peer closes or the
+// deadline passes first. The stream reads beneath this can return short.
+def readExactBytes(c, n, timeoutMs) {
+  if (n == 0) { return [] }
+  var out = null
+  while (true) {
+    val need = n - (if (out == null) then 0 else length(out))
+    if (need == 0) { return out }
+    val got = socketReadBytes(c, need, timeoutMs)
+    if (got == null || length(got) == 0) { return null }
+    if (out == null) { out = got } else { pushBytes(out, got) }
+  }
+}

@@ -54,6 +54,7 @@ object BuiltinsIpc:
     sockets()
     buffers()
     tls()
+    sockopts()
     udp()
     files()
     readiness()
@@ -117,6 +118,16 @@ object BuiltinsIpc:
     var got = -1
     while
       got = unistd.read(fd, buf.at(0).asInstanceOf[CVoidPtr], n.toUSize)
+      got < 0 && cerr.errno == perr.EINTR
+    do ()
+    got
+
+  /** pread into buf[0, n) from the file offset, retrying past EINTR. off_t is an
+    * opaque CLong (a Size), so the Long offset is widened through toSize. */
+  private def preadRetry(fd: Int, buf: Array[Byte], n: Int, offset: Long): Int =
+    var got = -1
+    while
+      got = unistd.pread(fd, buf.at(0).asInstanceOf[CVoidPtr], n.toUSize, offset.toSize).toInt
       got < 0 && cerr.errno == perr.EINTR
     do ()
     got
@@ -326,6 +337,8 @@ object BuiltinsIpc:
     final class Session(var ssl: CVoidPtr, var ownCtx: CVoidPtr):
       /** The reason of the last failure, when errno cannot say. */
       var err: String = ""
+      /** The ALPN protocol the handshake settled on, or "". */
+      var proto: String = ""
 
     private final val VerifyPeer = 1
     private final val CtrlSetTlsextHostname = 55
@@ -365,6 +378,17 @@ object BuiltinsIpc:
     private type FErrGet = CFuncPtr0[ULong]
     private type FErrReason = CFuncPtr1[ULong, CString]
     private type FErrClear = CFuncPtr0[Unit]
+    // Server side.
+    private type FAccept = CFuncPtr1[Ptr[Byte], CInt]
+    private type FUseCert = CFuncPtr2[Ptr[Byte], CString, CInt]
+    private type FUsePkey = CFuncPtr3[Ptr[Byte], CString, CInt, CInt]
+    private type FCheckKey = CFuncPtr1[Ptr[Byte], CInt]
+    private type FSetAlpnProtos = CFuncPtr3[Ptr[Byte], Ptr[Byte], CUnsignedInt, CInt]
+    private type FGet0Alpn = CFuncPtr3[Ptr[Byte], Ptr[Ptr[Byte]], Ptr[CUnsignedInt], Unit]
+    private type FSetAlpnCb = CFuncPtr3[Ptr[Byte], CVoidPtr, Ptr[Byte], Unit]
+    // The ALPN select callback the server context registers.
+    private type FAlpnCb =
+      CFuncPtr6[Ptr[Byte], Ptr[Ptr[Byte]], Ptr[Byte], Ptr[Byte], CUnsignedInt, Ptr[Byte], CInt]
 
     private var lib: CVoidPtr = null
     private var sharedCtx: Ptr[Byte] = null
@@ -398,6 +422,23 @@ object BuiltinsIpc:
     private var pErrGet: FErrGet = null
     private var pErrReason: FErrReason = null
     private var pErrClear: FErrClear = null
+    private var pServerMethod: FMethod = null
+    private var pSslAccept: FAccept = null
+    private var pUseCert: FUseCert = null
+    private var pUsePkey: FUsePkey = null
+    private var pCheckKey: FCheckKey = null
+    private var pSetAlpnProtos: FSetAlpnProtos = null
+    private var pGet0Alpn: FGet0Alpn = null
+    private var pSetAlpnCb: FSetAlpnCb = null
+
+    // The cached server context and the ALPN preference list its select callback
+    // reads. The list is a C-heap allocation that outlives every handshake on the
+    // context, so the callback — which runs inside the TLS library — can point the
+    // negotiated protocol straight into it.
+    private var srvCtx: Ptr[Byte] = null
+    private var srvKey: String = null
+    private var srvAlpn: Ptr[Byte] = null
+    private var srvAlpnLen: Int = 0
 
     private def sym(name: String): CVoidPtr =
       Zone.acquire { implicit z => dlfcn.dlsym(lib, toCString(name)) }
@@ -461,6 +502,14 @@ object BuiltinsIpc:
       pErrGet = opt[FErrGet]("ERR_get_error")
       pErrReason = opt[FErrReason]("ERR_reason_error_string")
       pErrClear = opt[FErrClear]("ERR_clear_error")
+      pServerMethod = opt[FMethod]("TLS_server_method")
+      pSslAccept = opt[FAccept]("SSL_accept")
+      pUseCert = opt[FUseCert]("SSL_CTX_use_certificate_chain_file")
+      pUsePkey = opt[FUsePkey]("SSL_CTX_use_PrivateKey_file")
+      pCheckKey = opt[FCheckKey]("SSL_CTX_check_private_key")
+      pSetAlpnProtos = opt[FSetAlpnProtos]("SSL_set_alpn_protos")
+      pGet0Alpn = opt[FGet0Alpn]("SSL_get0_alpn_selected")
+      pSetAlpnCb = opt[FSetAlpnCb]("SSL_CTX_set_alpn_select_cb")
       if pCtxNew == null || pClientMethod == null || pCtxSetVerify == null ||
         pCtxDefaultPaths == null || pSslNew == null || pSslSetFd == null ||
         pSslCtrl == null || pSslConnect == null || pSslRead == null ||
@@ -558,7 +607,9 @@ object BuiltinsIpc:
         clearErrors()
         cerr.errno = 0
         val rc = pSslConnect(ssl)
-        if rc == 1 then return 0
+        if rc == 1 then
+          captureAlpn(s)
+          return 0
         val err = pSslGetError(ssl, rc)
         if err == ErrWantRead || err == ErrWantWrite then
           val ready = waitFor(fd, err == ErrWantWrite, deadline)
@@ -579,6 +630,186 @@ object BuiltinsIpc:
           else s.err = errorText("the TLS handshake failed")
           return -1
       -1 // unreachable
+
+    /** Records the ALPN protocol the handshake settled on. */
+    private def captureAlpn(s: Session): Unit =
+      if pGet0Alpn != null then
+        val out = stackalloc[Ptr[Byte]]()
+        val len = stackalloc[CUnsignedInt]()
+        !out = null
+        !len = 0.toUInt
+        pGet0Alpn(s.ssl.asInstanceOf[Ptr[Byte]], out, len)
+        val n = (!len).toInt
+        val sel = !out
+        if sel != null && n > 0 && n < 32 then
+          val bytes = new Array[Byte](n)
+          var i = 0
+          while i < n do
+            bytes(i) = sel(i)
+            i += 1
+          s.proto = new String(bytes, 0, n, StandardCharsets.UTF_8)
+
+    /** The server side of the handshake; otherwise handshake()'s logic exactly.
+      * 0 connected, -1 failed with s.err set, -2 the deadline expired. */
+    def handshakeServer(s: Session, fd: Int, deadline: Long): Int =
+      val ssl = s.ssl.asInstanceOf[Ptr[Byte]]
+      while true do
+        clearErrors()
+        cerr.errno = 0
+        val rc = pSslAccept(ssl)
+        if rc == 1 then
+          captureAlpn(s)
+          return 0
+        val err = pSslGetError(ssl, rc)
+        if err == ErrWantRead || err == ErrWantWrite then
+          val ready = waitFor(fd, err == ErrWantWrite, deadline)
+          if ready == 0 then return -2
+          if ready < 0 then
+            s.err = strerrorText(cerr.errno)
+            return -1
+        else if err == ErrSyscall && cerr.errno == perr.EINTR then ()
+        else if err == ErrSyscall then
+          s.err =
+            if cerr.errno != 0 then strerrorText(cerr.errno)
+            else "the connection was closed during the handshake"
+          return -1
+        else
+          s.err = errorText("the TLS handshake failed")
+          return -1
+      -1 // unreachable
+
+    // ALPN protocol lists travel in wire format: a length byte before each name.
+    // Returns a C-heap allocation (the caller keeps it alive) and its length, or
+    // (null, 0) for an empty list.
+    private def alpnWire(fn: String, names: Array[String]): (Ptr[Byte], Int) =
+      var total = 0
+      val encoded = names.map { n =>
+        val b = n.getBytes(StandardCharsets.UTF_8)
+        if b.length < 1 || b.length > 255 then
+          Err.eval(s"$fn: an alpn protocol name must be 1..255 bytes")
+        total += b.length + 1
+        b
+      }
+      if total == 0 then (null, 0)
+      else
+        val wire = cstdlib.malloc(total.toUSize).asInstanceOf[Ptr[Byte]]
+        var at = 0
+        for b <- encoded do
+          wire(at) = b.length.toByte
+          at += 1
+          var i = 0
+          while i < b.length do
+            wire(at) = b(i)
+            at += 1
+            i += 1
+        (wire, total)
+
+    // The server's ALPN pick: the first of our preferences the client offered.
+    // Reads the module's srvAlpn list; runs inside the TLS library during accept.
+    private val alpnCb: FAlpnCb =
+      (ssl: Ptr[Byte], out: Ptr[Ptr[Byte]], outlen: Ptr[Byte], in: Ptr[Byte],
+       inlen: CUnsignedInt, arg: Ptr[Byte]) =>
+      val pref = srvAlpn
+      val prefLen = srvAlpnLen
+      val clientLen = inlen.toInt
+      var i = 0
+      var result = 3 // SSL_TLSEXT_ERR_NOACK
+      var done = false
+      while i < prefLen && !done do
+        val n = (pref(i) & 0xff)
+        var j = 0
+        while j < clientLen && !done do
+          val m = (in(j) & 0xff)
+          if m == n then
+            var eq = true
+            var k = 0
+            while k < n && eq do
+              if pref(i + 1 + k) != in(j + 1 + k) then eq = false
+              k += 1
+            if eq then
+              !out = pref + (i + 1)
+              !outlen = n.toByte
+              result = 0 // SSL_TLSEXT_ERR_OK
+              done = true
+          j += m + 1
+        i += n + 1
+      result
+
+    /** The cached server context for cert/key/alpn; parsed once, reused per
+      * connection. Called with the lock held. Raises on failure. */
+    /** The cached server context; parsed once, reused per connection. Locks like
+      * contextFor, so concurrent accepts share one context safely. */
+    def serverContext(fn: String, cert: String, key: String, alpnNames: Array[String]): Ptr[Byte] =
+      lock.lock()
+      try serverContextLocked(fn, cert, key, alpnNames)
+      finally lock.unlock()
+
+    private def serverContextLocked(fn: String, cert: String, key: String, alpnNames: Array[String]): Ptr[Byte] =
+      loadLocked(fn) // the library may not have been touched yet on this process
+      val (alpn, alpnLen) = alpnWire(fn, alpnNames)
+      val wanted = s"$cert\n$key\n$alpnLen"
+      if srvCtx != null && srvKey == wanted && alpnLen == srvAlpnLen &&
+        (alpnLen == 0 || memEq(alpn, srvAlpn, alpnLen))
+      then
+        if alpn != null then cstdlib.free(alpn.asInstanceOf[CVoidPtr])
+        return srvCtx
+      if pServerMethod == null || pUseCert == null || pUsePkey == null || pSslAccept == null then
+        if alpn != null then cstdlib.free(alpn.asInstanceOf[CVoidPtr])
+        Err.eval(s"$fn: this TLS library cannot run a server")
+      clearErrors()
+      val ctx = pCtxNew(pServerMethod())
+      if ctx == null then
+        if alpn != null then cstdlib.free(alpn.asInstanceOf[CVoidPtr])
+        Err.eval(s"$fn: could not create a TLS context")
+      if pCtxSetMinProto != null then pCtxSetMinProto(ctx, Tls12Version.toInt)
+      else if pCtxCtrl != null then pCtxCtrl(ctx, CtrlSetMinProto, Tls12Version, null)
+      val loaded = Zone.acquire { implicit z =>
+        pUseCert(ctx, toCString(cert)) == 1
+      }
+      if !loaded then
+        pCtxFree(ctx)
+        if alpn != null then cstdlib.free(alpn.asInstanceOf[CVoidPtr])
+        Err.eval(s"$fn: cannot load the certificate '$cert'")
+      val keyed = Zone.acquire { implicit z =>
+        pUsePkey(ctx, toCString(key), 1) == 1 && (pCheckKey == null || pCheckKey(ctx) == 1)
+      }
+      if !keyed then
+        pCtxFree(ctx)
+        if alpn != null then cstdlib.free(alpn.asInstanceOf[CVoidPtr])
+        Err.eval(s"$fn: cannot load the private key '$key'")
+      // Replace the cache.
+      if srvCtx != null then pCtxFree(srvCtx)
+      if srvAlpn != null then cstdlib.free(srvAlpn.asInstanceOf[CVoidPtr])
+      srvCtx = ctx
+      srvKey = wanted
+      srvAlpn = alpn
+      srvAlpnLen = alpnLen
+      if alpnLen > 0 && pSetAlpnCb != null then
+        pSetAlpnCb(ctx, CFuncPtr.toPtr(alpnCb), null)
+      ctx
+
+    private def memEq(a: Ptr[Byte], b: Ptr[Byte], n: Int): Boolean =
+      var i = 0
+      var eq = true
+      while i < n && eq do
+        if a(i) != b(i) then eq = false
+        i += 1
+      eq
+
+    /** Offers ALPN protocols on a client session; false when it cannot. */
+    def setClientAlpn(s: Session, fn: String, names: Array[String]): Boolean =
+      val (wire, len) = alpnWire(fn, names)
+      if wire == null then return true
+      val ok = pSetAlpnProtos != null &&
+        pSetAlpnProtos(s.ssl.asInstanceOf[Ptr[Byte]], wire, len.toUInt) == 0
+      // The client-side setter copies the list, so free it either way.
+      cstdlib.free(wire.asInstanceOf[CVoidPtr])
+      ok
+
+    def newServerSession(fn: String, ctx: Ptr[Byte]): Session =
+      val ssl = pSslNew(ctx)
+      if ssl == null then Err.eval(s"$fn: could not create a TLS connection")
+      new Session(ssl, null)
 
     /** >0 bytes read, 0 end of stream, -1 timed out, -2 failed with s.err set. */
     def read(s: Session, fd: Int, buf: Array[Byte], cap: Int, timeoutMs: Int): Int =
@@ -1307,10 +1538,18 @@ object BuiltinsIpc:
   // TLS
   // -------------------------------------------------------------------------
 
+  /** An SFL array of strings into an Array[String], for an ALPN list. */
+  private def strArray(a: Array[Value], i: Int, fn: String): Array[String] =
+    argArr(a, i, fn).items.toArray.map {
+      case VStr(s) => s
+      case v       => Err.eval(s"$fn: alpn entries must be strings, got ${v.typeName}")
+    }
+
   private def tls(): Unit =
-    define("tlsWrap", 2, 4, "ipc", "tlsWrap(c, host, caFile?, timeoutMs?)",
+    define("tlsWrap", 2, 5, "ipc", "tlsWrap(c, host, caFile?, timeoutMs?, alpn?)",
       "Upgrades a connection to TLS in place: handshake, certificate and hostname " +
-        "verification against host. caFile overrides the trust store.") { a =>
+        "verification against host. caFile overrides the trust store; alpn offers " +
+        "protocols, the negotiated one readable with tlsProto.") { a =>
       val c = connOf(a, 0, "tlsWrap")
       if c.tls != null then Err.eval("tlsWrap: the connection is already TLS")
       if c.in.pos < c.in.len || c.in.held != null then
@@ -1318,10 +1557,14 @@ object BuiltinsIpc:
       val host = argStr(a, 1, "tlsWrap")
       val ca = if a.length > 2 && (a(2) ne VNull) then argStr(a, 2, "tlsWrap") else null
       val ms = if a.length > 3 && (a(3) ne VNull) then argIdx(a, 3, "tlsWrap") else 0
+      val alpn = if a.length > 4 && (a(4) ne VNull) then strArray(a, 4, "tlsWrap") else null
 
       val ctx = Tls.contextFor("tlsWrap", ca)
       val s = Tls.newSession("tlsWrap", ctx, own = ca != null)
       Tls.setFd(s, c.fd)
+      if alpn != null && !Tls.setClientAlpn(s, "tlsWrap", alpn) then
+        Tls.freeSession(s)
+        Err.eval("tlsWrap: this TLS library cannot offer ALPN")
 
       // SNI and hostname verification. An IP literal is verified as an IP and
       // sent no server name, which is what both curl and the JDK do.
@@ -1350,6 +1593,99 @@ object BuiltinsIpc:
       c.tls = s
       c.in.tls = s
       a(0)
+    }
+
+    define("tlsAccept", 3, 5, "ipc", "tlsAccept(c, certFile, keyFile, alpn?, timeoutMs?)",
+      "Upgrades an accepted connection to server-side TLS in place, using the PEM " +
+        "certificate and key; alpn lists the protocols this server prefers, most " +
+        "preferred first, the negotiated one readable with tlsProto.") { a =>
+      val c = connOf(a, 0, "tlsAccept")
+      if c.tls != null then Err.eval("tlsAccept: the connection is already TLS")
+      if c.in.pos < c.in.len || c.in.held != null then
+        Err.eval("tlsAccept: the connection has buffered input")
+      val cert = argStr(a, 1, "tlsAccept")
+      val key = argStr(a, 2, "tlsAccept")
+      val alpn = if a.length > 3 && (a(3) ne VNull) then strArray(a, 3, "tlsAccept") else Array.empty[String]
+      val ms = if a.length > 4 && (a(4) ne VNull) then argIdx(a, 4, "tlsAccept") else 0
+
+      val ctx = Tls.serverContext("tlsAccept", cert, key, alpn)
+      val s = Tls.newServerSession("tlsAccept", ctx)
+      Tls.setFd(s, c.fd)
+
+      val flags = fcntl.fcntl(c.fd, fcntl.F_GETFL, 0)
+      if flags >= 0 then fcntl.fcntl(c.fd, fcntl.F_SETFL, flags | fcntl.O_NONBLOCK)
+
+      val deadline = if ms > 0 then System.currentTimeMillis() + ms else 0L
+      val rc = Tls.handshakeServer(s, c.fd, deadline)
+      if rc != 0 then
+        val why = if rc == -2 then "handshake timed out" else s.err
+        Tls.freeSession(s)
+        if flags >= 0 then fcntl.fcntl(c.fd, fcntl.F_SETFL, flags)
+        Err.eval(s"tlsAccept: $why")
+      c.tls = s
+      c.in.tls = s
+      a(0)
+    }
+
+    define("tlsProto", 1, 1, "ipc", "tlsProto(c)",
+      "The ALPN protocol the TLS handshake settled on, or null.") { a =>
+      val c = connOf(a, 0, "tlsProto")
+      if c.tls == null || c.tls.proto.isEmpty then VNull else VStr(c.tls.proto)
+    }
+
+  // -------------------------------------------------------------------------
+  // Socket knobs and file transmission
+  // -------------------------------------------------------------------------
+
+  // posixlib exposes the socket layer but not the TCP option numbers. IPPROTO_TCP
+  // is 6 by IANA on every platform, and TCP_NODELAY is 1 on both Linux and the
+  // BSD/Darwin headers (verified against <netinet/tcp.h> — it is not 4, which is
+  // TCP_MAXSEG). The C runtime takes these from the header; these ABI values
+  // cannot drift.
+  private final val IpprotoTcp = 6
+  private final val TcpNoDelay = 1
+
+  private def sockopts(): Unit =
+    define("socketNoDelay", 1, 2, "ipc", "socketNoDelay(c, on?)",
+      "Turns TCP_NODELAY on (default) or off: small writes leave now, not after Nagle.") { a =>
+      val c = connOf(a, 0, "socketNoDelay")
+      val on = stackalloc[CInt]()
+      !on = if a.length > 1 then (if a(1).truthy then 1 else 0) else 1
+      if psock.setsockopt(c.fd, IpprotoTcp, TcpNoDelay, on.asInstanceOf[CVoidPtr], 4.toUInt) != 0 then
+        Err.eval(s"socketNoDelay: ${strerrorText(cerr.errno)}")
+      VNull
+    }
+
+    define("socketSendFile", 2, 4, "ipc", "socketSendFile(c, path, offset?, length?)",
+      "Sends length bytes of a file from offset down the connection (TLS included) " +
+        "without the bytes becoming values; returns the count sent.") { a =>
+      val c = connOf(a, 0, "socketSendFile")
+      val path = argStr(a, 1, "socketSendFile")
+      val off = if a.length > 2 && (a(2) ne VNull) then argInt(a, 2, "socketSendFile") else 0L
+      if off < 0 then Err.eval("socketSendFile: offset must not be negative")
+      val f = new java.io.File(path)
+      if !f.isFile then Err.eval(s"socketSendFile: $path (${if f.exists() then "not a regular file" else "No such file or directory"})")
+      val total = f.length()
+      var len = if a.length > 3 && (a(3) ne VNull) then argInt(a, 3, "socketSendFile") else -1L
+      if len < 0 then len = if total > off then total - off else 0L
+
+      val fd = Zone.acquire { implicit z => BlockingFcntl.open(toCString(path), fcntl.O_RDONLY, 0) }
+      if fd < 0 then Err.eval(s"socketSendFile: $path (${strerrorText(cerr.errno)})")
+      val buf = new Array[Byte](65536)
+      var sent = 0L
+      try
+        while sent < len do
+          val want = math.min(len - sent, buf.length.toLong).toInt
+          val got = preadRetry(fd, buf, want, off + sent)
+          if got < 0 then Err.eval(s"socketSendFile: ${strerrorText(cerr.errno)}")
+          if got == 0 then Err.eval(s"socketSendFile: $path is shorter than the requested range")
+          val ok =
+            if c.tls != null then Tls.writeAll(c.tls, c.fd, buf, 0, got)
+            else writeAll(c.fd, buf, 0, got)
+          if !ok then Err.eval(s"socketSendFile: ${connWhy2(c, cerr.errno)}")
+          sent += got
+      finally closeFd(fd)
+      VInt.of(sent)
     }
 
   // -------------------------------------------------------------------------

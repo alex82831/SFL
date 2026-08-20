@@ -340,6 +340,10 @@ bufClear
 socketReadToBuf
 socketWriteBuf
 tlsWrap
+tlsAccept
+tlsProto
+socketNoDelay
+socketSendFile
 udpSocket
 udpPort
 udpSend

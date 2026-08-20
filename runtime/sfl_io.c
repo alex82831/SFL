@@ -351,6 +351,21 @@ SflVal sfl_p_fileSize(int64_t argc, SflVal *argv) {
   return sfl_int((int64_t)st.st_size);
 }
 
+SflVal sfl_p_fileMtime(int64_t argc, SflVal *argv) {
+  struct stat st;
+  if (!path_stat(argv, "fileMtime", &st)) return sfl_int(-1);
+  /* Milliseconds since the epoch, as File.lastModified reports it. The
+     sub-second field is spelled differently on the two platforms; both are
+     folded in so a millisecond-resolution filesystem agrees with the
+     interpreter's lastModified. */
+#if defined(__APPLE__)
+  int64_t ns = st.st_mtimespec.tv_nsec;
+#else
+  int64_t ns = st.st_mtim.tv_nsec;
+#endif
+  return sfl_int((int64_t)st.st_mtime * 1000 + ns / 1000000);
+}
+
 SflVal sfl_p_mkdirs(int64_t argc, SflVal *argv) {
   char *path = sfl_str_dup_utf8_java(sfl_arg_str(argv, 0, "mkdirs"));
   struct stat st;

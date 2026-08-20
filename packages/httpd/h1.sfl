@@ -1,0 +1,397 @@
+// httpd/h1 — the HTTP/1.1 connection driver, and the response plumbing HTTP/2
+// shares: header normalisation, the static-file resolver with conditional and
+// range handling, and the split of a request target into path and query.
+//
+// One connection is one call to h1Serve on the connection's own thread; it
+// loops requests until keep-alive ends. Malformed input is answered with the
+// right 4xx and the connection closed — a parse problem never raises out of
+// here — while a handler error becomes the server's 500 (hook-overridable).
+// The driver returns null when the connection is done, or {switch: "h2c",
+// req, settings} when a client asked to upgrade and http2 is enabled: the
+// caller owns the protocol switch.
+
+val SERVER_NAME = "sfl-httpd/0.1"
+
+// ------------------------------------------------------------ small parsing
+
+// "GET /a/b?x=1 HTTP/1.1" -> {method, target, version} or null.
+def _parseRequestLine(line) {
+  val parts = split(line, " ")
+  if (length(parts) != 3) { return null }
+  if (parts[0] == "" || parts[1] == "") { return null }
+  {method: parts[0], target: parts[1], version: parts[2]}
+}
+
+// Splits a request target into {path, rawQuery}; absolute-form targets from
+// proxy-minded clients are reduced to their path, as an origin server must.
+def targetPath(target) {
+  var t = target
+  if (startsWith(t, "http://") || startsWith(t, "https://")) {
+    val after = indexOf(t, "/", indexOf(t, "://") + 3)
+    t = if (after < 0) then "/" else substring(t, after)
+  }
+  val q = indexOf(t, "?")
+  if (q < 0) then {path: t, rawQuery: ""}
+  else {path: substring(t, 0, q), rawQuery: substring(t, q + 1)}
+}
+
+// Reads header lines until the blank one into {headersObj, tooBig}; names are
+// lowercased, repeats joined with ", ". `budget` caps the total octets.
+def _readHeaders(c, timeoutMs, budget) {
+  val out = {}
+  var used = 0
+  while (true) {
+    val line = socketReadLine(c, timeoutMs)
+    if (line == null) { return null }
+    if (line == "") { return {headers: out, tooBig: false} }
+    used += utf8Length(line) + 2
+    if (used > budget) { return {headers: out, tooBig: true} }
+    val ci = indexOf(line, ":")
+    if (ci > 0) {
+      val name = toLower(trim(substring(line, 0, ci)))
+      val value = trim(substring(line, ci + 1))
+      if (contains(out, name)) { out[name] = "${out[name]}, ${value}" }
+      else { out[name] = value }
+    }
+  }
+}
+
+// ------------------------------------------------------------- request body
+
+// Reads a chunked body into `buf`; true on success, false on any framing
+// problem. Chunk data interleaves with size lines, which the byte/line reads
+// beneath this handle losslessly.
+def _readChunkedBody(c, buf, maxBytes, timeoutMs) {
+  while (true) {
+    val sizeLine = socketReadLine(c, timeoutMs)
+    if (sizeLine == null) { return false }
+    val semi = indexOf(sizeLine, ";")
+    val hexs = trim(if (semi >= 0) then substring(sizeLine, 0, semi) else sizeLine)
+    val n = try(() -> parseInt(hexs, 16), (e) -> -1)
+    if (n == null || n < 0) { return false }
+    if (n == 0) { break }
+    if (bufSize(buf) + n > maxBytes) { return false }
+    var left = n
+    while (left > 0) {
+      val got = socketReadToBuf(c, buf, min(left, 65536), timeoutMs)
+      if (got == null || got == 0) { return false }
+      left -= got
+    }
+    if (socketReadLine(c, timeoutMs) == null) { return false } // the chunk's CRLF
+  }
+  // Trailers, to the blank line.
+  while (true) {
+    val t = socketReadLine(c, timeoutMs)
+    if (t == null) { return false }
+    if (t == "") { return true }
+  }
+}
+
+// ---------------------------------------------------------- response writing
+
+// Lowercased header pairs in caller order, with connection-level headers the
+// drivers own filtered out. Returns [[name, value], ...].
+def normalizeHeaders(resp) {
+  val out = []
+  val hdrs = get(resp, "headers", {})
+  if (hdrs != null) {
+    for (k in keys(hdrs)) {
+      val low = toLower(k)
+      // The drivers own framing: length, connection and coding headers are
+      // computed, never copied through.
+      if (low != "connection" && low != "transfer-encoding" && low != "keep-alive" &&
+          low != "content-length") {
+        push(out, [low, "${hdrs[k]}"])
+      }
+    }
+  }
+  out
+}
+
+def _hasHeader(pairs, name) {
+  for (p in pairs) {
+    if (p[0] == name) { return true }
+  }
+  false
+}
+
+// The Date header, rebuilt at most once a second — header stamping must not
+// cost a timeParts per response.
+val _dateCache = {at: -1, text: ""}
+def dateNow() {
+  val now = timeMillis()
+  val sec = now / 1000
+  if (sec != _dateCache.at) {
+    _dateCache.at = sec
+    _dateCache.text = httpDate(now)
+  }
+  _dateCache.text
+}
+
+// True when a response of this status carries no body at all.
+def bodylessStatus(status) = status == 204 || status == 304 || (status >= 100 && status <= 199)
+
+// Writes one HTTP/1.1 response. Returns false when the connection must close
+// afterwards (the response said so, or framing demanded it).
+def _writeResponse(c, req, resp, keepAlive) {
+  val status = get(resp, "status", 200)
+  val pairs = normalizeHeaders(resp)
+  var head = "HTTP/1.1 ${status} ${statusReason(status)}\r\n"
+  if (!_hasHeader(pairs, "date")) { head += "date: ${dateNow()}\r\n" }
+  if (!_hasHeader(pairs, "server")) { head += "server: ${SERVER_NAME}\r\n" }
+  for (p in pairs) { head += "${p[0]}: ${p[1]}\r\n" }
+
+  val stream = get(resp, "stream", null)
+  val file = get(resp, "file", null)
+  val noBody = req.method == "HEAD" || bodylessStatus(status)
+
+  if (stream != null && !noBody) {
+    // Chunked streaming on 1.1; a 1.0 client gets the raw stream and a close.
+    val chunked = req.proto == "HTTP/1.1"
+    val stayOpen = keepAlive && chunked
+    if (chunked) { head += "transfer-encoding: chunked\r\n" }
+    head += "connection: ${if (stayOpen) then "keep-alive" else "close"}\r\n\r\n"
+    socketWrite(c, head)
+    stream({
+      write: (chunk) -> {
+        val text = "${chunk}"
+        if (text != "") {
+          if (chunked) {
+            socketWrite(c, format("%x", utf8Length(text)) + "\r\n" + text + "\r\n")
+          } else {
+            socketWrite(c, text)
+          }
+        }
+        null
+      }
+    })
+    if (chunked) { socketWrite(c, "0\r\n\r\n") }
+    return stayOpen
+  }
+
+  if (file != null) {
+    head += "content-length: ${file.length}\r\n"
+    head += "connection: ${if (keepAlive) then "keep-alive" else "close"}\r\n\r\n"
+    socketWrite(c, head)
+    if (!noBody && file.length > 0) {
+      socketSendFile(c, file.path, file.offset, file.length)
+    }
+    return keepAlive
+  }
+
+  val body = "${get(resp, "body", "")}"
+  if (noBody) {
+    if (status != 204 && status != 304 && !_hasHeader(pairs, "content-length")) {
+      head += "content-length: ${utf8Length(body)}\r\n"
+    }
+    head += "connection: ${if (keepAlive) then "keep-alive" else "close"}\r\n\r\n"
+    socketWrite(c, head)
+    return keepAlive
+  }
+  head += "content-length: ${utf8Length(body)}\r\n"
+  head += "connection: ${if (keepAlive) then "keep-alive" else "close"}\r\n\r\n"
+  // One write for head and body: small responses cost one syscall.
+  socketWrite(c, head + body)
+  keepAlive
+}
+
+def _reject(c, req, status, text) {
+  _writeResponse(c, req, respond(status, {"content-type": "text/plain; charset=utf-8"}, text), false)
+  null
+}
+
+// ------------------------------------------------------------- static files
+
+// Resolves a static route hit into a response — possibly one carrying a
+// {file: {path, offset, length}} body both drivers know how to send.
+def resolveStatic(req, route) {
+  // The router decoded each segment; refuse any that walks upward.
+  for (seg in split(get(req.params, "rest", ""), "/")) {
+    if (seg == ".." || seg == "." || contains(seg, "\\")) { return respond(403, {}, "forbidden\n") }
+  }
+  var path = joinPath(route.dir, get(req.params, "rest", ""))
+  if (isDir(path)) { path = joinPath(path, route.index) }
+  if (!isFile(path)) { return respond(404, {}, "not found\n") }
+
+  val size = fileSize(path)
+  val mtime = fileMtime(path)
+  val etag = "\"${size}-${mtime}\""
+  val modified = httpDate(mtime)
+  val base = {
+    "content-type": mimeType(path),
+    "etag": etag,
+    "last-modified": modified,
+    "accept-ranges": "bytes"
+  }
+  if (route.maxAge > 0) { base["cache-control"] = "max-age=${route.maxAge}" }
+
+  val inm = get(req.headers, "if-none-match", null)
+  val ims = get(req.headers, "if-modified-since", null)
+  if ((inm != null && contains(inm, etag)) || (inm == null && ims == modified)) {
+    return respond(304, base, "")
+  }
+
+  // A single satisfiable "bytes=a-b" range gets 206; anything else the whole file.
+  var offset = 0
+  var len = size
+  var status = 200
+  val range = get(req.headers, "range", null)
+  if (range != null && startsWith(range, "bytes=") && indexOf(range, ",") < 0) {
+    val spec = substring(range, 6)
+    val dash = indexOf(spec, "-")
+    if (dash >= 0) {
+      val fromS = trim(substring(spec, 0, dash))
+      val toS = trim(substring(spec, dash + 1))
+      var from = -1
+      var until = size - 1
+      if (fromS == "" && toS != "") {
+        // A suffix range: the last N bytes.
+        val n = try(() -> parseInt(toS), (e) -> -1)
+        if (n != null && n > 0) {
+          from = max(0, size - n)
+        }
+      } else if (fromS != "") {
+        from = try(() -> parseInt(fromS), (e) -> -1)
+        if (from == null) { from = -1 }
+        if (toS != "") {
+          val u = try(() -> parseInt(toS), (e) -> -1)
+          until = if (u == null || u < 0) then -1 else min(u, size - 1)
+        }
+      }
+      if (from >= 0 && from < size && until >= from) {
+        offset = from
+        len = until - from + 1
+        status = 206
+        base["content-range"] = "bytes ${from}-${until}/${size}"
+      } else if (from >= size) {
+        base["content-range"] = "bytes */${size}"
+        return respond(416, base, "")
+      }
+    }
+  }
+
+  val r = respond(status, base, "")
+  r.file = {path: path, offset: offset, length: len}
+  r
+}
+
+// --------------------------------------------------------------- the driver
+
+// Runs the handler with the server's error hooks around it.
+def runHandler(srv, req) {
+  try(() -> {
+    val resp = srv.handler(req)
+    if (resp == null || (!isObject(resp))) {
+      error("httpd: handler returned ${typeOf(resp)}, not a response object")
+    }
+    resp
+  }, (e) -> {
+    srv.logError(req, e)
+    try(() -> srv.errorHandler(req, e), (e2) -> respond(500, {}, "internal server error\n"))
+  })
+}
+
+// One HTTP/1.1 connection, request after request. `firstLine` is the request
+// line the caller already consumed while sniffing the protocol.
+def h1Serve(c, srv, firstLine) {
+  val opts = srv.opts
+  var served = 0
+  var pending = firstLine
+  while (true) {
+    val line = if (pending != null) then pending else socketReadLine(c, opts.idleMs)
+    pending = null
+    if (line == null || line == "") { return null } // idle timeout or the peer left
+
+    if (utf8Length(line) > opts.maxUrlBytes + 20) { return _reject(c, {method: "GET"}, 414, "uri too long\n") }
+    val rl = _parseRequestLine(line)
+    if (rl == null) { return _reject(c, {method: "GET"}, 400, "bad request\n") }
+    if (rl.version != "HTTP/1.1" && rl.version != "HTTP/1.0") {
+      return _reject(c, {method: rl.method}, 505, "http version not supported\n")
+    }
+
+    val hr = _readHeaders(c, opts.headerMs, opts.maxHeaderBytes)
+    if (hr == null) { return null }
+    if (hr.tooBig) { return _reject(c, {method: rl.method}, 431, "headers too large\n") }
+    val headers = hr.headers
+
+    // Body framing; rejecting smuggling-shaped requests outright.
+    val te = get(headers, "transfer-encoding", null)
+    val cl = get(headers, "content-length", null)
+    if (te != null && cl != null) { return _reject(c, {method: rl.method}, 400, "bad request\n") }
+    var body = ""
+    if (te != null) {
+      if (toLower(trim(te)) != "chunked") { return _reject(c, {method: rl.method}, 501, "unsupported transfer-encoding\n") }
+      if (contains(toLower(get(headers, "expect", "")), "100-continue")) {
+        socketWrite(c, "HTTP/1.1 100 Continue\r\n\r\n")
+      }
+      val buf = bufNew()
+      if (!_readChunkedBody(c, buf, opts.maxBodyBytes, opts.bodyMs)) {
+        bufClear(buf)
+        return _reject(c, {method: rl.method}, 400, "bad chunked body\n")
+      }
+      body = bufString(buf)
+      bufClear(buf)
+    } else if (cl != null) {
+      val n = try(() -> parseInt(trim(split(cl, ",")[0])), (e) -> -1)
+      if (n == null || n < 0) { return _reject(c, {method: rl.method}, 400, "bad content-length\n") }
+      if (n > opts.maxBodyBytes) { return _reject(c, {method: rl.method}, 413, "content too large\n") }
+      if (n > 0) {
+        if (contains(toLower(get(headers, "expect", "")), "100-continue")) {
+          socketWrite(c, "HTTP/1.1 100 Continue\r\n\r\n")
+        }
+        val buf = bufNew()
+        var left = n
+        var dead = false
+        while (left > 0 && !dead) {
+          val got = socketReadToBuf(c, buf, min(left, 65536), opts.bodyMs)
+          if (got == null || got == 0) { dead = true } else { left -= got }
+        }
+        if (dead) {
+          bufClear(buf)
+          return null
+        }
+        body = bufString(buf)
+        bufClear(buf)
+      }
+    }
+
+    val tp = targetPath(rl.target)
+    val req = {
+      method: rl.method, target: rl.target, path: tp.path,
+      rawQuery: tp.rawQuery, query: parseQuery(tp.rawQuery),
+      headers: headers, body: body, params: {},
+      remote: socketPeer(c), proto: rl.version, scheme: srv.scheme
+    }
+
+    // A protocol switch the caller handles: h2c upgrade, when enabled.
+    if (opts.http2 && rl.version == "HTTP/1.1" &&
+        contains(toLower(get(headers, "upgrade", "")), "h2c") &&
+        contains(headers, "http2-settings")) {
+      socketWrite(c, "HTTP/1.1 101 Switching Protocols\r\nconnection: Upgrade\r\nupgrade: h2c\r\n\r\n")
+      return {switch: "h2c", req: req}
+    }
+
+    served += 1
+    val connHdr = toLower(get(headers, "connection", ""))
+    var keepAlive = rl.version == "HTTP/1.1" && !contains(connHdr, "close") &&
+                    served < opts.maxRequests && !srv.stopping()
+
+    val verdict = runHandler(srv, req)
+    var resp = verdict
+    if (isObject(verdict) && get(verdict, "kind", "") == "static") {
+      resp = resolveStatic(req, verdict.route)
+    } else if (isObject(verdict) && get(verdict, "kind", "") == "ws") {
+      // The WebSocket layer takes the connection over and never returns it.
+      wsServe(c, srv, req, verdict.route)
+      return null
+    }
+    if (isObject(resp) && get(resp, "headers", null) != null &&
+        contains(toLower("${get(resp.headers, "connection", "")}"), "close")) {
+      keepAlive = false
+    }
+
+    val alive = try(() -> _writeResponse(c, req, resp, keepAlive), (e) -> false)
+    srv.logAccess(req, resp)
+    if (!alive) { return null }
+  }
+}

@@ -21,7 +21,7 @@ fail() { printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 # ---------------------------------------------------------------- .sfl suites
 
 echo "script suites"
-for suite in language builtins closures functional concurrency ipc async http diagnostics imports regression stdlib namespaces patterns tuples sugar; do
+for suite in language builtins closures functional concurrency ipc async http httpd diagnostics imports regression stdlib namespaces patterns tuples sugar; do
   if out=$("$SFL" "$suite.sfl" 2>&1); then
     printf '  %s\n' "$out"
   else

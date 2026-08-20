@@ -36,6 +36,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
@@ -171,9 +172,10 @@ static int wait_ready(int fd, short events, int timeout_ms) {
  */
 
 typedef struct Tls {
-  void *ssl;     /* SSL* */
-  void *own_ctx; /* an SSL_CTX private to this connection (custom CA), or NULL */
-  char err[256]; /* the reason of the last failure, when errno cannot say      */
+  void *ssl;      /* SSL* */
+  void *own_ctx;  /* an SSL_CTX private to this connection (custom CA), or NULL */
+  char proto[32]; /* the ALPN protocol the handshake settled on, or ""          */
+  char err[256];  /* the reason of the last failure, when errno cannot say      */
 } Tls;
 
 #define TLS_VERIFY_PEER 1
@@ -218,12 +220,23 @@ static const char *(*p_verify_string)(long);
 static unsigned long (*p_err_get_error)(void);
 static const char *(*p_err_reason)(unsigned long);
 static void (*p_err_clear)(void);
+/* The server side, loaded with the rest and required only by tlsAccept. */
+static const void *(*p_server_method)(void);
+static int (*p_use_cert_chain)(void *, const char *);
+static int (*p_use_priv_key)(void *, const char *, int);
+static int (*p_check_priv_key)(const void *);
+static int (*p_ssl_accept)(void *);
+static void (*p_ctx_set_alpn_cb)(void *, void *, void *);
+static void (*p_get0_alpn)(const void *, const unsigned char **, unsigned int *);
+static int (*p_set_alpn_protos)(void *, const unsigned char *, unsigned int);
 
 static void *tls_sym(const char *name) {
   /* dlsym hands back an object pointer; every platform this runs on lets it be
      a function pointer too, which is the only way to reach a library by name. */
   return dlsym(tls_lib, name);
 }
+
+static unsigned char *alpn_wire(SflVal *argv, int i, const char *fn, size_t *out_len);
 
 static void tls_missing(const char *fn) __attribute__((noreturn));
 static void tls_missing(const char *fn) {
@@ -280,6 +293,14 @@ static void tls_load_locked(const char *fn) {
   *(void **)&p_err_get_error = tls_sym("ERR_get_error");
   *(void **)&p_err_reason = tls_sym("ERR_reason_error_string");
   *(void **)&p_err_clear = tls_sym("ERR_clear_error");
+  *(void **)&p_server_method = tls_sym("TLS_server_method");
+  *(void **)&p_use_cert_chain = tls_sym("SSL_CTX_use_certificate_chain_file");
+  *(void **)&p_use_priv_key = tls_sym("SSL_CTX_use_PrivateKey_file");
+  *(void **)&p_check_priv_key = tls_sym("SSL_CTX_check_private_key");
+  *(void **)&p_ssl_accept = tls_sym("SSL_accept");
+  *(void **)&p_ctx_set_alpn_cb = tls_sym("SSL_CTX_set_alpn_select_cb");
+  *(void **)&p_get0_alpn = tls_sym("SSL_get0_alpn_selected");
+  *(void **)&p_set_alpn_protos = tls_sym("SSL_set_alpn_protos");
   if (p_ctx_new == NULL || p_client_method == NULL || p_ctx_set_verify == NULL ||
       p_ctx_default_paths == NULL || p_ssl_new == NULL || p_ssl_set_fd == NULL ||
       p_ssl_ctrl == NULL || p_ssl_connect == NULL || p_ssl_read == NULL ||
@@ -347,13 +368,26 @@ static int tls_wait(int fd, int want_write, int64_t deadline) {
   return wait_ready(fd, want_write ? POLLOUT : POLLIN, ms);
 }
 
-/* 0 connected, -1 failed with t->err set, -2 the deadline expired. */
-static int tls_handshake(Tls *t, int fd, int64_t deadline) {
+/* 0 connected, -1 failed with t->err set, -2 the deadline expired. `accepting`
+   picks the server side of the handshake. */
+static int tls_handshake(Tls *t, int fd, int64_t deadline, int accepting) {
   for (;;) {
     if (p_err_clear != NULL) p_err_clear();
     errno = 0;
-    int rc = p_ssl_connect(t->ssl);
-    if (rc == 1) return 0;
+    int rc = accepting ? p_ssl_accept(t->ssl) : p_ssl_connect(t->ssl);
+    if (rc == 1) {
+      /* Remember what ALPN settled on, for tlsProto and the h2 dispatch. */
+      if (p_get0_alpn != NULL) {
+        const unsigned char *sel = NULL;
+        unsigned int n = 0;
+        p_get0_alpn(t->ssl, &sel, &n);
+        if (sel != NULL && n > 0 && n < sizeof t->proto) {
+          memcpy(t->proto, sel, n);
+          t->proto[n] = '\0';
+        }
+      }
+      return 0;
+    }
     int err = p_ssl_get_error(t->ssl, rc);
     if (err == TLS_ERR_WANT_READ || err == TLS_ERR_WANT_WRITE) {
       int ready = tls_wait(fd, err == TLS_ERR_WANT_WRITE, deadline);
@@ -1432,13 +1466,28 @@ SflVal sfl_p_tlsWrap(int64_t argc, SflVal *argv) {
     sfl_raise_sig("tlsWrap", "this TLS library cannot verify the peer's name");
   }
 
+  /* Offer ALPN protocols, when the caller brought a preference list. */
+  if (argc > 4 && argv[4] != sfl_null) {
+    size_t wn = 0;
+    unsigned char *wire = alpn_wire(argv, 4, "tlsWrap", &wn);
+    if (wire != NULL) {
+      if (p_set_alpn_protos == NULL || p_set_alpn_protos(t->ssl, wire, (unsigned int)wn) != 0) {
+        sfl_raw_free(wire);
+        tls_free_conn(t);
+        sfl_raw_free(host);
+        sfl_raise_sig("tlsWrap", "this TLS library cannot offer ALPN");
+      }
+      sfl_raw_free(wire); /* the client-side setter copies the list */
+    }
+  }
+
   /* The descriptor stays non-blocking for the life of the session: the WANT
      loops in tls_read/tls_write drive it through poll from here on. */
   int flags = fcntl(c->fd, F_GETFL, 0);
   if (flags >= 0) fcntl(c->fd, F_SETFL, flags | O_NONBLOCK);
 
   int64_t deadline = ms > 0 ? sfl_time_millis() + ms : 0;
-  int rc = tls_handshake(t, c->fd, deadline);
+  int rc = tls_handshake(t, c->fd, deadline, 0);
   if (rc != 0) {
     char why[256];
     snprintf(why, sizeof why, "%s", rc == -2 ? "handshake timed out" : t->err);
@@ -1451,6 +1500,288 @@ SflVal sfl_p_tlsWrap(int64_t argc, SflVal *argv) {
   c->tls = t;
   c->in.tls = t;
   return argv[0];
+}
+
+/* ------------------------------------------------------------------------- */
+/* TLS, server side                                                           */
+/* ------------------------------------------------------------------------- */
+
+/*
+ * ALPN protocol lists travel in wire format: a length byte before each name.
+ * Built from an SFL array of strings; the caller frees it.
+ */
+static unsigned char *alpn_wire(SflVal *argv, int i, const char *fn, size_t *out_len) {
+  SflVal arr = sfl_arg_arr(argv, i, fn);
+  size_t total = 0;
+  for (uint32_t k = 0; k < arr->aux; k++) {
+    SflVal el = arr->u.a.items[k];
+    if (el->tag != SFL_STR) sfl_raise_sig(fn, "alpn entries must be strings");
+    int64_t n = sfl_utf8_java_len(el);
+    if (n < 1 || n > 255) sfl_raise_sig(fn, "an alpn protocol name must be 1..255 bytes");
+    total += (size_t)n + 1;
+  }
+  if (total == 0) {
+    *out_len = 0;
+    return NULL;
+  }
+  unsigned char *wire = (unsigned char *)sfl_raw_alloc(total);
+  size_t at = 0;
+  for (uint32_t k = 0; k < arr->aux; k++) {
+    SflVal el = arr->u.a.items[k];
+    int64_t n = sfl_utf8_java_len(el);
+    wire[at++] = (unsigned char)n;
+    sfl_utf8_java_write(el, (char *)wire + at);
+    at += (size_t)n;
+  }
+  *out_len = total;
+  return wire;
+}
+
+/* The cached server identity the ALPN callback below reads. */
+static void *tls_srv_ctx;
+static char *tls_srv_key;
+static const unsigned char *tls_srv_alpn;
+static size_t tls_srv_alpn_len;
+
+/*
+ * The server's ALPN pick: first protocol of our preference list that the client
+ * offered. The preference list lives with the cached server context, so the
+ * globals above are it. Runs inside the TLS library during SSL_accept.
+ */
+static int tls_alpn_select(void *ssl, const unsigned char **out, unsigned char *outlen,
+                           const unsigned char *in, unsigned int inlen, void *arg) {
+  (void)ssl;
+  (void)arg;
+  const unsigned char *pref = tls_srv_alpn;
+  size_t pref_len = tls_srv_alpn_len;
+  size_t i = 0;
+  while (i < pref_len) {
+    unsigned char n = pref[i];
+    unsigned int j = 0;
+    while (j < inlen) {
+      unsigned char m = in[j];
+      if (m == n && memcmp(pref + i + 1, in + j + 1, n) == 0) {
+        *out = pref + i + 1;
+        *outlen = n;
+        return 0; /* SSL_TLSEXT_ERR_OK */
+      }
+      j += (unsigned int)m + 1;
+    }
+    i += (size_t)n + 1;
+  }
+  return 3; /* SSL_TLSEXT_ERR_NOACK: no overlap, carry on without ALPN */
+}
+
+/*
+ * One cached server context, keyed by certificate, key and ALPN list: a server
+ * accepts thousands of connections with the same identity, and parsing the
+ * PEM files once per connection would dominate the handshake.
+ */
+static void *tls_ctx_server_locked(const char *fn, const char *cert, const char *key,
+                                   unsigned char *alpn, size_t alpn_len) {
+  char wanted[1024];
+  snprintf(wanted, sizeof wanted, "%s\n%s\n%zu", cert, key, alpn_len);
+  if (tls_srv_ctx != NULL && tls_srv_key != NULL && strcmp(tls_srv_key, wanted) == 0 &&
+      alpn_len == tls_srv_alpn_len &&
+      (alpn_len == 0 || memcmp(alpn, tls_srv_alpn, alpn_len) == 0)) {
+    sfl_raw_free(alpn);
+    return tls_srv_ctx;
+  }
+  if (p_server_method == NULL || p_use_cert_chain == NULL || p_use_priv_key == NULL ||
+      p_ssl_accept == NULL) {
+    sfl_raw_free(alpn);
+    sfl_raise_sig(fn, "this TLS library cannot run a server");
+  }
+  if (p_err_clear != NULL) p_err_clear();
+  void *ctx = p_ctx_new(p_server_method());
+  if (ctx == NULL) {
+    sfl_raw_free(alpn);
+    sfl_raise_sig(fn, "could not create a TLS context");
+  }
+  if (p_ctx_set_min_proto != NULL) p_ctx_set_min_proto(ctx, TLS_1_2_VERSION);
+  else if (p_ctx_ctrl != NULL) p_ctx_ctrl(ctx, TLS_CTRL_SET_MIN_PROTO, TLS_1_2_VERSION, NULL);
+  if (p_use_cert_chain(ctx, cert) != 1) {
+    p_ctx_free(ctx);
+    sfl_raw_free(alpn);
+    char msg[512];
+    snprintf(msg, sizeof msg, "cannot load the certificate '%s'", cert);
+    sfl_raise_sig(fn, "%s", msg);
+  }
+  if (p_use_priv_key(ctx, key, 1 /* SSL_FILETYPE_PEM */) != 1 ||
+      (p_check_priv_key != NULL && p_check_priv_key(ctx) != 1)) {
+    p_ctx_free(ctx);
+    sfl_raw_free(alpn);
+    char msg[512];
+    snprintf(msg, sizeof msg, "cannot load the private key '%s'", key);
+    sfl_raise_sig(fn, "%s", msg);
+  }
+
+  /* Replace the cache: context, key string and the ALPN list the callback reads. */
+  if (tls_srv_ctx != NULL) p_ctx_free(tls_srv_ctx);
+  sfl_raw_free(tls_srv_key);
+  sfl_raw_free((void *)tls_srv_alpn);
+  tls_srv_ctx = ctx;
+  tls_srv_key = dup_cstr(wanted);
+  tls_srv_alpn = alpn;
+  tls_srv_alpn_len = alpn_len;
+  if (alpn_len > 0 && p_ctx_set_alpn_cb != NULL)
+    p_ctx_set_alpn_cb(ctx, (void *)tls_alpn_select, NULL);
+  return ctx;
+}
+
+/*
+ * Upgrades an accepted connection to server-side TLS in place and returns the
+ * same handle: tlsAccept(c, certFile, keyFile, alpn?, timeoutMs?). `alpn` lists
+ * the protocols this server prefers, most preferred first; what the handshake
+ * settled on is readable with tlsProto(c).
+ */
+SflVal sfl_p_tlsAccept(int64_t argc, SflVal *argv) {
+  Conn *c = conn_of(argv, 0, "tlsAccept");
+  if (c->tls != NULL) sfl_raise_sig("tlsAccept", "the connection is already TLS");
+  if (c->in.pos < c->in.len || c->in.held != NULL)
+    sfl_raise_sig("tlsAccept", "the connection has buffered input");
+  char *cert = sfl_str_dup_utf8_java(sfl_arg_str(argv, 1, "tlsAccept"));
+  char *key = sfl_str_dup_utf8_java(sfl_arg_str(argv, 2, "tlsAccept"));
+  int ms = (argc > 4 && argv[4] != sfl_null) ? (int)sfl_arg_idx(argv, 4, "tlsAccept") : 0;
+
+  pthread_mutex_lock(&tls_lock);
+  SflHandler guard;
+  sfl_handler_push(&guard);
+  void *ctx = NULL;
+  if (setjmp(guard.jb) != 0) {
+    pthread_mutex_unlock(&tls_lock);
+    sfl_raw_free(cert);
+    sfl_raw_free(key);
+    sfl_raise_val(sfl_err_message());
+  }
+  tls_load_locked("tlsAccept");
+  size_t alpn_len = 0;
+  unsigned char *alpn = (argc > 3 && argv[3] != sfl_null)
+                            ? alpn_wire(argv, 3, "tlsAccept", &alpn_len)
+                            : NULL;
+  ctx = tls_ctx_server_locked("tlsAccept", cert, key, alpn, alpn_len);
+  sfl_handler_pop();
+  pthread_mutex_unlock(&tls_lock);
+  sfl_raw_free(cert);
+  sfl_raw_free(key);
+
+  Tls *t = (Tls *)sfl_raw_alloc(sizeof *t);
+  memset(t, 0, sizeof *t);
+  t->ssl = p_ssl_new(ctx);
+  if (t->ssl == NULL) {
+    tls_free_conn(t);
+    sfl_raise_sig("tlsAccept", "could not create a TLS connection");
+  }
+  p_ssl_set_fd(t->ssl, c->fd);
+
+  int flags = fcntl(c->fd, F_GETFL, 0);
+  if (flags >= 0) fcntl(c->fd, F_SETFL, flags | O_NONBLOCK);
+
+  int64_t deadline = ms > 0 ? sfl_time_millis() + ms : 0;
+  int rc = tls_handshake(t, c->fd, deadline, 1);
+  if (rc != 0) {
+    char why[256];
+    snprintf(why, sizeof why, "%s", rc == -2 ? "handshake timed out" : t->err);
+    tls_free_conn(t);
+    if (flags >= 0) fcntl(c->fd, F_SETFL, flags);
+    sfl_raise_sig("tlsAccept", "%s", why);
+  }
+  c->tls = t;
+  c->in.tls = t;
+  return argv[0];
+}
+
+/* The ALPN protocol the connection's handshake settled on, or null. */
+SflVal sfl_p_tlsProto(int64_t argc, SflVal *argv) {
+  Conn *c = conn_of(argv, 0, "tlsProto");
+  if (c->tls == NULL || c->tls->proto[0] == '\0') return sfl_null;
+  return sfl_str_utf8(c->tls->proto, -1);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Socket knobs and file transmission                                         */
+/* ------------------------------------------------------------------------- */
+
+/* TCP_NODELAY: small writes leave now instead of waiting for Nagle. */
+SflVal sfl_p_socketNoDelay(int64_t argc, SflVal *argv) {
+  Conn *c = conn_of(argv, 0, "socketNoDelay");
+  int on = (argc > 1) ? sfl_truthy(argv[1]) : 1;
+  if (setsockopt(c->fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof on) != 0)
+    sfl_raise_sig("socketNoDelay", "%s", strerror(errno));
+  return sfl_null;
+}
+
+/*
+ * Sends `length` bytes of a file from `offset` down the connection — through
+ * the TLS session when there is one — without the bytes ever becoming values.
+ * Returns the count sent. A file shorter than the requested range raises,
+ * because the framing above has usually promised that length already.
+ */
+SflVal sfl_p_socketSendFile(int64_t argc, SflVal *argv) {
+  Conn *c = conn_of(argv, 0, "socketSendFile");
+  char *path = sfl_str_dup_utf8(sfl_arg_str(argv, 1, "socketSendFile"));
+  char *cpath = sfl_str_dup_utf8_java(sfl_arg_str(argv, 1, "socketSendFile"));
+  int64_t off = (argc > 2 && argv[2] != sfl_null) ? sfl_arg_int(argv, 2, "socketSendFile") : 0;
+  int64_t len = (argc > 3 && argv[3] != sfl_null) ? sfl_arg_int(argv, 3, "socketSendFile") : -1;
+  if (off < 0) {
+    sfl_raw_free(path);
+    sfl_raw_free(cpath);
+    sfl_raise_sig("socketSendFile", "offset must not be negative");
+  }
+
+  int fd;
+  do {
+    fd = open(cpath, O_RDONLY);
+  } while (fd < 0 && errno == EINTR);
+  sfl_raw_free(cpath);
+  if (fd < 0) {
+    char msg[512];
+    snprintf(msg, sizeof msg, "%s (%s)", path, strerror(errno));
+    sfl_raw_free(path);
+    sfl_raise_sig("socketSendFile", "%s", msg);
+  }
+  struct stat st;
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    close_fd(fd);
+    char msg[512];
+    snprintf(msg, sizeof msg, "%s (not a regular file)", path);
+    sfl_raw_free(path);
+    sfl_raise_sig("socketSendFile", "%s", msg);
+  }
+  if (len < 0) len = st.st_size > off ? st.st_size - off : 0;
+
+  char buf[65536];
+  int64_t sent = 0;
+  while (sent < len) {
+    size_t want = (size_t)(len - sent) < sizeof buf ? (size_t)(len - sent) : sizeof buf;
+    ssize_t got;
+    do {
+      got = pread(fd, buf, want, (off_t)(off + sent));
+    } while (got < 0 && errno == EINTR);
+    if (got < 0) {
+      int saved = errno;
+      close_fd(fd);
+      sfl_raw_free(path);
+      sfl_raise_sig("socketSendFile", "%s", strerror(saved));
+    }
+    if (got == 0) {
+      close_fd(fd);
+      char msg[512];
+      snprintf(msg, sizeof msg, "%s is shorter than the requested range", path);
+      sfl_raw_free(path);
+      sfl_raise_sig("socketSendFile", "%s", msg);
+    }
+    if (conn_send(c, buf, (size_t)got) != 0) {
+      int saved = errno;
+      close_fd(fd);
+      sfl_raw_free(path);
+      sfl_raise_sig("socketSendFile", "%s", conn_why(c, saved));
+    }
+    sent += got;
+  }
+  close_fd(fd);
+  sfl_raw_free(path);
+  return sfl_int(sent);
 }
 
 /* ------------------------------------------------------------------------- */

@@ -22,6 +22,7 @@ SKIP=(
   "regression:uses eval(), which needs the interpreter"
   "diagnostics:uses eval(), which needs the interpreter"
   "concurrency:asserts that eval() works on a spawned thread; compiled concurrency is covered by tests/async.sfl and tests/compile/accept/threads.sfl"
+  "httpd:drives real servers with random WebSocket/HTTP2 masking and an optional openssl, so output is not byte-reproducible; compiled coverage is tests/compile/accept/httpd_compiles.sfl"
 )
 
 work=$(mktemp -d)

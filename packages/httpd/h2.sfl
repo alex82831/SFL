@@ -1,0 +1,558 @@
+// httpd/h2 — the HTTP/2 connection driver (RFC 9113).
+//
+// One connection is one call to h2Serve on the connection's own thread, which
+// stays the only reader: it parses frames, feeds the connection's single HPACK
+// decoder in wire order, opens streams and answers control frames. Each
+// request dispatches its handler onto its own thread, so streams progress
+// concurrently; every outgoing frame goes through one write mutex, and DATA
+// respects both the connection and the stream send windows.
+//
+// Where this driver is deliberately smaller than the RFC: PRIORITY frames are
+// read and ignored (the RFC deprecated the scheme), server push is never
+// offered, and WebSocket-over-h2 (extended CONNECT) is not spoken — a WS route
+// answers 400 here and upgrades fine on HTTP/1.1.
+
+val _H2_DATA = 0
+val _H2_HEADERS = 1
+val _H2_PRIORITY = 2
+val _H2_RST = 3
+val _H2_SETTINGS = 4
+val _H2_PUSH = 5
+val _H2_PING = 6
+val _H2_GOAWAY = 7
+val _H2_WINDOW = 8
+val _H2_CONT = 9
+
+val _ERR_NONE = 0
+val _ERR_PROTOCOL = 1
+val _ERR_FLOW = 3
+val _ERR_FRAME_SIZE = 6
+val _ERR_REFUSED = 7
+
+val _OUR_MAX_FRAME = 16384
+val _OUR_WINDOW = 65535
+
+// --------------------------------------------------------------- frame plumbing
+
+def _frameHeader(kind, flags, sid, len) {
+  val out = []
+  pushBe24(out, len)
+  push(out, kind)
+  push(out, flags)
+  pushBe32(out, sid)
+  out
+}
+
+// One frame as one write: header and payload leave in a single syscall.
+def _writeFrame(conn, kind, flags, sid, payload) {
+  withLock(conn.writeLock, () -> {
+    val out = _frameHeader(kind, flags, sid, length(payload))
+    pushBytes(out, payload)
+    socketWriteBytes(conn.c, out)
+  })
+  null
+}
+
+// {kind, flags, sid, payload} or null when the peer is gone.
+def _readFrame(conn) {
+  val h = readExactBytes(conn.c, 9, conn.srv.opts.idleMs)
+  if (h == null) { return null }
+  val len = be24(h, 0)
+  if (len > _OUR_MAX_FRAME) { return {oversize: true, len: len} }
+  val payload = if (len == 0) then [] else readExactBytes(conn.c, len, conn.srv.opts.bodyMs)
+  if (len > 0 && payload == null) { return null }
+  {kind: h[3], flags: h[4], sid: bitAnd(be32(h, 5), 0x7fffffff), payload: payload}
+}
+
+def _goAway(conn, code) {
+  try(() -> {
+    val p = []
+    pushBe32(p, conn.lastStream)
+    pushBe32(p, code)
+    _writeFrame(conn, _H2_GOAWAY, 0, 0, p)
+  }, (e) -> null)
+  null
+}
+
+// ------------------------------------------------------------------ send flow
+
+// Grants up to `want` octets of send window for a stream: blocks until some
+// window opens, and returns 0 when the stream or connection died meanwhile.
+// Waits are 100ms polls woken early by the reader's update token, so a lost
+// wakeup can delay a write but never deadlock it.
+def _takeWindow(conn, sid, want) {
+  while (true) {
+    var granted = 0
+    var dead = false
+    withLock(conn.flowLock, () -> {
+      if (conn.closed || contains(conn.resetStreams, "${sid}")) {
+        dead = true
+      } else {
+        val sw = get(conn.sendWindows, "${sid}", conn.peerInitWindow)
+        val avail = min(conn.connWindow, sw)
+        if (avail > 0) {
+          granted = min(want, avail)
+          conn.connWindow -= granted
+          conn.sendWindows["${sid}"] = sw - granted
+        }
+      }
+      null
+    })
+    if (dead) { return 0 }
+    if (granted > 0) { return granted }
+    receive(conn.flowCh, 100)
+  }
+}
+
+def _flowWake(conn) {
+  if (channelSize(conn.flowCh) == 0) {
+    try(() -> send(conn.flowCh, 1), (e) -> null)
+  }
+  null
+}
+
+// ------------------------------------------------------------- response side
+
+def _respHeaderBlock(conn, resp, extraLen) {
+  val status = get(resp, "status", 200)
+  val pairs = [[":status", "${status}"]]
+  for (p in normalizeHeaders(resp)) { push(pairs, p) }
+  if (extraLen >= 0) { push(pairs, ["content-length", "${extraLen}"]) }
+  push(pairs, ["date", dateNow()])
+  push(pairs, ["server", SERVER_NAME])
+  hpackEncode(pairs, {"set-cookie": true})
+}
+
+// HEADERS plus any CONTINUATIONs, atomically: nothing else may interleave.
+def _writeHeaders(conn, sid, block, endStream) {
+  withLock(conn.writeLock, () -> {
+    val n = length(block)
+    var off = min(n, conn.peerMaxFrame)
+    var flags = if (off == n) then 4 else 0 // END_HEADERS
+    if (endStream) { flags = bitOr(flags, 1) }
+    var out = _frameHeader(_H2_HEADERS, flags, sid, off)
+    pushBytes(out, block, 0, off)
+    socketWriteBytes(conn.c, out)
+    while (off < n) {
+      val take = min(n - off, conn.peerMaxFrame)
+      val last = off + take == n
+      out = _frameHeader(_H2_CONT, if (last) then 4 else 0, sid, take)
+      pushBytes(out, block, off, off + take)
+      socketWriteBytes(conn.c, out)
+      off += take
+    }
+  })
+  null
+}
+
+// DATA from an in-memory byte run, window by window.
+def _writeData(conn, sid, bytes, endStream) {
+  val n = length(bytes)
+  if (n == 0) {
+    if (endStream) { _writeFrame(conn, _H2_DATA, 1, sid, []) }
+    return null
+  }
+  var off = 0
+  while (off < n) {
+    val take = _takeWindow(conn, sid, min(min(n - off, conn.peerMaxFrame), 16384))
+    if (take == 0) { return null } // reset or closed: stop quietly
+    val last = off + take >= n
+    val flags = if (last && endStream) then 1 else 0
+    withLock(conn.writeLock, () -> {
+      val out = _frameHeader(_H2_DATA, flags, sid, take)
+      pushBytes(out, bytes, off, off + take)
+      socketWriteBytes(conn.c, out)
+    })
+    off += take
+  }
+  null
+}
+
+// DATA straight from a file: the frame header goes out, then the runtime pumps
+// the bytes through the same connection (TLS included) without touching SFL.
+def _writeFileData(conn, sid, path, offset, len) {
+  var off = 0
+  while (off < len) {
+    val take = _takeWindow(conn, sid, min(min(len - off, conn.peerMaxFrame), 16384))
+    if (take == 0) { return null }
+    val last = off + take >= len
+    withLock(conn.writeLock, () -> {
+      socketWriteBytes(conn.c, _frameHeader(_H2_DATA, if (last) then 1 else 0, sid, take))
+      socketSendFile(conn.c, path, offset + off, take)
+    })
+    off += take
+  }
+  if (len == 0) { _writeFrame(conn, _H2_DATA, 1, sid, []) }
+  null
+}
+
+// Sends one whole response on a stream, whatever its body shape.
+def _respondOn(conn, sid, req, resp0) {
+  var resp = resp0
+  if (isObject(resp) && get(resp, "kind", "") == "static") {
+    resp = resolveStatic(req, resp.route)
+  } else if (isObject(resp) && get(resp, "kind", "") == "ws") {
+    resp = respond(400, {}, "websocket needs HTTP/1.1\n")
+  }
+  val status = get(resp, "status", 200)
+  val noBody = req.method == "HEAD" || bodylessStatus(status)
+  val stream = get(resp, "stream", null)
+  val file = get(resp, "file", null)
+
+  if (stream != null && !noBody) {
+    _writeHeaders(conn, sid, _respHeaderBlock(conn, resp, -1), false)
+    try(() -> stream({
+      write: (chunk) -> {
+        val text = "${chunk}"
+        if (text != "") { _writeData(conn, sid, utf8Encode(text), false) }
+        null
+      }
+    }), (e) -> conn.srv.logError(req, e))
+    _writeFrame(conn, _H2_DATA, 1, sid, [])
+    return null
+  }
+  if (file != null) {
+    _writeHeaders(conn, sid, _respHeaderBlock(conn, resp, file.length), noBody || file.length == 0)
+    if (!noBody && file.length > 0) { _writeFileData(conn, sid, file.path, file.offset, file.length) }
+    return null
+  }
+  val body = if (noBody) then [] else utf8Encode("${get(resp, "body", "")}")
+  val clen = if (status == 204 || status == 304) then -1 else
+             (if (noBody) then utf8Length("${get(resp, "body", "")}") else length(body))
+  _writeHeaders(conn, sid, _respHeaderBlock(conn, resp, clen), length(body) == 0)
+  if (length(body) > 0) { _writeData(conn, sid, body, true) }
+  null
+}
+
+// Runs one request on its own thread; the stream bookkeeping lives with it.
+def _dispatch(conn, sid, req) {
+  conn.lastStream = max(conn.lastStream, sid)
+  var refused = false
+  withLock(conn.flowLock, () -> {
+    if (conn.active >= conn.srv.opts.maxStreams || conn.srv.stopping()) { refused = true }
+    else { conn.active += 1 }
+    null
+  })
+  if (refused) {
+    val p = []
+    pushBe32(p, _ERR_REFUSED)
+    _writeFrame(conn, _H2_RST, 0, sid, p)
+    return null
+  }
+  spawnDaemon(() -> {
+    val resp = runHandler(conn.srv, req)
+    try(() -> _respondOn(conn, sid, req, resp), (e) -> conn.srv.logError(req, e))
+    conn.srv.logAccess(req, resp)
+    withLock(conn.flowLock, () -> {
+      conn.active -= 1
+      remove(conn.sendWindows, "${sid}")
+      null
+    })
+  })
+  null
+}
+
+// ---------------------------------------------------------------- request side
+
+// Turns decoded header fields into the request object, or null when the
+// pseudo-headers are unusable.
+def _buildReq(conn, fields, sid) {
+  var method = null
+  var path = null
+  var scheme = conn.srv.scheme
+  var authority = ""
+  val headers = {}
+  for (f in fields) {
+    val name = f[0]
+    val value = f[1]
+    if (startsWith(name, ":")) {
+      if (name == ":method") { method = value }
+      else if (name == ":path") { path = value }
+      else if (name == ":scheme") { scheme = value }
+      else if (name == ":authority") { authority = value }
+    } else if (contains(headers, name)) {
+      val sep = if (name == "cookie") then "; " else ", "
+      headers[name] = "${headers[name]}${sep}${value}"
+    } else {
+      headers[name] = value
+    }
+  }
+  if (method == null || path == null || path == "") { return null }
+  if (authority != "" && !contains(headers, "host")) { headers["host"] = authority }
+  val tp = targetPath(path)
+  {
+    method: method, target: path, path: tp.path,
+    rawQuery: tp.rawQuery, query: parseQuery(tp.rawQuery),
+    headers: headers, body: "", params: {},
+    remote: socketPeer(conn.c), proto: "HTTP/2", scheme: scheme, streamId: sid
+  }
+}
+
+// Applies a SETTINGS payload from the peer.
+def _applySettings(conn, p) {
+  var i = 0
+  while (i + 6 <= length(p)) {
+    val ident = be16(p, i)
+    val value = be32(p, i + 2)
+    if (ident == 4) {
+      // INITIAL_WINDOW_SIZE moves every open stream's window by the delta.
+      withLock(conn.flowLock, () -> {
+        val delta = value - conn.peerInitWindow
+        conn.peerInitWindow = value
+        for (k in keys(conn.sendWindows)) { conn.sendWindows[k] += delta }
+        null
+      })
+      _flowWake(conn)
+    } else if (ident == 5) {
+      if (value >= 16384 && value <= 16777215) { conn.peerMaxFrame = min(value, 65536) }
+    }
+    i += 6
+  }
+  null
+}
+
+// Consumes the rest of the client preface off the line reader: the caller says
+// how many of its four lines are still unread.
+def _eatPreface(c, linesLeft, timeoutMs) {
+  val want = ["PRI * HTTP/2.0", "", "SM", ""]
+  var i = 4 - linesLeft
+  while (i < 4) {
+    val line = socketReadLine(c, timeoutMs)
+    if (line != want[i]) { return false }
+    i += 1
+  }
+  true
+}
+
+// ------------------------------------------------------------------ the driver
+
+// Serves one HTTP/2 connection. `entry` says how it arrived:
+//   {prefaceLinesLeft: 3|4, upgradeReq?: req, upgradeSettings?: base64url}
+// Prior knowledge leaves 3 lines (the sniffer ate the first), TLS/ALPN and an
+// h2c upgrade leave all 4.
+def h2Serve(c, srv, entry) {
+  if (!_eatPreface(c, entry.prefaceLinesLeft, srv.opts.headerMs)) { return null }
+
+  val conn = {
+    c: c, srv: srv,
+    dec: hpackDecoder(4096),
+    writeLock: mutex(),
+    flowLock: mutex(),
+    flowCh: channel(1),
+    connWindow: _OUR_WINDOW,
+    sendWindows: {},
+    resetStreams: {},
+    peerInitWindow: 65535,
+    peerMaxFrame: 16384,
+    active: 0,
+    lastStream: 0,
+    closed: false
+  }
+
+  // An upgrade carries the client's settings in a header, base64url-coded.
+  if (contains(entry, "upgradeSettings") && entry.upgradeSettings != null) {
+    try(() -> {
+      val b64 = replace(replace(entry.upgradeSettings, "-", "+"), "_", "/")
+      _applySettings(conn, base64DecodeBytes(b64))
+    }, (e) -> null)
+  }
+
+  // Our settings first, then the h2c-upgraded request runs as stream 1.
+  val ours = []
+  pushBe16(ours, 3)
+  pushBe32(ours, srv.opts.maxStreams)
+  _writeFrame(conn, _H2_SETTINGS, 0, 0, ours)
+  if (contains(entry, "upgradeReq") && entry.upgradeReq != null) {
+    val req = entry.upgradeReq
+    req.proto = "HTTP/2"
+    req.streamId = 1
+    _dispatch(conn, 1, req)
+  }
+
+  // Streams the reader is still assembling: sid -> {req?, fields?, chunks, len}.
+  val opening = {}
+
+  def connError(code) {
+    _goAway(conn, code)
+    withLock(conn.flowLock, () -> {
+      conn.closed = true
+      null
+    })
+    _flowWake(conn)
+    null
+  }
+
+  def finishStream(sid, st) {
+    remove(opening, "${sid}")
+    val req = st.req
+    req.body = utf8Decode(st.chunks)
+    _dispatch(conn, sid, req)
+    null
+  }
+
+  var running = true
+  while (running) {
+    val f = _readFrame(conn)
+    if (f == null) {
+      running = false
+    } else if (contains(f, "oversize")) {
+      connError(_ERR_FRAME_SIZE)
+      running = false
+    } else if (f.kind == _H2_CONT) {
+      // A CONTINUATION outside the HEADERS loop below can never be legal.
+      connError(_ERR_PROTOCOL)
+      running = false
+    } else if (f.kind == _H2_HEADERS) {
+      // HEADERS: padding and priority stripped, CONTINUATIONs joined inline —
+      // the RFC forbids anything else interleaving on the connection.
+      var p = f.payload
+      var at = 0
+      var until = length(p)
+      if (bitAnd(f.flags, 8) != 0) { // PADDED
+        at = 1
+        until -= p[0]
+      }
+      if (bitAnd(f.flags, 32) != 0) { at += 5 } // PRIORITY fields
+      if (at > until) {
+        connError(_ERR_PROTOCOL)
+        running = false
+      } else {
+        val block = slice(p, at, until)
+        var endHeaders = bitAnd(f.flags, 4) != 0
+        val endStream = bitAnd(f.flags, 1) != 0
+        var ok = true
+        while (!endHeaders && ok) {
+          val cf = _readFrame(conn)
+          if (cf == null || contains(cf, "oversize") || cf.kind != _H2_CONT || cf.sid != f.sid) {
+            ok = false
+          } else {
+            pushBytes(block, cf.payload)
+            endHeaders = bitAnd(cf.flags, 4) != 0
+          }
+        }
+        if (!ok) {
+          connError(_ERR_PROTOCOL)
+          running = false
+        } else if (f.sid == 0 || f.sid % 2 == 0) {
+          connError(_ERR_PROTOCOL)
+          running = false
+        } else {
+          val fields = try(() -> conn.dec.decode(block), (e) -> null)
+          if (fields == null) {
+            connError(_ERR_PROTOCOL) // COMPRESSION_ERROR territory; the effect is the same
+            running = false
+          } else if (contains(opening, "${f.sid}")) {
+            // Trailers: legal only with END_STREAM; the fields themselves are
+            // dropped, the request is complete.
+            if (!endStream) {
+              connError(_ERR_PROTOCOL)
+              running = false
+            } else {
+              finishStream(f.sid, opening["${f.sid}"])
+            }
+          } else {
+            val req = _buildReq(conn, fields, f.sid)
+            if (req == null) {
+              val rp = []
+              pushBe32(rp, _ERR_PROTOCOL)
+              _writeFrame(conn, _H2_RST, 0, f.sid, rp)
+            } else if (endStream) {
+              _dispatch(conn, f.sid, req)
+            } else {
+              opening["${f.sid}"] = {req: req, chunks: []}
+            }
+          }
+        }
+      }
+    } else if (f.kind == _H2_DATA) {
+      if (!contains(opening, "${f.sid}")) {
+        // Data for a stream this server never opened or already answered.
+        val rp = []
+        pushBe32(rp, _ERR_PROTOCOL)
+        _writeFrame(conn, _H2_RST, 0, f.sid, rp)
+      } else {
+        var p = f.payload
+        var at = 0
+        var until = length(p)
+        if (bitAnd(f.flags, 8) != 0) {
+          at = 1
+          until -= p[0]
+        }
+        val st = opening["${f.sid}"]
+        if (at > until || length(st.chunks) + (until - at) > srv.opts.maxBodyBytes) {
+          remove(opening, "${f.sid}")
+          val rp = []
+          pushBe32(rp, if (at > until) then _ERR_PROTOCOL else _ERR_REFUSED)
+          _writeFrame(conn, _H2_RST, 0, f.sid, rp)
+        } else {
+          pushBytes(st.chunks, p, at, until)
+          // Replenish both windows right away: reads never stall the peer.
+          val n = length(f.payload)
+          if (n > 0) {
+            val w = []
+            pushBe32(w, n)
+            _writeFrame(conn, _H2_WINDOW, 0, 0, w)
+            _writeFrame(conn, _H2_WINDOW, 0, f.sid, w)
+          }
+          if (bitAnd(f.flags, 1) != 0) { finishStream(f.sid, st) }
+        }
+      }
+    } else if (f.kind == _H2_SETTINGS) {
+      if (bitAnd(f.flags, 1) == 0) {
+        _applySettings(conn, f.payload)
+        _writeFrame(conn, _H2_SETTINGS, 1, 0, [])
+      }
+    } else if (f.kind == _H2_PING) {
+      if (bitAnd(f.flags, 1) == 0 && length(f.payload) == 8) {
+        _writeFrame(conn, _H2_PING, 1, 0, f.payload)
+      }
+    } else if (f.kind == _H2_WINDOW) {
+      if (length(f.payload) == 4) {
+        val inc = bitAnd(be32(f.payload, 0), 0x7fffffff)
+        if (inc == 0) {
+          connError(_ERR_PROTOCOL)
+          running = false
+        } else {
+          withLock(conn.flowLock, () -> {
+            if (f.sid == 0) { conn.connWindow += inc }
+            else {
+              val cur = get(conn.sendWindows, "${f.sid}", conn.peerInitWindow)
+              conn.sendWindows["${f.sid}"] = cur + inc
+            }
+            null
+          })
+          _flowWake(conn)
+        }
+      }
+    } else if (f.kind == _H2_RST) {
+      withLock(conn.flowLock, () -> {
+        conn.resetStreams["${f.sid}"] = true
+        null
+      })
+      remove(opening, "${f.sid}")
+      _flowWake(conn)
+    } else if (f.kind == _H2_PUSH) {
+      connError(_ERR_PROTOCOL)
+      running = false
+    } else if (f.kind == _H2_GOAWAY) {
+      // The peer is wrapping up: stop reading once current streams settle.
+      running = false
+    } else {
+      null // PRIORITY and unknown frame kinds: read and ignored
+    }
+  }
+
+  // Drain: let running handlers finish writing before the socket goes away.
+  _goAway(conn, _ERR_NONE)
+  var waited = 0
+  while (conn.active > 0 && waited < 10000) {
+    sleep(20)
+    waited += 20
+  }
+  withLock(conn.flowLock, () -> {
+    conn.closed = true
+    null
+  })
+  _flowWake(conn)
+  null
+}

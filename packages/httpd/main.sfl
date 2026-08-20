@@ -1,0 +1,228 @@
+// httpd — an HTTP server framework for SFL, stability and performance first.
+//
+//   import "httpd"
+//
+//   val srv = httpServer({
+//     port: 8080,
+//     handler: routes([
+//       GET("/", (req) -> respondText(200, "hello")),
+//       GET("/users/:id", (req) -> respondJson(200, {id: req.params.id})),
+//       STATIC("/assets", "./public"),
+//       WS("/echo", {message: (sock, data, isText) -> sock.send(data)})
+//     ])
+//   })
+//   srv.listen()                    // synchronous: blocks until srv.stop()
+//
+// The asynchronous shape is the same server without the block:
+//   srv.start()                    // returns at once, accepting in the background
+//   ...
+//   srv.stop()                     // stop accepting, drain in-flight, then close
+//
+// What it speaks: HTTP/1.1 (keep-alive, chunked in both directions, Expect:
+// 100-continue, conditional and range requests on static files), HTTP/2
+// (cleartext via prior knowledge or the h2c upgrade, and over TLS via ALPN;
+// multiplexed streams, HPACK, flow control), WebSocket, and server-sent events
+// through respondEvents. TLS wants {tls: {cert: "...", key: "..."}} with PEM
+// files and verifies nothing about clients (no mTLS yet).
+//
+// The concurrency model is the language's: one thread per connection, one
+// thread per HTTP/2 stream, so handlers may block freely — that is what
+// "async" means everywhere else in SFL, and the server composes with spawn,
+// channels and await exactly like any other code.
+
+import "mime"
+import "hpack"
+import "router"
+import "h1"
+import "h2"
+import "ws"
+
+val _defaults = {
+  port: 0,
+  backlog: 128,
+  http2: true,
+  tls: null,
+  maxConnections: 1024,
+  maxRequests: 1000,
+  maxStreams: 128,
+  idleMs: 30000,
+  headerMs: 10000,
+  bodyMs: 30000,
+  maxHeaderBytes: 32768,
+  maxUrlBytes: 8192,
+  maxBodyBytes: 8388608,
+  quiet: false,
+  log: null,
+  errorHandler: null
+}
+
+// Builds a server around `opts`. Nothing binds until start()/listen().
+def httpServer(opts = {}) {
+  if (!isObject(opts)) { error("httpd: httpServer takes an options object") }
+  if (!contains(opts, "handler") || !isFunction(opts.handler)) {
+    error("httpd: options must carry a handler function (see routes())")
+  }
+  val cfg = {}
+  for (k in keys(_defaults)) { cfg[k] = get(opts, k, _defaults[k]) }
+  cfg.handler = opts.handler
+
+  val stopFlag = atomic(0)
+  val live = atomic(0)
+  val conns = {byId: {}, nextId: 0, lock: mutex()}
+  val state = {listener: null, acceptT: null, port: 0}
+
+  def stopping() = atomicGet(stopFlag) != 0
+
+  def logError(req, message) {
+    if (!cfg.quiet) {
+      eprintln("httpd: ${get(req, "method", "?")} ${get(req, "path", "?")}: ${message}")
+    }
+    null
+  }
+
+  def logAccess(req, resp) {
+    if (cfg.log != null) {
+      try(() -> cfg.log({
+        method: get(req, "method", "?"), path: get(req, "path", "?"),
+        status: if (isObject(resp)) then get(resp, "status", 200) else 200,
+        remote: get(req, "remote", ""), proto: get(req, "proto", "")
+      }), (e) -> null)
+    }
+    null
+  }
+
+  val srv = {
+    handler: cfg.handler,
+    opts: cfg,
+    scheme: if (cfg.tls != null) then "https" else "http",
+    stopping: stopping,
+    logError: logError,
+    logAccess: logAccess
+  }
+
+  def track(c) {
+    withLock(conns.lock, () -> {
+      conns.nextId += 1
+      val id = "${conns.nextId}"
+      conns.byId[id] = c
+      id
+    })
+  }
+
+  def untrack(id) {
+    withLock(conns.lock, () -> {
+      remove(conns.byId, id)
+      null
+    })
+  }
+
+  // One accepted connection, on its own thread, whatever the protocol turns
+  // out to be. Errors never leave here: a broken peer closes quietly.
+  def handleConn(c) {
+    try(() -> socketNoDelay(c), (e) -> null) // latency over Nagle, where the runtime has it
+    var alpn = null
+    if (cfg.tls != null) {
+      tlsAccept(c, cfg.tls.cert, cfg.tls.key,
+        if (cfg.http2) then ["h2", "http/1.1"] else ["http/1.1"])
+      alpn = tlsProto(c)
+    }
+    if (alpn == "h2") {
+      h2Serve(c, srv, {prefaceLinesLeft: 4})
+      return null
+    }
+    // Cleartext (or TLS that settled on http/1.1): sniff the first line.
+    val line = socketReadLine(c, cfg.idleMs)
+    if (line == null) { return null }
+    if (cfg.http2 && line == "PRI * HTTP/2.0") {
+      h2Serve(c, srv, {prefaceLinesLeft: 3})
+      return null
+    }
+    val outcome = h1Serve(c, srv, line)
+    if (outcome != null && get(outcome, "switch", "") == "h2c") {
+      h2Serve(c, srv, {
+        prefaceLinesLeft: 4,
+        upgradeReq: outcome.req,
+        upgradeSettings: get(outcome.req.headers, "http2-settings", null)
+      })
+    }
+    null
+  }
+
+  def acceptLoop(listener) {
+    while (!stopping()) {
+      val c = accept(listener, 250)
+      if (c != null) {
+        if (atomicGet(live) >= cfg.maxConnections) {
+          try(() -> {
+            socketWrite(c, "HTTP/1.1 503 Service Unavailable\r\nretry-after: 1\r\n" +
+              "content-length: 0\r\nconnection: close\r\n\r\n")
+            closeSocket(c)
+          }, (e) -> null)
+        } else {
+          atomicAdd(live, 1)
+          val id = track(c)
+          spawnDaemon(() -> {
+            try(() -> handleConn(c), (e) -> null)
+            try(() -> closeSocket(c), (e) -> null)
+            untrack(id)
+            atomicAdd(live, -1)
+          })
+        }
+      }
+    }
+    closeServer(listener)
+    null
+  }
+
+  def start() {
+    if (state.listener != null) { error("httpd: the server is already running") }
+    if (stopping()) { error("httpd: the server was stopped") }
+    val listener = serverSocket(cfg.port, cfg.backlog)
+    state.listener = listener
+    state.port = serverPort(listener)
+    state.acceptT = spawn(acceptLoop, listener)
+    null
+  }
+
+  // Stops accepting, waits for in-flight work up to drainMs, then cuts what is
+  // left. Returns the number of connections that had to be cut.
+  def stop(drainMs = 5000) {
+    if (state.listener == null || stopping()) { return 0 }
+    atomicSet(stopFlag, 1)
+    await(state.acceptT)
+    var waited = 0
+    while (atomicGet(live) > 0 && waited < drainMs) {
+      sleep(20)
+      waited += 20
+    }
+    var cut = 0
+    withLock(conns.lock, () -> {
+      for (id in keys(conns.byId)) {
+        try(() -> closeSocket(conns.byId[id]), (e) -> null)
+        cut += 1
+      }
+      null
+    })
+    // The cut sockets unblock their threads; give them a beat to unwind.
+    waited = 0
+    while (atomicGet(live) > 0 && waited < 1000) {
+      sleep(10)
+      waited += 10
+    }
+    cut
+  }
+
+  {
+    start: start,
+    listen: () -> {
+      start()
+      await(state.acceptT)
+      null
+    },
+    stop: stop,
+    port: () -> state.port,
+    url: () -> "${srv.scheme}://127.0.0.1:${state.port}",
+    connections: () -> atomicGet(live),
+    stopping: stopping
+  }
+}

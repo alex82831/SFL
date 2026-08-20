@@ -1,0 +1,184 @@
+// httpd/router — routes, path patterns and middleware.
+//
+//   val app = routes([
+//     GET("/", (req) -> respondText(200, "hello")),
+//     GET("/users/:id", (req) -> respondJson(200, {id: req.params.id})),
+//     POST("/echo", (req) -> respondText(200, req.body)),
+//     STATIC("/assets", "./public"),
+//     WS("/chat", {message: (sock, msg, isText) -> sock.send("echo " + msg)})
+//   ])
+//
+// A route pattern is matched segment by segment: a literal must equal the
+// (percent-decoded) path segment, `:name` captures one segment into
+// req.params, and a trailing `*name` captures the rest of the path joined by
+// slashes (possibly empty). The most specific route wins by declaration order.
+// A path that matches some route but not its method gets 405 with Allow.
+
+def _route(method, pattern, handler, kind = "http") {
+  if (!isString(pattern) || !startsWith(pattern, "/")) {
+    error("httpd: route pattern must start with '/', got ${jsonStringify(pattern)}")
+  }
+  if (kind == "http" && !isFunction(handler)) {
+    error("httpd: route handler must be a function")
+  }
+  {method: method, segs: _segments(pattern), handler: handler, kind: kind, pattern: pattern}
+}
+
+def _segments(pattern) {
+  val parts = split(pattern, "/")
+  val out = []
+  for (p in parts) {
+    if (p != "") { push(out, p) }
+  }
+  out
+}
+
+def GET(pattern, handler) = _route("GET", pattern, handler)
+def POST(pattern, handler) = _route("POST", pattern, handler)
+def PUT(pattern, handler) = _route("PUT", pattern, handler)
+def DELETE(pattern, handler) = _route("DELETE", pattern, handler)
+def PATCH(pattern, handler) = _route("PATCH", pattern, handler)
+def HEAD(pattern, handler) = _route("HEAD", pattern, handler)
+def OPTIONS(pattern, handler) = _route("OPTIONS", pattern, handler)
+def ANY(pattern, handler) = _route("*", pattern, handler)
+
+// Serves files under `dir` for paths below `prefix`. Opts: {index?: "index.html",
+// maxAgeSeconds?: 0}. Directory requests serve the index file when present.
+def STATIC(prefix, dir, opts = {}) {
+  val clean = if (endsWith(prefix, "/*rest")) then prefix else
+              (if (endsWith(prefix, "/")) then "${prefix}*rest" else "${prefix}/*rest")
+  val r = _route("GET", clean, null, "static")
+  r.dir = dir
+  r.index = get(opts, "index", "index.html")
+  r.maxAge = get(opts, "maxAgeSeconds", 0)
+  r
+}
+
+// A WebSocket endpoint. Hooks: {open?: (sock) -> _, message?: (sock, data, isText) -> _,
+// close?: (sock, code, reason) -> _}. Options ride along: {maxMessageBytes?}.
+def WS(pattern, hooks, opts = {}) {
+  val r = _route("GET", pattern, null, "ws")
+  r.hooks = hooks
+  r.wsOpts = opts
+  r
+}
+
+// Matches one route against a method and split path; null or a params object.
+def _match(route, method, pathSegs) {
+  if (route.method != "*" && route.method != method) {
+    // HEAD falls back to GET handlers; the driver drops the body.
+    if (!(method == "HEAD" && route.method == "GET")) { return null }
+  }
+  val segs = route.segs
+  val params = {}
+  var i = 0
+  val n = length(segs)
+  while (i < n) {
+    val pat = segs[i]
+    if (startsWith(pat, "*")) {
+      // The rest of the path, joined back; matches even when empty.
+      val rest = []
+      var j = i
+      while (j < length(pathSegs)) {
+        push(rest, pathSegs[j])
+        j += 1
+      }
+      params[substring(pat, 1)] = join(rest, "/")
+      return params
+    }
+    if (i >= length(pathSegs)) { return null }
+    if (startsWith(pat, ":")) {
+      params[substring(pat, 1)] = pathSegs[i]
+    } else if (pat != pathSegs[i]) {
+      return null
+    }
+    i += 1
+  }
+  if (length(pathSegs) != n) { return null }
+  params
+}
+
+// Builds the request handler the server drives. It returns either a response
+// object, or — for ws/static routes — dispatch instructions the driver acts on.
+def routes(table) {
+  if (!isArray(table)) { error("httpd: routes() takes an array of routes") }
+  def dispatch(req) {
+    val pathSegs = []
+    for (p in split(req.path, "/")) {
+      if (p != "") { push(pathSegs, uriDecode(p)) }
+    }
+    var allowed = []
+    for (r in table) {
+      val params = _match(r, req.method, pathSegs)
+      if (params != null) {
+        req.params = params
+        if (r.kind == "static") { return {kind: "static", route: r} }
+        if (r.kind == "ws") { return {kind: "ws", route: r} }
+        return r.handler(req)
+      }
+      // For the 405 Allow header: does the path match under some other method?
+      if (r.kind == "http" && r.method != "*") {
+        val m2 = _match(r, r.method, pathSegs)
+        if (m2 != null && !contains(allowed, r.method)) { push(allowed, r.method) }
+      }
+    }
+    if (length(allowed) > 0) {
+      return respond(405, {allow: join(allowed, ", ")}, "method not allowed\n")
+    }
+    respond(404, {}, "not found\n")
+  }
+  dispatch
+}
+
+// Wraps a handler in middleware, innermost listed last:
+//   use([logging, auth], routes([...]))
+// A middleware is (req, next) -> response, free to answer without calling next.
+def use(middlewares, handler) {
+  var wrapped = handler
+  var i = length(middlewares) - 1
+  while (i >= 0) {
+    val mw = middlewares[i]
+    val inner = wrapped
+    wrapped = (req) -> mw(req, inner)
+    i -= 1
+  }
+  wrapped
+}
+
+// ------------------------------------------------------------- response kit
+
+// The canonical response shape: {status, headers, body}. Header names are kept
+// as written here and lowercased on the wire where the protocol wants that.
+def respond(status, headers = {}, body = "") {
+  {status: status, headers: headers, body: body}
+}
+
+def respondText(status, body) = respond(status, {"content-type": "text/plain; charset=utf-8"}, body)
+
+def respondHtml(status, body) = respond(status, {"content-type": "text/html; charset=utf-8"}, body)
+
+def respondJson(status, v) = respond(status, {"content-type": "application/json"}, jsonStringify(v))
+
+def redirect(to, status = 302) = respond(status, {location: to}, "")
+
+// A streaming response: writer receives {write(chunk)} and the driver frames
+// each chunk as it comes (chunked transfer on HTTP/1.1, DATA frames on HTTP/2).
+def respondStream(status, headers, writer) {
+  {status: status, headers: headers, stream: writer}
+}
+
+// Server-sent events: handler receives {send(data, event?, id?), comment(text)}
+// and blocks for the life of the subscription.
+def respondEvents(handler) {
+  respondStream(200, {"content-type": "text/event-stream", "cache-control": "no-cache"},
+    (w) -> handler({
+      send: (data, event = null, id = null) -> {
+        var msg = ""
+        if (id != null) { msg = msg + "id: ${id}\n" }
+        if (event != null) { msg = msg + "event: ${event}\n" }
+        for (line in lines("${data}")) { msg = msg + "data: ${line}\n" }
+        w.write(msg + "\n")
+      },
+      comment: (text) -> w.write(": ${text}\n\n")
+    }))
+}
