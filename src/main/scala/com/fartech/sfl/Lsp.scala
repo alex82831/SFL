@@ -205,11 +205,12 @@ final class Lsp:
    */
   private def undefinedDiagnostics(intel: ParseIntel, path: String, text: String): Seq[Value] =
     val builtins = Builtins.names.toSet
+    val dsl = if isBuildFile(path) then buildDsl.map(_.name).toSet else Set.empty[String]
     val seen = mutable.HashSet.empty[(String, Int)]
     val out = mutable.ArrayBuffer.empty[Value]
     for r <- intel.refs do
       if out.length < 100 && r.file == path
-        && !builtins.contains(r.name) && !intel.isDefined(r.name)
+        && !builtins.contains(r.name) && !intel.isDefined(r.name) && !dsl.contains(r.name)
         && !Tok.reserved.contains(r.name) && seen.add((r.name, r.line))
       then
         val line0 = math.max(0, r.line - 1)
@@ -328,6 +329,9 @@ final class Lsp:
     for m <- ValRe.findAllMatchIn(text) do
       val name = m.group(1)
       if !items.contains(name) then items(name) = completionItem(name, 6, name, "", "1")
+    if isBuildFile(path) then
+      for m <- buildDsl do
+        items(m.name) = completionItem(m.name, m.kind, s"${m.detail} — sfl build DSL", "", "0")
     // Plainly imported modules put their public names in scope, so completion
     // owes them: mongodb's insertOne belongs in the list the moment the file
     // says import "mongodb". One transitive level covers packages whose main
@@ -521,6 +525,26 @@ final class Lsp:
     walk(path, text, 1)
     out.toSeq
 
+  /**
+   * The build tool defines project() and task() before it evaluates build.sfl,
+   * so inside that one file those names are real. Their surface is read from
+   * the build tool source embedded in this binary — the very code `sfl build`
+   * runs — so the DSL and this list cannot drift.
+   */
+  private lazy val buildDsl: List[Member] =
+    val src = BuildToolSources.text("main.sfl")
+    val out = mutable.LinkedHashMap.empty[String, Member]
+    for m <- ModuleDefRe.findAllMatchIn(src) if !m.group(1).startsWith("_") do
+      out(m.group(1)) =
+        Member(m.group(1), 3, s"def ${m.group(1)}(${m.group(2)})", lineOfOffset(src, m.start))
+    for m <- ModuleValRe.findAllMatchIn(src) if !m.group(1).startsWith("_") do
+      if !out.contains(m.group(1)) then
+        out(m.group(1)) = Member(m.group(1), 6, s"val ${m.group(1)}", lineOfOffset(src, m.start))
+    out.values.toList
+
+  private def isBuildFile(path: String): Boolean =
+    new File(path).getName == "build.sfl"
+
   private def lineOfOffset(text: String, off: Int): Int =
     var line = 0
     var i = 0
@@ -713,6 +737,13 @@ final class Lsp:
           member <- moduleSurface(path, text, module).find(_.name == word) do
         return markdownHover(s"```sfl\n${member.detail}\n```\n\n*from module $module*")
 
+    if isBuildFile(path) then
+      buildDsl.find(_.name == word) match
+        case Some(m) =>
+          return markdownHover(
+            s"```sfl\n${m.detail}\n```\n\n*sfl build DSL — defined by the build tool " +
+              "before build.sfl runs; see the project guide*")
+        case None => ()
     Builtins.lookup(word).filterNot(b => Builtins.isInternal(b.name)) match
       case Some(b) =>
         markdownHover(s"```sfl\n${b.signature}\n```\n\n${b.doc}\n\n*builtin, group ${b.group}*")
@@ -767,7 +798,13 @@ final class Lsp:
       return docAliases(text).get(recv)
         .flatMap(module => moduleSurface(path, text, module).find(m => m.name == fn && m.kind == 3))
         .map(m => (m.detail.stripPrefix("def "), s"from module ${docAliases(text)(recv)}"))
-    Builtins.lookup(callee).map(b => (b.signature, b.doc)).orElse {
+    val fromDsl =
+      if isBuildFile(path) then
+        buildDsl.find(m => m.name == callee && m.kind == 3)
+          .map(m => (m.detail.stripPrefix("def "),
+            "sfl build DSL — defined by the build tool before build.sfl runs"))
+      else None
+    fromDsl.orElse(Builtins.lookup(callee).map(b => (b.signature, b.doc))).orElse {
       DefRe.findAllMatchIn(text).find(_.group(1) == callee)
         .map(m => (s"$callee(${m.group(2)})", "defined in this file"))
     }.orElse {

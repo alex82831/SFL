@@ -313,6 +313,41 @@ async function main() {
   });
   check('references finds both uses', refs.result.length === 2, JSON.stringify(refs.result));
 
+  // -- build.sfl knows the build tool's DSL ---------------------------------------
+  const buildUri = 'file://' + pathmod.join(dir, 'build.sfl');
+  let diagsP3 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didOpen', {
+    textDocument: {
+      uri: buildUri, languageId: 'sfl', version: 1,
+      text: 'project({\n  "name": "demo",\n  "main": "src/main.sfl"\n})\n\ntask("greet", (args) -> println("hi"), "greet")\n',
+    },
+  });
+  const buildDiags = (await diagsP3).params.diagnostics;
+  check('project()/task() are defined inside build.sfl', buildDiags.length === 0,
+    JSON.stringify(buildDiags));
+
+  const dslComp = await request('textDocument/completion', {
+    textDocument: { uri: buildUri }, position: { line: 4, character: 0 },
+  });
+  const projItem = dslComp.result.find((i) => i.label === 'project');
+  check('project offered in build.sfl completion', !!projItem && /build DSL/.test(projItem.detail));
+
+  const dslSig = await request('textDocument/signatureHelp', {
+    textDocument: { uri: buildUri }, position: { line: 0, character: 8 },
+  });
+  check('signature help knows project(spec)',
+    !!dslSig.result && /project\(spec\)/.test(dslSig.result.signatures[0].label));
+
+  // The DSL exists only for build.sfl: elsewhere project() stays undefined.
+  const otherUri = 'file://' + pathmod.join(dir, 'notbuild.sfl');
+  diagsP3 = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didOpen', {
+    textDocument: { uri: otherUri, languageId: 'sfl', version: 1, text: 'project({})\n' },
+  });
+  const otherDiags = (await diagsP3).params.diagnostics;
+  check('project() still undefined outside build.sfl',
+    otherDiags.length === 1 && /project/.test(otherDiags[0].message));
+
   // -- project-local packages resolve via the server's cwd ------------------------
   // The plugins launch `sfl lsp` with cwd = project root precisely so that the
   // importer's cwd-relative roots (./sfl_packages, ./packages) mean the project's

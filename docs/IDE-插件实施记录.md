@@ -67,7 +67,10 @@ libs + 已装包；平代码列内置 336 + 关键字 + 文件内 def/val + 片�
 记录全局读/全局定义/容错化的 import 失败；LSP 端 refs−defined−builtins 得未定义集，
 仅在全部 import 成功时启用（防误报），带 Err.suggest 拼写建议；import 失败逐条成诊断，
 文件其余部分照常解析。四个导航 provider（declaration/implementation/typeDefinition 落
-definition，references 词边界匹配）。SFL_HOME/开关经环境变量传给 lsp/dap/build 子进程
+definition，references 词边界匹配）。build.sfl 特判：project()/task() 的表面从
+二进制内嵌的构建工具源码（BuildToolSources）提取——DSL 与白名单/补全/签名同源，
+不会漂移；LSP 进程工作目录 = 项目根（插件设置），./packages 与 ./sfl_packages
+的解析与终端一致。SFL_HOME/开关经环境变量传给 lsp/dap/build 子进程
 （SFL_LSP_UNDEFINED=off），两端设置页可配，IDEA 侧 Apply 即重启服务器。
 没有：重命名、语义高亮、格式化——这些需要评估第二节说的语言服务层
 （无损 CST、错误恢复、符号模型）。现有"跳转/成员补全"是正则与启发式级别，够用但
