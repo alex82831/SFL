@@ -777,6 +777,9 @@ final class Lsp:
           "end" -> VObj.of(Seq("line" -> VInt.of(line),
             "character" -> VInt.of(lineLength(targetText, line))))))))
 
+    def sourceOf(file: File): String =
+      try FileUtil.read(file) catch case _: Throwable => ""
+
     // `alias.word`: the definition lives in the aliased module.
     var s = off
     while s > 0 && isIdentChar(text.charAt(s - 1)) do s -= 1
@@ -786,33 +789,32 @@ final class Lsp:
       var rs = e
       while rs > 0 && isIdentChar(text.charAt(rs - 1)) do rs -= 1
       val recv = text.substring(rs, e)
-      for spec <- docAliases(path, text).get(recv) do
+      val aliased = docAliases(path, text).get(recv).flatMap { spec =>
         unitOf(path, spec) match
           case Some((dir, _)) =>
-            for (file, line) <- unitDefinitionOf(dir, word) do
-              val src = try FileUtil.read(file) catch case _: Throwable => ""
-              return location(pathToUri(file.getAbsolutePath), src, line)
+            unitDefinitionOf(dir, word).map((file, line) =>
+              location(pathToUri(file.getAbsolutePath), sourceOf(file), line))
           case None =>
-            for member <- moduleSurface(path, text, spec).find(_.name == word);
-                file <- resolveModule(path, spec) do
-              val src = try FileUtil.read(file) catch case _: Throwable => ""
-              return location(pathToUri(file.getAbsolutePath), src, member.line)
-      return VNull
+            for
+              member <- moduleSurface(path, text, spec).find(_.name == word)
+              file <- resolveModule(path, spec)
+            yield location(pathToUri(file.getAbsolutePath), sourceOf(file), member.line)
+      }
+      // A qualified name answers for itself: if the alias has no such member,
+      // the plain searches below would only find an unrelated one.
+      return aliased.getOrElse(VNull)
 
     // This file first, plainly imported modules second.
-    for m <- DefRe.findAllMatchIn(text) if m.group(1) == word do
-      return location(uri, text, lineOfOffset(text, m.start))
-    for m <- ValRe.findAllMatchIn(text) if m.group(1) == word do
-      return location(uri, text, lineOfOffset(text, m.start))
-    for im <- plainImports(path, text) do
-      val module = im.group(1)
-      moduleSurface(path, text, module).find(_.name == word) match
-        case Some(member) =>
-          for file <- resolveModule(path, module) do
-            val src = try FileUtil.read(file) catch case _: Throwable => ""
-            return location(pathToUri(file.getAbsolutePath), src, member.line)
-        case None => ()
-    VNull
+    DefRe.findAllMatchIn(text).find(_.group(1) == word)
+      .orElse(ValRe.findAllMatchIn(text).find(_.group(1) == word))
+      .map(m => location(uri, text, lineOfOffset(text, m.start)))
+      .orElse(plainImports(path, text).map(_.group(1)).flatMap { module =>
+        for
+          member <- moduleSurface(path, text, module).find(_.name == word)
+          file <- resolveModule(path, module)
+        yield location(pathToUri(file.getAbsolutePath), sourceOf(file), member.line)
+      }.nextOption())
+      .getOrElse(VNull)
 
   /**
    * Word-boundary occurrences in the open document, declaration included. The
@@ -875,13 +877,17 @@ final class Lsp:
       var rs = e
       while rs > 0 && isIdentChar(text.charAt(rs - 1)) do rs -= 1
       val recv = text.substring(rs, e)
-      for member <- namespaceMembers(path, text, recv).find(_.name == word) do
-        val label = docAliases(path, text).getOrElse(recv, recv)
-        return markdownHover(s"```sfl\n${member.detail}\n```\n\n*from $label*")
+      namespaceMembers(path, text, recv).find(_.name == word) match
+        case Some(member) =>
+          val label = docAliases(path, text).getOrElse(recv, recv)
+          return markdownHover(s"```sfl\n${member.detail}\n```\n\n*from $label*")
+        case None => ()
       if Builtins.isNamespace(recv) then
-        for b <- Builtins.lookup(word) if recv == Builtins.StdNamespace || b.group == recv do
-          return markdownHover(
-            s"```sfl\n${b.signature}\n```\n\n${b.doc}\n\n*builtin, reached through `$recv`*")
+        Builtins.lookup(word).filter(b => recv == Builtins.StdNamespace || b.group == recv) match
+          case Some(b) =>
+            return markdownHover(
+              s"```sfl\n${b.signature}\n```\n\n${b.doc}\n\n*builtin, reached through `$recv`*")
+          case None => ()
 
     if isBuildFile(path) then
       buildDsl.find(_.name == word) match
