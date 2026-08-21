@@ -70,6 +70,7 @@ typedef SflVal (*SflCode)(SflVal env, int64_t argc, SflVal *argv);
 /* A primitive. `min`/`max` mirror VNative; max < 0 means variadic. */
 typedef struct SflNative {
   const char *name;
+  const char *group; /* the reference group: "math", "string", ... */
   const char *signature;
   const char *doc; /* one-line description, shown by arity errors and describe() */
   int32_t min;
@@ -264,6 +265,9 @@ const char *sfl_type_name(SflVal v);
 SflVal sfl_arith(int32_t op, SflVal a, SflVal b);
 SflVal sfl_neg(SflVal a);
 int sfl_equal(SflVal a, SflVal b);
+/* The nesting cap every recursive walk over a value shares; see sfl_value.c. */
+#define SFL_NEST_LIMIT 10000
+void sfl_check_nesting(int64_t depth);
 int32_t sfl_compare(SflVal a, SflVal b); /* raises when incomparable */
 /* op is 0..5 for == != < <= > >=, matching CmpOp. */
 SflVal sfl_cmp(int32_t op, SflVal a, SflVal b);
@@ -500,7 +504,9 @@ void sfl_sha1_digest(const uint8_t *msg, uint64_t len, uint8_t out[20]);
 void sfl_sha256_digest(const uint8_t *msg, uint64_t len, uint8_t out[32]);
 int64_t sfl_sign_i64(int64_t v);
 int64_t sfl_sign_f64(double v);
-int64_t sfl_ipow(int64_t base, int64_t exp);
+/* Math.round and toInt's cast, shared by the primitives and the fast paths. */
+int64_t sfl_java_round(double a);
+int64_t sfl_to_int_f64(double v);
 int64_t sfl_gcd(int64_t a, int64_t b);
 int64_t sfl_str_length(SflVal s);
 int64_t sfl_size_of(SflVal v);

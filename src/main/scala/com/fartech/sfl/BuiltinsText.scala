@@ -126,7 +126,7 @@ object BuiltinsText:
       var i = 0
       while i < arr.items.length do
         if i > 0 then sb.append(sep)
-        arr.items(i).write(sb, quoted = false)
+        arr.items(i).write(sb, quoted = false, 0)
         i += 1
       VStr(sb.toString)
     }
@@ -234,7 +234,7 @@ object BuiltinsText:
 
     define("reverse", 1, 1, "string", "reverse(v)", "Reverses a string or array (a copy).") { a =>
       a(0) match
-        case VStr(s)   => VStr(new StringBuilder(s).reverse.toString)
+        case VStr(s)   => VStr(reverseText(s))
         case arr: VArr => VArr.of(arr.items.reverse)
         case v         => Err.eval(s"reverse: expected a string or array, got ${v.typeName}")
     }
@@ -243,6 +243,32 @@ object BuiltinsText:
       "Three-way comparison returning -1, 0 or 1.") { a =>
       VInt.of(math.signum(Values.compare(a(0), a(1))).toLong)
     }
+
+  /**
+   * Reverses text the way `StringBuilder.reverse` is specified to: code units go
+   * backwards, then every surrogate pair is put back the right way round, so text
+   * outside the BMP survives instead of turning into two unpaired halves. Written
+   * out rather than delegated because the native StringBuilder skips the fix-up,
+   * which is what made the interpreter disagree with the compiled runtime.
+   */
+  private def reverseText(s: String): String =
+    val n = s.length
+    val out = new Array[Char](n)
+    var i = 0
+    while i < n do
+      out(i) = s.charAt(n - 1 - i)
+      i += 1
+    i = 0
+    while i + 1 < n do
+      val lo = out(i)
+      if lo >= '\uDC00' && lo <= '\uDFFF' then
+        val hi = out(i + 1)
+        if hi >= '\uD800' && hi <= '\uDBFF' then
+          out(i) = hi
+          out(i + 1) = lo
+          i += 1
+      i += 1
+    new String(out)
 
   private def indexOfImpl(a: Array[Value], fn: String): Value =
     val s = argStr(a, 0, fn)

@@ -27,9 +27,12 @@ object Intrinsics:
     "round"      -> (one, allNumeric(Ty.I64)),
     "trunc"      -> (one, allNumeric(Ty.I64)),
     "sign"       -> (one, allNumeric(Ty.I64)),
+    // Two ints have no static answer: the interpreter computes pow in double and
+    // saturates, and a negative exponent makes the result a float. Both belong to
+    // the primitive, which already does exactly that.
     "pow"        -> (two, ts =>
-      if !ts.forall(Ty.numeric) then Ty.Unknown
-      else if ts(0) == Ty.I64 && ts(1) == Ty.I64 then Ty.I64 else Ty.F64),
+      if !ts.forall(Ty.numeric) || (ts(0) == Ty.I64 && ts(1) == Ty.I64) then Ty.Unknown
+      else Ty.F64),
     "gcd"        -> (two, ts => if ts.forall(_ == Ty.I64) then Ty.I64 else Ty.Unknown),
     "toInt"      -> (one, ts => if Ty.numeric(ts(0)) || ts(0) == Ty.Bool then Ty.I64 else Ty.Unknown),
     "toFloat"    -> (one, ts => if Ty.numeric(ts(0)) || ts(0) == Ty.Bool then Ty.F64 else Ty.Unknown),
@@ -87,7 +90,8 @@ object Intrinsics:
         val (v, t) = args(0)
         val r = c.freshTmp()
         if t == Ty.F64 then c.emitLine(s"$r = call double @llvm.fabs.f64(double $v)")
-        else c.emitLine(s"$r = call i64 @llvm.abs.i64(i64 $v, i1 true)")
+        // i1 false: abs(Long.MinValue) is Long.MinValue, as Math.abs gives.
+        else c.emitLine(s"$r = call i64 @llvm.abs.i64(i64 $v, i1 false)")
         (r, t)
 
       case "min" | "max" => emitMinMax(c, name == "min", args)
@@ -105,9 +109,7 @@ object Intrinsics:
         else
           val f = c.freshTmp()
           c.emitLine(s"$f = call double @llvm.$name.f64(double $v)")
-          val r = c.freshTmp()
-          c.emitLine(s"$r = fptosi double $f to i64")
-          (r, Ty.I64)
+          (c.widen(f, Ty.F64, Ty.I64), Ty.I64)
 
       case "round" =>
         val (v, t) = args(0)
@@ -122,10 +124,12 @@ object Intrinsics:
         val (v, t) = args(0)
         if t == Ty.I64 then (v, Ty.I64)
         else if t == Ty.Bool then (c.widen(v, Ty.Bool, Ty.I64), Ty.I64)
-        else
+        else if name == "toInt" then
+          // toInt refuses NaN and infinity; trunc converts them the way a cast does.
           val r = c.freshTmp()
-          c.emitLine(s"$r = fptosi double $v to i64")
+          c.emitLine(s"$r = call i64 @sfl_to_int_f64(double $v)")
           (r, Ty.I64)
+        else (c.widen(v, Ty.F64, Ty.I64), Ty.I64)
 
       case "toFloat" =>
         val (v, t) = args(0)
@@ -141,15 +145,10 @@ object Intrinsics:
       case "pow" =>
         val (av, at) = args(0)
         val (bv, bt) = args(1)
-        if at == Ty.I64 && bt == Ty.I64 then
-          val r = c.freshTmp()
-          c.emitLine(s"$r = call i64 @sfl_ipow(i64 $av, i64 $bv)")
-          (r, Ty.I64)
-        else
-          val r = c.freshTmp()
-          c.emitLine(s"$r = call double @llvm.pow.f64(double ${c.widen(av, at, Ty.F64)}, " +
-            s"double ${c.widen(bv, bt, Ty.F64)})")
-          (r, Ty.F64)
+        val r = c.freshTmp()
+        c.emitLine(s"$r = call double @llvm.pow.f64(double ${c.widen(av, at, Ty.F64)}, " +
+          s"double ${c.widen(bv, bt, Ty.F64)})")
+        (r, Ty.F64)
 
       case "gcd" =>
         val r = c.freshTmp()

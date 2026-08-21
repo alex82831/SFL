@@ -1,0 +1,358 @@
+// The redis package held against a fake server: an in-process Redis that speaks
+// RESP2 over a real socket, backed by a plain object for storage. The framing,
+// every reply shape, the client's whole command surface, pipelining, pub/sub and
+// the failure paths are all checked without a redis-server anywhere near.
+import "lib/assert"
+import "../packages/redis/main"
+import "../packages/redis/resp" open
+
+// ----------------------------------------------------------- a fake redis
+
+// Reads one command (an array of bulk strings) off the socket.
+def _readCommand(state) {
+  val head = socketReadLine(state.sock, 4000)
+  if (isNull(head) || head == "") then return null
+  if (charAt(head, 0) != "*") then return null
+  val n = parseInt(subString(head, 1, length(head)))
+  val parts = []
+  var i = 0
+  while (i < n) {
+    val lenLine = socketReadLine(state.sock, 4000)
+    val len = parseInt(subString(lenLine, 1, length(lenLine)))
+    val payload = []
+    while (length(payload) < len) {
+      val chunk = socketReadBytes(state.sock, len - length(payload), 4000)
+      if (isNull(chunk) || length(chunk) == 0) then return null
+      for (b in chunk) { push(payload, b) }
+    }
+    socketReadBytes(state.sock, 2, 4000)   // the trailing CRLF
+    push(parts, utf8Decode(payload))
+    i += 1
+  }
+  parts
+}
+
+def _wire(state, text) = socketWriteBytes(state.sock, utf8Encode(text))
+
+def _writeReply(state, v) {
+  if (isNull(v)) {
+    _wire(state, "$-1\r\n")
+  } elsif (isInt(v)) {
+    _wire(state, ":" + toString(v) + "\r\n")
+  } elsif (isArray(v)) {
+    _wire(state, "*" + toString(length(v)) + "\r\n")
+    for (x in v) { _writeReply(state, x) }
+  } elsif (isObject(v) && has(v, "simple")) {
+    _wire(state, "+" + v.simple + "\r\n")
+  } elsif (isObject(v) && has(v, "err")) {
+    _wire(state, "-" + v.err + "\r\n")
+  } else {
+    val bytes = utf8Encode(toString(v))
+    _wire(state, "$" + toString(length(bytes)) + "\r\n")
+    socketWriteBytes(state.sock, bytes)
+    _wire(state, "\r\n")
+  }
+}
+
+// The store: strings, hashes, lists, sets and sorted sets in one object each.
+val store = {}
+val hashes = {}
+val lists = {}
+val sets = {}
+val zsets = {}
+val expires = {}
+val log = []
+
+def _serve(state) {
+  var go = true
+  while (go) {
+    val cmd = _readCommand(state)
+    if (isNull(cmd)) {
+      go = false
+    } else {
+      push(log, cmd)
+      val name = toUpper(cmd[0])
+      if (name == "PING") {
+        _writeReply(state, {simple: "PONG"})
+      } elsif (name == "AUTH") {
+        if (last(cmd) == "letmein") then _writeReply(state, {simple: "OK"})
+        else _writeReply(state, {err: "WRONGPASS invalid password"})
+      } elsif (name == "SELECT") {
+        _writeReply(state, {simple: "OK"})
+      } elsif (name == "SET") {
+        store[cmd[1]] = cmd[2]
+        if (length(cmd) > 4 && toUpper(cmd[3]) == "EX") then expires[cmd[1]] = parseInt(cmd[4])
+        _writeReply(state, {simple: "OK"})
+      } elsif (name == "GET") {
+        _writeReply(state, get(store, cmd[1], null))
+      } elsif (name == "DEL") {
+        var n = 0
+        for (k in drop(cmd, 1)) {
+          if (has(store, k)) { remove(store, k); n += 1 }
+        }
+        _writeReply(state, n)
+      } elsif (name == "EXISTS") {
+        _writeReply(state, if (has(store, cmd[1])) then 1 else 0)
+      } elsif (name == "INCR") {
+        store[cmd[1]] = toString(toInt(get(store, cmd[1], "0")) + 1)
+        _writeReply(state, toInt(store[cmd[1]]))
+      } elsif (name == "INCRBY") {
+        store[cmd[1]] = toString(toInt(get(store, cmd[1], "0")) + toInt(cmd[2]))
+        _writeReply(state, toInt(store[cmd[1]]))
+      } elsif (name == "DECR") {
+        store[cmd[1]] = toString(toInt(get(store, cmd[1], "0")) - 1)
+        _writeReply(state, toInt(store[cmd[1]]))
+      } elsif (name == "EXPIRE") {
+        expires[cmd[1]] = toInt(cmd[2])
+        _writeReply(state, if (has(store, cmd[1])) then 1 else 0)
+      } elsif (name == "TTL") {
+        _writeReply(state, get(expires, cmd[1], -1))
+      } elsif (name == "KEYS") {
+        _writeReply(state, sort(keys(store)))
+      } elsif (name == "HSET") {
+        val h = get(hashes, cmd[1], {})
+        val fresh = if (has(h, cmd[2])) then 0 else 1
+        h[cmd[2]] = cmd[3]
+        hashes[cmd[1]] = h
+        _writeReply(state, fresh)
+      } elsif (name == "HGET") {
+        _writeReply(state, get(get(hashes, cmd[1], {}), cmd[2], null))
+      } elsif (name == "HDEL") {
+        val h = get(hashes, cmd[1], {})
+        var n = 0
+        for (f in drop(cmd, 2)) { if (has(h, f)) { remove(h, f); n += 1 } }
+        _writeReply(state, n)
+      } elsif (name == "HGETALL") {
+        val flat = []
+        for (k in get(hashes, cmd[1], {})) { push(flat, k); push(flat, hashes[cmd[1]][k]) }
+        _writeReply(state, flat)
+      } elsif (name == "LPUSH") {
+        val l = get(lists, cmd[1], [])
+        for (v in drop(cmd, 2)) { insert(l, 0, v) }
+        lists[cmd[1]] = l
+        _writeReply(state, length(l))
+      } elsif (name == "RPUSH") {
+        val l = get(lists, cmd[1], [])
+        for (v in drop(cmd, 2)) { push(l, v) }
+        lists[cmd[1]] = l
+        _writeReply(state, length(l))
+      } elsif (name == "LPOP") {
+        val l = get(lists, cmd[1], [])
+        _writeReply(state, if (length(l) == 0) then null else shift(l))
+      } elsif (name == "RPOP") {
+        val l = get(lists, cmd[1], [])
+        _writeReply(state, if (length(l) == 0) then null else pop(l))
+      } elsif (name == "LRANGE") {
+        val l = get(lists, cmd[1], [])
+        val stop = toInt(cmd[3])
+        val until = if (stop < 0) then length(l) + stop + 1 else stop + 1
+        _writeReply(state, slice(l, toInt(cmd[2]), until))
+      } elsif (name == "LLEN") {
+        _writeReply(state, length(get(lists, cmd[1], [])))
+      } elsif (name == "SADD") {
+        val s = get(sets, cmd[1], [])
+        var n = 0
+        for (v in drop(cmd, 2)) { if (!contains(s, v)) { push(s, v); n += 1 } }
+        sets[cmd[1]] = s
+        _writeReply(state, n)
+      } elsif (name == "SREM") {
+        val s = get(sets, cmd[1], [])
+        var n = 0
+        for (v in drop(cmd, 2)) {
+          val at = indexOf(s, v)
+          if (at >= 0) { removeAt(s, at); n += 1 }
+        }
+        _writeReply(state, n)
+      } elsif (name == "SMEMBERS") {
+        _writeReply(state, sort(get(sets, cmd[1], [])))
+      } elsif (name == "SISMEMBER") {
+        _writeReply(state, if (contains(get(sets, cmd[1], []), cmd[2])) then 1 else 0)
+      } elsif (name == "ZADD") {
+        val z = get(zsets, cmd[1], [])
+        push(z, [toFloat(cmd[2]), cmd[3]])
+        zsets[cmd[1]] = z
+        _writeReply(state, 1)
+      } elsif (name == "ZRANGE") {
+        val z = sortBy(get(zsets, cmd[1], []), (e) -> e[0])
+        val out = []
+        for (e in z) {
+          push(out, e[1])
+          if (length(cmd) > 4 && toUpper(cmd[4]) == "WITHSCORES") then push(out, toString(e[0]))
+        }
+        _writeReply(state, out)
+      } elsif (name == "DBSIZE") {
+        _writeReply(state, length(keys(store)))
+      } elsif (name == "FLUSHDB") {
+        clear(store)
+        _writeReply(state, {simple: "OK"})
+      } elsif (name == "PUBLISH") {
+        _writeReply(state, 0)
+      } elsif (name == "SUBSCRIBE") {
+        for (ch in drop(cmd, 1)) {
+          _writeReply(state, ["subscribe", ch, 1])
+        }
+        // Two messages, then the client unsubscribes.
+        _writeReply(state, ["message", cmd[1], "first"])
+        _writeReply(state, ["message", cmd[1], "second"])
+      } elsif (name == "UNSUBSCRIBE") {
+        _writeReply(state, ["unsubscribe", "news", 0])
+      } elsif (name == "BOOM") {
+        _writeReply(state, {err: "ERR unknown command 'BOOM'"})
+      } else {
+        _writeReply(state, {simple: "OK"})
+      }
+    }
+  }
+}
+
+def _fakeRedis() {
+  val srv = serverSocket(0)
+  spawn(() -> {
+    val sock = accept(srv, 4000)
+    attempt(() -> _serve({sock: sock, timeoutMs: 4000}))
+    closeSocket(sock)
+    closeServer(srv)
+  })
+  serverPort(srv)
+}
+
+// ------------------------------------------------- the framing on its own
+
+// respWrite and respRead over a socket pair, with no client in the way.
+val echoSrv = serverSocket(0)
+val echoPort = serverPort(echoSrv)
+val echoThread = spawn(() -> {
+  val sock = accept(echoSrv, 4000)
+  val state = {sock: sock, timeoutMs: 4000}
+  // Whatever framing the tests ask for, spelled by hand.
+  _wire(state, "+OK\r\n")
+  _wire(state, ":42\r\n")
+  _wire(state, "$5\r\nhello\r\n")
+  _wire(state, "$-1\r\n")
+  _wire(state, "*2\r\n$1\r\na\r\n:7\r\n")
+  _wire(state, "*-1\r\n")
+  _wire(state, "*0\r\n")
+  _wire(state, "$7\r\na\r\nb\r\nc\r\n")   // a payload with CRLF inside it
+  _wire(state, "-ERR nope\r\n")
+  _wire(state, "%1\r\n")                 // a reply type RESP2 has no name for
+  // Then read one command written by respWrite and echo its parts back.
+  val cmd = _readCommand(state)
+  _writeReply(state, cmd)
+  sleep(50)
+  closeSocket(sock)
+  closeServer(echoSrv)
+})
+val echo = {sock: std.connect("127.0.0.1", echoPort, 4000), timeoutMs: 4000}
+
+check("a simple string", respRead(echo), "OK")
+check("an integer", respRead(echo), 42)
+check("a bulk string", respRead(echo), "hello")
+check("a nil bulk string", respRead(echo), null)
+check("an array", respRead(echo), ["a", 7])
+check("a nil array", respRead(echo), null)
+check("an empty array", respRead(echo), [])
+check("a bulk payload may contain CRLF", respRead(echo), "a\r\nb\r\nc")
+checkFails("an error reply raises", () -> respRead(echo), "ERR nope")
+checkFails("an unknown reply type is named", () -> respRead(echo), "unexpected reply type")
+
+respWrite(echo, ["SET", "k", 42, [104, 105]])
+check("respWrite frames strings, numbers and bytes alike",
+      respRead(echo), ["SET", "k", "42", "hi"])
+closeSocket(echo.sock)
+
+// ------------------------------------------------------------- the client
+
+val port = _fakeRedis()
+val r = redis.connect("127.0.0.1", port, {timeoutMs: 4000})
+
+check("ping", r.ping(), "PONG")
+check("set returns OK", r.set("greeting", "hello"), "OK")
+check("get", r.get("greeting"), "hello")
+check("get of a missing key", r.get("absent"), null)
+check("exists", r.exists("greeting"), true)
+check("exists of a missing key", r.exists("absent"), false)
+check("cmd sends anything", r.cmd("GET", "greeting"), "hello")
+check("setEx", r.setEx("temp", "v", 60), "OK")
+check("ttl", r.ttl("temp"), 60)
+check("expire", r.expire("greeting", 30), true)
+check("incr", r.incr("counter"), 1)
+check("incrBy", r.incrBy("counter", 5), 6)
+check("decr", r.decr("counter"), 5)
+check("keys", contains(r.keys(), "greeting"), true)
+check("keys with a pattern", isArray(r.keys("gre*")), true)
+check("del", r.del("temp"), 1)
+check("del of several", r.del("absent1", "absent2"), 0)
+check("dbSize counts what is there", r.dbSize(), length(keys(store)))
+
+check("hSet", r.hSet("h", "f", "v"), 1)
+check("hSet again updates", r.hSet("h", "f", "w"), 0)
+check("hGet", r.hGet("h", "f"), "w")
+check("hGet of a missing field", r.hGet("h", "z"), null)
+check("hGetAll", { r.hSet("h", "g", "x"); r.hGetAll("h") }, {"f": "w", "g": "x"})
+check("hGetAll of a missing hash", r.hGetAll("nohash"), {})
+check("hDel", r.hDel("h", "f", "g"), 2)
+
+check("rPush", r.rPush("l", "a", "b"), 2)
+check("lPush", r.lPush("l", "z"), 3)
+check("lRange", r.lRange("l", 0, -1), ["z", "a", "b"])
+check("lLen", r.lLen("l"), 3)
+check("lPop", r.lPop("l"), "z")
+check("rPop", r.rPop("l"), "b")
+check("lPop of an empty list", { r.lPop("l"); r.lPop("l") }, null)
+
+check("sAdd", r.sAdd("s", "a", "b"), 2)
+check("sAdd of a member already there", r.sAdd("s", "a"), 0)
+check("sMembers", r.sMembers("s"), ["a", "b"])
+check("sIsMember", r.sIsMember("s", "a"), true)
+check("sIsMember says no", r.sIsMember("s", "z"), false)
+check("sRem", r.sRem("s", "a"), 1)
+
+check("zAdd", r.zAdd("z", 2, "second"), 1)
+check("zRange sorts by score", { r.zAdd("z", 1, "first"); r.zRange("z", 0, -1) },
+      ["first", "second"])
+check("zRange with scores", r.zRange("z", 0, -1, true), ["first", "1.0", "second", "2.0"])
+
+check("publish", r.publish("news", "hi"), 0)
+check("flushDb", r.flushDb(), "OK")
+check("flushDb emptied it", r.dbSize(), 0)
+
+check("pipeline returns every reply in order",
+      r.pipeline([["SET", "p", "1"], ["GET", "p"], ["DBSIZE"]]), ["OK", "1", 1])
+check("a failure inside a pipeline does not lose the rest",
+      map(r.pipeline([["BOOM"], ["PING"]]), (x) -> if (isObject(x)) then "err" else x),
+      ["err", "PONG"])
+checkFails("a server error raises", () -> r.cmd("BOOM"), "unknown command")
+
+// Subscribing takes the connection over until the handler says stop.
+val heard = []
+r.subscribe(["news"], (channel, message) -> {
+  push(heard, [channel, message])
+  length(heard) < 2
+})
+check("subscribe delivers every message", heard, [["news", "first"], ["news", "second"]])
+
+check("close returns null", r.close(), null)
+checkFails("a closed client refuses commands", () -> r.ping(), "the client is closed")
+check("closing twice is fine", r.close(), null)
+
+// Authentication and database selection go out before anything else.
+val authPort = _fakeRedis()
+clear(log)
+val authed = redis.connect("127.0.0.1", authPort, {timeoutMs: 4000, password: "letmein", db: 3})
+check("AUTH went first", log[0], ["AUTH", "letmein"])
+check("SELECT followed it", log[1], ["SELECT", "3"])
+authed.close()
+
+val userPort = _fakeRedis()
+clear(log)
+val withUser = redis.connect("127.0.0.1", userPort, {timeoutMs: 4000, user: "bob",
+                                                    password: "letmein"})
+check("AUTH carries the user when there is one", log[0], ["AUTH", "bob", "letmein"])
+withUser.close()
+
+val wrongPort = _fakeRedis()
+checkFails("a bad password raises",
+           () -> redis.connect("127.0.0.1", wrongPort, {timeoutMs: 4000, password: "nope"}),
+           "WRONGPASS")
+
+report("redis")

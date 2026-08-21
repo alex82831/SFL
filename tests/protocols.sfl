@@ -1,0 +1,269 @@
+// The protocol plumbing under httpd, mysql and postgres: percent coding, query
+// strings, MIME and status tables, HTTP dates, the big-endian frame helpers HTTP/2
+// and WebSocket are built out of, and the cursor readers the two database drivers
+// parse their wire packets with.
+//
+// These are the pure parts, so they need no server; the suites next door drive the
+// same packages over real sockets.
+import "lib/assert"
+import "../packages/httpd/mime" open
+import "../packages/httpd/h1" open
+import "../packages/httpd/router" open
+import "../packages/mysql/packets" open
+import "../packages/postgres/proto" open
+import "../packages/postgres/sasl" open
+
+// ------------------------------------------------------------ percent coding
+
+check("uriDecode leaves plain text alone", uriDecode("plain"), "plain")
+check("uriDecode a space", uriDecode("a%20b"), "a b")
+check("uriDecode is case-insensitive about hex", uriDecode("a%2Fb"), "a/b")
+check("uriDecode lower-case hex", uriDecode("a%2fb"), "a/b")
+check("uriDecode leaves a plus alone by default", uriDecode("a+b"), "a+b")
+check("uriDecode turns a plus into a space when asked", uriDecode("a+b", true), "a b")
+check("uriDecode a multi-byte character", uriDecode("%E4%B8%AD"), "中")
+check("uriDecode an incomplete escape stays literal", uriDecode("a%2"), "a%2")
+check("uriDecode a non-hex escape stays literal", uriDecode("a%zz"), "a%zz")
+check("uriDecode of nothing", uriDecode(""), "")
+check("uriDecode a percent at the end", uriDecode("a%"), "a%")
+
+check("parseQuery", parseQuery("a=1&b=2"), {"a": "1", "b": "2"})
+check("parseQuery of nothing", parseQuery(""), {})
+check("parseQuery of null", parseQuery(null), {})
+check("parseQuery a key with no value", parseQuery("flag"), {"flag": ""})
+check("parseQuery an empty value", parseQuery("a="), {"a": ""})
+check("parseQuery decodes both sides", parseQuery("a%20b=c%20d"), {"a b": "c d"})
+check("parseQuery reads a plus as a space", parseQuery("q=a+b"), {"q": "a b"})
+check("parseQuery keeps the last of a repeated key", parseQuery("a=1&a=2"), {"a": "2"})
+check("parseQuery skips an empty pair", parseQuery("a=1&&b=2"), {"a": "1", "b": "2"})
+check("parseQuery keeps an equals inside the value", parseQuery("a=b=c"), {"a": "b=c"})
+
+// --------------------------------------------------------------- MIME types
+
+check("mimeType html", mimeType("index.html"), "text/html; charset=utf-8")
+check("mimeType css", mimeType("a/b/style.css"), "text/css; charset=utf-8")
+check("mimeType js", mimeType("app.js"), "text/javascript; charset=utf-8")
+check("mimeType json", mimeType("data.json"), "application/json")
+check("mimeType png", mimeType("logo.png"), "image/png")
+check("mimeType svg", mimeType("logo.svg"), "image/svg+xml")
+check("mimeType ignores case", mimeType("LOGO.PNG"), "image/png")
+check("mimeType of an unknown suffix", mimeType("file.zzz"), "application/octet-stream")
+check("mimeType with no suffix", mimeType("README"), "application/octet-stream")
+check("mimeType takes the last suffix", mimeType("a.tar.gz") != "", true)
+
+// ------------------------------------------------------ statuses and dates
+
+check("statusReason 200", statusReason(200), "OK")
+check("statusReason 404", statusReason(404), "Not Found")
+check("statusReason 500", statusReason(500), "Internal Server Error")
+check("statusReason 101", statusReason(101), "Switching Protocols")
+check("statusReason of an unknown code", statusReason(799), "Unknown")
+
+check("httpDate at the epoch", httpDate(0), "Thu, 01 Jan 1970 00:00:00 GMT")
+check("httpDate of a known instant", httpDate(1700000000000), "Tue, 14 Nov 2023 22:13:20 GMT")
+check("httpDate pads single digits", httpDate(1704067200000), "Mon, 01 Jan 2024 00:00:00 GMT")
+checkTrue("dateNow looks like an HTTP date",
+          matches(dateNow(), "^[A-Z][a-z]{2}, \\d{2} [A-Z][a-z]{2} \\d{4} \\d{2}:\\d{2}:\\d{2} GMT$"))
+checkTrue("dateNow is cached within the same second", dateNow() == dateNow())
+
+checkTrue("204 carries no body", bodylessStatus(204))
+checkTrue("304 carries no body", bodylessStatus(304))
+checkTrue("an informational status carries no body", bodylessStatus(100) && bodylessStatus(199))
+checkTrue("200 does carry a body", !bodylessStatus(200))
+checkTrue("404 does carry a body", !bodylessStatus(404))
+
+// ------------------------------------------------------- big-endian frames
+
+check("be16", be16([0x01, 0x02], 0), 258)
+check("be16 at an offset", be16([9, 0x01, 0x02], 1), 258)
+check("be16 of the maximum", be16([0xff, 0xff], 0), 65535)
+check("be24", be24([0x01, 0x02, 0x03], 0), 66051)
+check("be24 of the maximum", be24([0xff, 0xff, 0xff], 0), 16777215)
+check("be32", be32([0x01, 0x02, 0x03, 0x04], 0), 16909060)
+check("be32 of the maximum", be32([0xff, 0xff, 0xff, 0xff], 0), 4294967295)
+check("pushBe16", pushBe16([], 258), [1, 2])
+check("pushBe16 truncates to two bytes", pushBe16([], 0x10102), [1, 2])
+check("pushBe24", pushBe24([], 66051), [1, 2, 3])
+check("pushBe32", pushBe32([], 16909060), [1, 2, 3, 4])
+check("pushBe32 appends", pushBe32([9], 1), [9, 0, 0, 0, 1])
+check("be16 inverts pushBe16", be16(pushBe16([], 4242), 0), 4242)
+check("be24 inverts pushBe24", be24(pushBe24([], 1234567), 0), 1234567)
+check("be32 inverts pushBe32", be32(pushBe32([], 3000000000), 0), 3000000000)
+
+// ----------------------------------------------------------- request paths
+
+check("targetPath of a plain path", targetPath("/a/b"), {"path": "/a/b", "rawQuery": ""})
+check("targetPath splits the query", targetPath("/a?b=1"), {"path": "/a", "rawQuery": "b=1"})
+check("targetPath of an empty query", targetPath("/a?"), {"path": "/a", "rawQuery": ""})
+check("targetPath of an absolute-form target", targetPath("http://h/x?y=1"),
+      {"path": "/x", "rawQuery": "y=1"})
+check("targetPath of an absolute-form target with no path", targetPath("http://h"),
+      {"path": "/", "rawQuery": ""})
+check("targetPath of an https target", targetPath("https://h/x"), {"path": "/x", "rawQuery": ""})
+check("targetPath of the origin", targetPath("*"), {"path": "*", "rawQuery": ""})
+
+// ------------------------------------------------------- response headers
+
+check("normalizeHeaders lower-cases the names",
+      normalizeHeaders({"headers": {"X-Token": "t"}}), [["x-token", "t"]])
+check("normalizeHeaders of no headers", normalizeHeaders({}), [])
+check("normalizeHeaders of null headers", normalizeHeaders({"headers": null}), [])
+check("normalizeHeaders drops the framing headers the driver owns",
+      normalizeHeaders({"headers": {"Connection": "close", "Transfer-Encoding": "chunked",
+                                    "Keep-Alive": "timeout=5", "Content-Length": "9",
+                                    "X-Keep": "yes"}}),
+      [["x-keep", "yes"]])
+check("normalizeHeaders renders a non-string value",
+      normalizeHeaders({"headers": {"X-N": 7}}), [["x-n", "7"]])
+
+// ----------------------------------------------------------- route builders
+
+check("GET builds a route", GET("/a", (req) -> null).method, "GET")
+check("POST builds a route", POST("/a", (req) -> null).method, "POST")
+check("PUT builds a route", PUT("/a", (req) -> null).method, "PUT")
+check("DELETE builds a route", DELETE("/a", (req) -> null).method, "DELETE")
+check("PATCH builds a route", PATCH("/a", (req) -> null).method, "PATCH")
+check("HEAD builds a route", HEAD("/a", (req) -> null).method, "HEAD")
+check("OPTIONS builds a route", OPTIONS("/a", (req) -> null).method, "OPTIONS")
+check("ANY builds a route that matches any method", ANY("/a", (req) -> null).method, "*")
+check("a route keeps its pattern", GET("/users/:id", (req) -> null).pattern, "/users/:id")
+
+// --------------------------------------------------------- static resolving
+
+val staticRoot = tempFile(".static")
+removeFile(staticRoot)
+mkdirs(staticRoot)
+writeFile(joinPath(staticRoot, "index.html"), "<h1>home</h1>")
+writeFile(joinPath(staticRoot, "app.js"), "console.log(1)")
+mkdirs(joinPath(staticRoot, "sub"))
+writeFile(joinPath(staticRoot, "sub", "index.html"), "<h1>sub</h1>")
+// The route object STATIC builds, spelled here so the resolver is exercised
+// without a server around it.
+val route = STATIC("/assets", staticRoot)
+
+def _static(rest) = resolveStatic({params: {rest: rest}, headers: {}}, route)
+check("a file is served", _static("app.js").status, 200)
+check("a file carries its type", _static("app.js").headers["content-type"],
+      "text/javascript; charset=utf-8")
+check("STATIC turns a prefix into a rest pattern", STATIC("/assets", ".").pattern,
+      "/assets/*rest")
+check("STATIC honours a custom index", STATIC("/a", ".", {index: "home.html"}).index,
+      "home.html")
+check("STATIC caches when asked",
+      STATIC("/a", ".", {maxAgeSeconds: 60}).maxAge, 60)
+check("a directory serves its index", _static("").status, 200)
+check("a nested directory serves its index", _static("sub").status, 200)
+check("a missing file is a 404", _static("nope.txt").status, 404)
+check("walking upward is refused", _static("../secret").status, 403)
+check("a dot segment is refused", _static("./x").status, 403)
+check("a backslash is refused", _static("a\\b").status, 403)
+
+for (f in listFiles(joinPath(staticRoot, "sub"))) { removeFile(joinPath(staticRoot, "sub", f)) }
+removeFile(joinPath(staticRoot, "sub"))
+for (f in listFiles(staticRoot)) { removeFile(joinPath(staticRoot, f)) }
+removeFile(staticRoot)
+
+// --------------------------------------------------------- handler wrapping
+
+val reported = []
+val fakeSrv = {
+  handler: (req) -> if (req.bad) then error("handler blew up") else {status: 200, body: "ok"},
+  reportError: (req, e) -> push(reported, e),
+  opts: {}
+}
+check("runHandler passes a response through", runHandler(fakeSrv, {bad: false}).body, "ok")
+check("runHandler turns a raised error into a 500", runHandler(fakeSrv, {bad: true}).status, 500)
+check("runHandler reports what was raised", length(reported), 1)
+val nullSrv = {handler: (req) -> null, reportError: (req, e) -> push(reported, e), opts: {}}
+check("runHandler refuses a handler that returns nothing",
+      runHandler(nullSrv, {}).status, 500)
+
+// ------------------------------------------------- the mysql packet cursor
+
+// A packet, then a cursor over it, then every reader in turn.
+val mp = []
+mypPushU16(mp, 0x0102)
+mypPushU24(mp, 0x010203)
+mypPushU32(mp, 0x01020304)
+mypPushU64(mp, 0x0102030405060708)
+mypPushZeroStr(mp, "user")
+mypPushLenenc(mp, 250)
+mypPushLenenc(mp, 300)
+mypPushLenencBytes(mp, [1, 2, 3])
+mypAppend(mp, [9, 9])
+mypAppend(mp, utf8Encode("tail"))
+
+// The byte order is little-endian, so the low byte goes out first.
+check("mypPushU16 writes the low byte first", mypPushU16([], 0x0102), [2, 1])
+check("mypPushU24 writes the low byte first", mypPushU24([], 0x010203), [3, 2, 1])
+check("mypPushU32 writes the low byte first", mypPushU32([], 0x01020304), [4, 3, 2, 1])
+
+val mc = mypCur(mp)
+check("mypU16 round trips", mypU16(mc), 0x0102)
+check("mypU24 round trips", mypU24(mc), 0x010203)
+check("mypU32 round trips", mypU32(mc), 0x01020304)
+check("mypU64 round trips", mypU64(mc), 0x0102030405060708)
+check("mypStrNul reads to the zero byte", mypStrNul(mc), "user")
+check("a one-byte length-encoded integer", mypLenenc(mc), 250)
+check("a wider length-encoded integer", mypLenenc(mc), 300)
+check("length-encoded bytes", mypBytesLenenc(mc), [1, 2, 3])
+check("mypBytesN", mypBytesN(mc, 2), [9, 9])
+check("mypStrEof reads what is left", mypStrEof(mc), "tail")
+check("mypRemaining is zero at the end", mypRemaining(mc), 0)
+
+check("mypStrLenenc reads a counted string",
+      mypStrLenenc(mypCur(mypPushLenencBytes([], utf8Encode("hello")))), "hello")
+check("mypStrLenenc of an empty string",
+      mypStrLenenc(mypCur(mypPushLenencBytes([], []))), "")
+
+val mc2 = mypCur([0x41, 0x42, 0x43, 0x44])
+check("mypStrN reads a fixed count", mypStrN(mc2, 2), "AB")
+check("mypSkip moves the cursor on", { mypSkip(mc2, 1); mypStrN(mc2, 1) }, "D")
+val mc3 = mypCur([1, 2, 3])
+check("mypBytesEof takes the rest", mypBytesEof(mc3), [1, 2, 3])
+check("mypU8", mypU8(mypCur([7])), 7)
+check("mypRemaining counts what is left", mypRemaining(mypCur([1, 2, 3])), 3)
+check("a length-encoded integer round trips at the one-byte edge",
+      mypLenenc(mypCur(mypPushLenenc([], 250))), 250)
+check("a length-encoded integer round trips at the two-byte edge",
+      mypLenenc(mypCur(mypPushLenenc([], 65535))), 65535)
+check("a length-encoded integer round trips at the three-byte edge",
+      mypLenenc(mypCur(mypPushLenenc([], 16777215))), 16777215)
+check("a length-encoded integer round trips at eight bytes",
+      mypLenenc(mypCur(mypPushLenenc([], 16777216))), 16777216)
+
+// ---------------------------------------------- the postgres packet cursor
+
+val pp = []
+pgpPushU16(pp, 0x0102)
+pgpPushU32(pp, 0x01020304)
+pgpPushStr(pp, "db")
+pgpAppend(pp, [65, 66])
+pgpAppend(pp, [7])
+
+val pc = pgpCur(pp)
+check("pgpU16 reads big-endian", pgpU16(pc), 0x0102)
+check("pgpU32 reads big-endian", pgpU32(pc), 0x01020304)
+check("pgpStrNul reads to the zero byte", pgpStrNul(pc), "db")
+check("pgpStrN reads a fixed count", pgpStrN(pc, 2), "AB")
+check("pgpU8", pgpU8(pc), 7)
+check("pgpRemaining is zero at the end", pgpRemaining(pc), 0)
+
+val pc2 = pgpCur([1, 2, 3, 4])
+check("pgpBytesN", pgpBytesN(pc2, 2), [1, 2])
+check("pgpSkip moves the cursor on", { pgpSkip(pc2, 1); pgpU8(pc2) }, 4)
+check("pgpI32 reads a signed big-endian integer",
+      pgpI32(pgpCur(pgpPushU32([], 4294967295))), -1)
+check("pgpI32 of a positive", pgpI32(pgpCur(pgpPushU32([], 7))), 7)
+check("a big-endian 32-bit value round trips", pgpU32(pgpCur(pgpPushU32([], 3000000000))),
+      3000000000)
+check("a big-endian 16-bit value round trips", pgpU16(pgpCur(pgpPushU16([], 65535))), 65535)
+
+// pgScramAuth refuses a server that offers nothing it can speak, before any byte
+// goes out; the whole handshake is driven over a socket in tests/postgres.sfl.
+checkFails("pgScramAuth needs SCRAM-SHA-256",
+           () -> pgScramAuth({}, "pw", ["SCRAM-SHA-256-PLUS"]), "without channel binding")
+checkFails("pgScramAuth names what the server offered",
+           () -> pgScramAuth({}, "pw", ["GSSAPI"]), "GSSAPI")
+
+report("protocols")

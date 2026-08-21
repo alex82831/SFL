@@ -1,0 +1,255 @@
+// The widget catalogue and the pieces the renderer is built from: every
+// constructor's spec shape, the children normaliser, the value coercion the
+// wire uses, and the reactive plumbing a session drives — all without a server
+// or a browser, because a spec is just data until something mounts it.
+
+import "lib/assert"
+import "gui" open
+
+def _tag(spec) = spec.tag
+def _kids(spec) = if (isNull(spec.children)) then [] else spec.children
+
+// ----------------------------------------------------------- the generic one
+
+val el = element("marquee", {speed: 3}, [text("hi")])
+check("element takes any tag", _tag(el), "marquee")
+check("element keeps its props", el.props.speed, 3)
+check("element is an element node", el.gk, "el")
+check("element normalises its children", length(_kids(el)), 1)
+check("element with no props", element("hr").props, {})
+check("element with no children", element("hr").children, [])
+check("element copies the props it is given",
+      { val p = {a: 1}; val e = element("x", p); p.a = 2; e.props.a }, 1)
+
+// ------------------------------------------------------------- children
+
+check("giKids of null", giKids(null), [])
+check("giKids wraps a single spec", length(giKids(text("a"))), 1)
+check("giKids flattens a nested array", length(giKids([[text("a"), text("b")], text("c")])), 3)
+check("giKids drops nulls", length(giKids([text("a"), null, text("b")])), 2)
+check("giKids renders a bare string as text", giKids(["plain"])[0].gk, "txt")
+check("giKids renders a bare string's value", giKids(["plain"])[0].value, "plain")
+check("giKids renders a number as text", giKids([42])[0].value, "42")
+// A function child is a reactive text node: it is re-run and re-rendered.
+check("giKids takes a function as reactive text", giKids([() -> "x"])[0].gk, "txtf")
+checkFails("giKids refuses something it cannot render", () -> giKids([iter([])]), "cannot use")
+
+// ------------------------------------------------------------- containers
+
+check("row", row([]).props.dir, "row")
+check("column", column([]).props.dir, "col")
+check("grid", grid([]).props.dir, "grid")
+check("card is a column", card([]).props.dir, "col")
+checkTrue("card is marked as one", card([]).props.card)
+check("scrollArea is a column", scrollArea([]).props.dir, "col")
+checkTrue("scrollArea scrolls", scrollArea([]).props.scroll)
+check("divider", _tag(divider()), "divider")
+check("spacer", _tag(spacer()), "spacer")
+check("a container keeps the props it is given", row([], {gap: 8}).props.gap, 8)
+
+val exp = expansion("More", [text("body")])
+check("expansion is a details element", _tag(exp), "details")
+check("expansion keeps its children", length(_kids(exp)) > 0, true)
+
+val dlg = dialog({open: true}, [text("body")])
+check("dialog", _tag(dlg), "dialog")
+check("dialog keeps its props", dlg.props.open, true)
+val drw = drawer({side: "left"}, [text("nav")])
+check("drawer", _tag(drw), "drawer")
+check("drawer keeps its props", drw.props.side, "left")
+
+// tabs composes a header row and a dynamic body rather than emitting one node.
+val tb = tabs({items: [{key: "a", label: "A", content: text("first")},
+                       {key: "b", label: "B", content: () -> text("second")}]})
+check("tabs builds a column", _tag(tb), "box")
+check("tabs puts the bar above the body", length(_kids(tb)), 2)
+check("tabs makes a button per item", length(_kids(_kids(tb)[0])), 2)
+check("tabs shows the first item to begin with", _kids(tb)[1].fn().children[0].value, "first")
+checkFails("tabs needs items", () -> tabs({}), "needs items")
+checkFails("tabs refuses an empty list", () -> tabs({items: []}), "needs items")
+
+// ------------------------------------------------------------------ text
+
+check("text", _tag(text("hi")), "text")
+check("heading", _tag(heading("H")), "heading")
+check("link", _tag(link("here", {href: "/x"})), "link")
+check("link keeps its target", link("here", {href: "/x"}).props.href, "/x")
+check("image", _tag(image("a.png")), "image")
+check("image keeps its source", image("a.png").props.src, "a.png")
+check("icon", _tag(icon("star")), "icon")
+check("icon keeps its glyph", icon("★").props.glyph, "★")
+check("badge", _tag(badge("new")), "badge")
+check("htmlView", _tag(htmlView("<b>x</b>")), "html")
+check("htmlView keeps its markup", htmlView("<b>x</b>").props.html, "<b>x</b>")
+check("markdownView", _tag(markdownView("# x")), "md")
+check("markdownView keeps its source", markdownView("# x").props.md, "# x")
+check("codeView", _tag(codeView("1 + 1")), "code")
+check("codeView keeps its source", codeView("1 + 1").props.code, "1 + 1")
+check("codeView takes a language", codeView("x", {lang: "sfl"}).props.lang, "sfl")
+
+// ---------------------------------------------------------------- inputs
+
+check("button", _tag(button("Go")), "button")
+check("textInput", _tag(textInput()), "input")
+check("textInput binds its value", textInput().props["__bk"], "value")
+check("textInput listens for input", textInput().props["__be"], "input")
+check("textArea", _tag(textArea()), "textarea")
+check("textArea binds its value", textArea().props["__bk"], "value")
+check("numberInput", _tag(numberInput()), "input")
+check("numberInput is a number field", numberInput().props.type, "number")
+check("colorInput is a colour field", colorInput().props.type, "color")
+check("dateInput is a date field", dateInput().props.type, "date")
+check("timeInput is a time field", timeInput().props.type, "time")
+check("slider", _tag(slider()), "slider")
+check("slider binds its value", slider().props["__bk"], "value")
+check("checkbox", _tag(checkbox("x")), "check")
+check("checkbox binds its checked state", checkbox("x").props["__bk"], "checked")
+check("checkbox keeps its label", checkbox("x").props.label, "x")
+check("toggle is a checkbox that looks like a switch", _tag(toggle("on")), "check")
+checkTrue("toggle says so", toggle("on").props.switch)
+check("toggle binds its checked state", toggle("on").props["__bk"], "checked")
+check("radioGroup", _tag(radioGroup({options: ["a"]})), "radio")
+check("dropdown", _tag(dropdown({options: ["a"]})), "dropdown")
+check("dropdown binds its value", dropdown().props["__bk"], "value")
+check("fileUpload", _tag(fileUpload()), "upload")
+check("fileText decodes what the client sent",
+      fileText({base64: base64Encode("hi")}), "hi")
+check("an input keeps the props it is given", numberInput({min: 1}).props.min, 1)
+
+check("fileBytes decodes what the client sent",
+      fileBytes({base64: base64EncodeBytes([1, 2, 3])}), [1, 2, 3])
+check("fileBytes of an empty file", fileBytes({base64: ""}), [])
+
+// --------------------------------------------------------------- displays
+
+check("progressBar", _tag(progressBar(0.5)), "progress")
+check("progressBar keeps its value", progressBar(0.5).props.value, 0.5)
+check("progressBar with no value is indeterminate", progressBar().props.value, null)
+check("spinner", _tag(spinner()), "spinner")
+check("canvasView", _tag(canvasView({w: 10, h: 10})), "canvas")
+check("canvasView keeps its size", canvasView({w: 10}).props.w, 10)
+check("treeView", _tag(treeView({nodes: []})), "tree")
+check("table", _tag(table({rows: []})), "table")
+check("menuButton", _tag(menuButton({label: "File", items: []})), "menu")
+
+// ------------------------------------------------------------- reactivity
+
+val s = signal(1)
+checkTrue("a signal is reactive", giIsReactive(s))
+val c = computed(() -> s.get() + 1)
+checkTrue("a computed is reactive", giIsReactive(c))
+checkTrue("a plain value is not", !giIsReactive(5))
+checkTrue("an object that merely has a kind is not", !giIsReactive({kind: "nope"}))
+
+check("giVal reads through a signal", giVal(s), 1)
+check("giVal reads through a computed", giVal(c), 2)
+check("giVal passes a plain value through", giVal(7), 7)
+check("giVal of null", giVal(null), null)
+
+// An observer collects the signals a function reads, and delivers when they change.
+val fired = []
+val obs = giObserver("effect", (o) -> push(fired, "run"))
+check("giTracked runs the function and returns its value", giTracked(obs, () -> s.get()), 1)
+s.set(2)
+check("a tracked dependency delivers", length(fired), 1)
+giDispose(obs)
+s.set(3)
+check("a disposed observer stops delivering", length(fired), 1)
+
+// dyn wraps a function so the renderer can re-run it.
+val d = dyn(() -> text("v=${s.get()}"))
+check("dyn is a dynamic node", d.gk, "dyn")
+checkTrue("dyn keeps the function", isFunction(d.fn))
+check("the wrapped function still builds a spec", d.fn().gk, "el")
+
+// when and each are the conditional and list forms of the same idea.
+check("when is its own node", when(() -> true, () -> text("y")).gk, "when")
+check("each is its own node", each(() -> [1, 2], (x) -> text("${x}")).gk, "each")
+
+// giCall1 calls a one-argument handler and tolerates one that takes none.
+check("giCall1 passes the payload", giCall1((p) -> p * 2, 21), 42)
+check("giCall1 tolerates a handler that ignores it", giCall1(() -> "ok", 1), "ok")
+// giCall1 wants a handler; callers check for one first.
+checkFails("giCall1 needs a function", () -> giCall1(null, 1), "expected a function")
+
+// ------------------------------------------------------- mount and serialize
+
+// A session is what the renderer patches: the fields giMount, giPatch,
+// giSerialize and giUnmount actually read, and nothing else.
+val session = {sid: "s0", alive: true, nextId: 0, byId: {}, pending: [], app: null,
+               cleanups: [], hotkeys: {}, root: null}
+val inst = giMount(session, column([text("a"), text("b")]))
+checkTrue("giMount returns an instance", isObject(inst))
+check("giMount numbers what it mounted", inst.id, 1)
+check("giMount registers it by id", has(session.byId, "1"), true)
+check("giMount mounts the children too", length(inst.children), 2)
+val wire = giSerialize(inst)
+check("a serialized node carries its id", wire.i, inst.id)
+check("a serialized node carries its tag", wire.t, "box")
+check("a serialized node carries its children", length(wire.c), 2)
+check("a serialized text node carries its text", wire.c[0].c[0].x, "a")
+check("giPatch queues an operation",
+      { giPatch(session, ["rm", 1]); last(session.pending) }, ["rm", 1])
+check("giPatch on a dead session queues nothing",
+      { val dead = {alive: false, pending: []}; giPatch(dead, ["rm", 1]); dead.pending }, [])
+giUnmount(session, inst)
+check("unmounting forgets the id", has(session.byId, "1"), false)
+
+// ------------------------------------------------------- the client page
+
+// The page the browser fetches: title, theme and the session token, escaped.
+val page = giClientPage({title: "T<itle>", dark: true, theme: {accent: "#f00"}}, "tok-1")
+checkTrue("the page is HTML", startsWith(trim(page), "<!"))
+checkTrue("the page escapes the title", contains(page, "T&lt;itle&gt;"))
+checkTrue("the page carries the token", contains(page, "tok-1"))
+checkTrue("dark false pins the other way",
+          contains(giClientPage({dark: false}, "t"), "data-theme=\"light\""))
+// The stylesheet mentions the attribute either way; what "auto" drops is the
+// one on the html element itself.
+checkTrue("dark true pins it on the html element", contains(page, "<html data-theme=\"dark\">"))
+checkTrue("auto pins neither", contains(giClientPage({}, "t"), "<html>"))
+checkTrue("theme variables reach the stylesheet", contains(page, "--accent: #f00"))
+
+// -------------------------------------------------------------- flushing
+
+// giFlush re-runs every dirty observer until nothing is left, and gives up on a
+// cascade that will not settle.
+val ran = []
+def _fakeApp(queue) = {takeDirty: () -> { val w = copy(queue); clear(queue); w }}
+val queue = []
+push(queue, {bid: 1, dead: false, dirty: true, run: () -> push(ran, "a")})
+push(queue, {bid: 2, dead: false, dirty: true, run: () -> push(ran, "b")})
+giFlush(_fakeApp(queue))
+check("giFlush runs every dirty observer, lowest id first", ran, ["a", "b"])
+val skipped = []
+val q2 = [{bid: 1, dead: true, dirty: true, run: () -> push(skipped, "dead")},
+          {bid: 2, dead: false, dirty: false, run: () -> push(skipped, "clean")}]
+giFlush(_fakeApp(q2))
+check("giFlush skips the dead and the clean", skipped, [])
+checkFails("giFlush gives up on a cascade that will not settle",
+           () -> {
+             var n = 0
+             giFlush({takeDirty: () -> { n += 1; [{bid: 1, dead: false, dirty: true,
+                                                   run: () -> null}] }})
+           }, "did not settle")
+checkFails("giFlush reports what an observer raised",
+           () -> giFlush(_fakeApp([{bid: 1, dead: false, dirty: true,
+                                    run: () -> error("observer blew up")}])),
+           "observer blew up")
+
+// giLaunch opens a window; the suites set SFL_GUI_NO_WINDOW, so it must do nothing.
+check("giLaunch stays out of the way when told to",
+      giLaunch("http://127.0.0.1:1/", {}, (where, msg) -> null), null)
+
+// --------------------------------------------------------------- the demo
+
+val d = demoApp({port: 0})
+checkTrue("demoApp builds an app", isObject(d))
+checkTrue("demoApp has a run", isFunction(d.run))
+checkTrue("demoApp can be started and stopped", isFunction(d.start) && isFunction(d.stop))
+checkTrue("demoApp is not running until it is", !d.running())
+checkTrue("demoApp knows its url", isFunction(d.url))
+
+check("version is a string", isString(version()), true)
+
+report("widgets")

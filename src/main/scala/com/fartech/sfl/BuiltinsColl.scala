@@ -426,6 +426,9 @@ object BuiltinsColl:
 
     define("deepCopy", 1, 1, "object", "deepCopy(v)", "Recursive copy of nested arrays and objects.") { a =>
       def go(v: Value, depth: Int): Value =
+        // Kept at its own, much lower cap so the SFL implementation in stdlib/obj.sfl
+        // — which compiled programs link and which runs under the call-depth guard —
+        // reports the same thing at the same depth.
         if depth > 200 then Err.eval("deepCopy: structure is nested too deeply")
         v match
           case arr: VArr => VArr.of(arr.items.map(go(_, depth + 1)).toSeq)

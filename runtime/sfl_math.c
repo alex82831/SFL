@@ -29,23 +29,12 @@
 /* ------------------------------------------------------------------------- */
 
 /*
- * The JVM's d2l: NaN becomes zero and anything past the ends of the range clamps
- * to them, where a plain C cast would be undefined.
- */
-static int64_t d2l(double d) {
-  if (isnan(d)) return 0;
-  if (d >= 9223372036854775808.0) return INT64_MAX;
-  if (d <= -9223372036854775808.0) return INT64_MIN;
-  return (int64_t)d;
-}
-
-/*
  * java.lang.Math.round. Halves go towards positive infinity, so round(-0.5) is 0
  * and llround's "away from zero" disagrees on every negative half. This is Java's
  * own bit trick, which also gets 0.49999999999999994 right — the value that
  * floor(x + 0.5) famously rounds to 1.
  */
-static int64_t java_round(double a) {
+int64_t sfl_java_round(double a) {
   int64_t bits;
   memcpy(&bits, &a, sizeof bits);
   int64_t biased_exp = (bits & 0x7FF0000000000000LL) >> 52;
@@ -55,7 +44,7 @@ static int64_t java_round(double a) {
     if (bits < 0) r = -r;
     return ((r >> shift) + 1) >> 1;
   }
-  return d2l(a);
+  return sfl_d2l(a);
 }
 
 /* Math.abs on a long: Long.MIN_VALUE stays itself, so negate through unsigned. */
@@ -229,7 +218,7 @@ static void raise_quoting(const char *fn, SflVal s, const char *suffix) {
 SflVal sfl_p_parseInt(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   if (v->tag == SFL_INT) return v;
-  if (v->tag == SFL_FLOAT) return sfl_int(d2l(v->u.d));
+  if (v->tag == SFL_FLOAT) return sfl_int(sfl_d2l(v->u.d));
   if (v->tag != SFL_STR) sfl_raise_sig("parseInt", "cannot convert %s", sfl_type_name(v));
 
   /* The radix is only consulted for text, so parseInt(5, "nonsense") is fine. */
@@ -306,14 +295,14 @@ SflVal sfl_p_min(int64_t argc, SflVal *argv) { return extreme(argc, argv, "min",
 SflVal sfl_p_floor(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   if (v->tag == SFL_INT) return v;
-  if (v->tag == SFL_FLOAT) return sfl_int(d2l(floor(v->u.d)));
+  if (v->tag == SFL_FLOAT) return sfl_int(sfl_d2l(floor(v->u.d)));
   sfl_raise_sig("floor", "expected a number, got %s", sfl_type_name(v));
 }
 
 SflVal sfl_p_ceil(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   if (v->tag == SFL_INT) return v;
-  if (v->tag == SFL_FLOAT) return sfl_int(d2l(ceil(v->u.d)));
+  if (v->tag == SFL_FLOAT) return sfl_int(sfl_d2l(ceil(v->u.d)));
   sfl_raise_sig("ceil", "expected a number, got %s", sfl_type_name(v));
 }
 
@@ -324,10 +313,10 @@ SflVal sfl_p_round(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   if (v->tag == SFL_INT) return v;
   if (v->tag == SFL_FLOAT) {
-    if (digits <= 0) return sfl_int(java_round(v->u.d));
+    if (digits <= 0) return sfl_int(sfl_java_round(v->u.d));
     if (digits > 15) sfl_raise_sig("round", "digits must be at most 15");
     double scale = pow(10.0, (double)digits);
-    return sfl_float((double)java_round(v->u.d * scale) / scale);
+    return sfl_float((double)sfl_java_round(v->u.d * scale) / scale);
   }
   sfl_raise_sig("round", "expected a number, got %s", sfl_type_name(v));
 }
@@ -335,7 +324,7 @@ SflVal sfl_p_round(int64_t argc, SflVal *argv) {
 SflVal sfl_p_trunc(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   if (v->tag == SFL_INT) return v;
-  if (v->tag == SFL_FLOAT) return sfl_int(d2l(v->u.d));
+  if (v->tag == SFL_FLOAT) return sfl_int(sfl_d2l(v->u.d));
   sfl_raise_sig("trunc", "expected a number, got %s", sfl_type_name(v));
 }
 
@@ -365,7 +354,7 @@ SflVal sfl_p_clamp(int64_t argc, SflVal *argv) {
   double x = sfl_arg_num(argv, 0, "clamp");
   double r = jmax(lo, jmin(hi, x));
   int all_int = argv[0]->tag == SFL_INT && argv[1]->tag == SFL_INT && argv[2]->tag == SFL_INT;
-  return all_int ? sfl_int(d2l(r)) : sfl_float(r);
+  return all_int ? sfl_int(sfl_d2l(r)) : sfl_float(r);
 }
 
 SflVal sfl_p_gcd(int64_t argc, SflVal *argv) {
@@ -506,32 +495,28 @@ SflVal sfl_p_bitsToDouble(int64_t argc, SflVal *argv) {
 /* ------------------------------------------------------------------------- */
 
 /*
- * The interpreter draws from java.util.Random, whose exact stream cannot be
- * reproduced here without reimplementing the JDK's LCG, so this is xoshiro256**
- * seeded through SplitMix64 instead. What the language actually promises is kept:
- * random() is uniform in [0, 1), and randomSeed(n) makes a run repeatable.
+ * java.util.Random, which is what the interpreter draws from: a 48-bit linear
+ * congruential generator whose constants and whose nextDouble construction are
+ * part of its specification, not of any implementation. Reproducing it here is a
+ * dozen lines, and it buys the thing the language promises everywhere else — a
+ * seeded run prints the same numbers compiled as interpreted.
  *
  * The state is global because that is what a single shared generator means.
  */
-static uint64_t rng_state[4];
+static uint64_t rng_state;
 static int rng_ready;
 
-static uint64_t rotl64(uint64_t x, int k) { return (x << k) | (x >> (64 - k)); }
-
-static uint64_t splitmix64(uint64_t *x) {
-  uint64_t z = (*x += 0x9E3779B97F4A7C15ULL);
-  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-  return z ^ (z >> 31);
-}
+#define RNG_MULTIPLIER 0x5DEECE66DULL
+#define RNG_ADDEND 0xBULL
+#define RNG_MASK ((1ULL << 48) - 1)
 
 static void rng_seed(uint64_t seed) {
-  uint64_t s = seed;
-  for (int i = 0; i < 4; i++) rng_state[i] = splitmix64(&s);
+  rng_state = (seed ^ RNG_MULTIPLIER) & RNG_MASK;
   rng_ready = 1;
 }
 
-static uint64_t rng_next(void) {
+/* Random.next(bits): the high bits of the next state. */
+static int32_t rng_next(int bits) {
   if (!rng_ready) {
     /* Unseeded runs differ from one another, as new java.util.Random() does. */
     struct timespec ts;
@@ -539,19 +524,15 @@ static uint64_t rng_next(void) {
     rng_seed((uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec +
              ((uint64_t)(uintptr_t)&ts << 16) + (uint64_t)getpid());
   }
-  uint64_t result = rotl64(rng_state[1] * 5, 7) * 9;
-  uint64_t t = rng_state[1] << 17;
-  rng_state[2] ^= rng_state[0];
-  rng_state[3] ^= rng_state[1];
-  rng_state[1] ^= rng_state[2];
-  rng_state[0] ^= rng_state[3];
-  rng_state[2] ^= t;
-  rng_state[3] = rotl64(rng_state[3], 45);
-  return result;
+  rng_state = (rng_state * RNG_MULTIPLIER + RNG_ADDEND) & RNG_MASK;
+  return (int32_t)(rng_state >> (48 - bits));
 }
 
-/* 53 random bits over 2^53, the same construction nextDouble() uses. */
-static double rng_double(void) { return (double)(rng_next() >> 11) * 0x1.0p-53; }
+/* Random.nextDouble: 26 bits then 27, over 2^53. */
+static double rng_double(void) {
+  int64_t hi = (int64_t)rng_next(26) << 27;
+  return (double)(hi + (int64_t)rng_next(27)) * 0x1.0p-53;
+}
 
 SflVal sfl_p_random(int64_t argc, SflVal *argv) { return sfl_float(rng_double()); }
 
@@ -568,7 +549,7 @@ SflVal sfl_p_randomInt(int64_t argc, SflVal *argv) {
     sfl_raise_sig("randomInt", "the range [%lld, %lld) is empty", (long long)lo, (long long)hi);
   /* The width and the sum both wrap for extreme bounds, as they do on the JVM. */
   int64_t width = (int64_t)((uint64_t)hi - (uint64_t)lo);
-  int64_t off = d2l(rng_double() * (double)width);
+  int64_t off = sfl_d2l(rng_double() * (double)width);
   return sfl_int((int64_t)((uint64_t)lo + (uint64_t)off));
 }
 
@@ -647,7 +628,7 @@ SflVal sfl_p_toInt(int64_t argc, SflVal *argv) {
         sfl_write_double(shown, sizeof shown, v->u.d);
         sfl_raise_sig("toInt", "cannot convert %s", shown);
       }
-      return sfl_int(d2l(v->u.d));
+      return sfl_int(sfl_d2l(v->u.d));
     }
     case SFL_BOOL:
       return sfl_int(v->aux ? 1 : 0);
@@ -664,7 +645,7 @@ SflVal sfl_p_toInt(int64_t argc, SflVal *argv) {
         }
         if (java_parse_double(text, &d)) {
           sfl_raw_free(text);
-          return sfl_int(d2l(d));
+          return sfl_int(sfl_d2l(d));
         }
       }
       sfl_raw_free(text);

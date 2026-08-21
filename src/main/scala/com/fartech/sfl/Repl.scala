@@ -87,7 +87,10 @@ object Repl:
     exitCode
 
   private def historyFile: File =
-    val home = sys.props.getOrElse("user.home", sys.env.getOrElse("HOME", "."))
+    // $HOME first, which is the Unix convention and what lets a test — or anyone
+    // running two sessions — keep its history to itself; `user.home` comes from
+    // the password file and ignores the environment.
+    val home = sys.env.getOrElse("HOME", sys.props.getOrElse("user.home", "."))
     new File(home, ".sfl_history")
 
   /** True when the input is not yet a complete program. */
@@ -220,7 +223,9 @@ object Repl:
         if rest.isEmpty then warn(":load needs a file name")
         else
           try
-            val v = Sfl.runFile(rest)
+            // In the session's own namespace, not a namespace of the file's: what
+            // ":load helpers.sfl" is for is calling what the file defines.
+            val v = Sfl.runFileInto(rest, Sfl.sessionTag)
             println(s"${Ansi.dim}loaded $rest${Ansi.reset}")
             printResult(v)
           catch

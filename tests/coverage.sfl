@@ -1,0 +1,89 @@
+// The coverage gate: every builtin has to be exercised by a suite.
+//
+// "Exercised" is decided from the parsed program rather than from the text, so a
+// name in a comment or inside a string does not count, and a name shadowed by a
+// local one does not either: the check reads `sfl --ast`, which prints each global
+// reference as `GlobalGet name#id`, and the id says which global it is. Builtins
+// occupy the low ids, fixed at startup before a line of user code runs, so the ids
+// a reference program reports are the ids every suite reports.
+//
+// It runs the binary under test, which tests/run.sh puts in SFL.
+import "lib/assert"
+
+val sfl = getEnv("SFL")
+if (isNull(sfl)) then error("coverage: set SFL to the binary under test")
+val here = dirName(absPath(scriptPath()))
+
+// Every builtin, and the global id each name resolves to. A file whose only
+// statements are bare names gives one GlobalGet per builtin.
+val names = builtins()
+val probe = tempFile(".coverage.sfl")
+writeFile(probe, join(names, "\n") + "\n")
+
+def astOf(path) {
+  val r = execute(sfl + " --ast " + path)
+  if (r.code != 0) then error("coverage: sfl --ast failed for " + path + ": " + r.err)
+  r.out
+}
+
+// GlobalGet lines look like `  GlobalGet map#474`; the id is what identifies the
+// global, and a name may also be written rather than read.
+def globalsIn(text) {
+  val out = {}
+  for (m in regexFindAll(text, "Global(Get|Set) ([A-Za-z_][A-Za-z0-9_]*)#([0-9]+)")) {
+    out[m[2] + "#" + m[3]] = true
+  }
+  out
+}
+
+val reference = globalsIn(astOf(probe))
+removeFile(probe)
+
+// name -> the key that means "this builtin".
+val wanted = {}
+for (k in keys(reference)) {
+  wanted[subString(k, 0, strFind(k, "#"))] = k
+}
+val unresolved = filter(names, (n) -> !has(wanted, n))
+check("the reference program resolves every builtin", unresolved, [])
+
+// Every suite, plus the fixtures they import and the compiler's own cases.
+def sflFilesUnder(dir) {
+  val found = []
+  val entries = listFiles(dir)
+  if (isNull(entries)) then return found
+  for (e in entries) {
+    val p = joinPath(dir, e)
+    if (isDir(p)) {
+      for (sub in sflFilesUnder(p)) { push(found, sub) }
+    } elsif (endsWith(e, ".sfl")) {
+      push(found, p)
+    }
+  }
+  found
+}
+
+val seen = {}
+val unreadable = []
+for (f in sflFilesUnder(here)) {
+  // The compiler's reject cases are meant not to parse; the gui suites import a
+  // package that only exists inside tests/gui/run.sh's temporary home, so they are
+  // read there rather than here; and this file's own mention of a name proves
+  // nothing about the suites.
+  if (contains(f, "/compile/reject/") || contains(f, "/gui/") ||
+      endsWith(f, "/coverage.sfl")) then continue
+  val r = execute(sfl + " --ast " + f)
+  if (r.code != 0) {
+    push(unreadable, baseName(f))
+  } else {
+    for (k in keys(globalsIn(r.out))) { seen[k] = true }
+  }
+}
+check("every suite parses", unreadable, [])
+
+val missing = filter(names, (n) -> !has(seen, get(wanted, n, " ")))
+check("every builtin is exercised by a suite", missing, [])
+check("the suites reach every group",
+      length(unique(map(names, (n) -> describe(n).group))), 21)
+
+report("coverage")

@@ -69,11 +69,11 @@ object BuiltinsMath:
       a(0) match
         case VInt(v) => VInt.of(v)
         case VFloat(v) =>
-          if digits <= 0 then VInt.of(math.round(v))
+          if digits <= 0 then VInt.of(javaRound(v))
           else
             if digits > 15 then Err.eval("round: digits must be at most 15")
             val scale = math.pow(10.0, digits.toDouble)
-            VFloat(math.round(v * scale) / scale)
+            VFloat(javaRound(v * scale) / scale)
         case v => Err.eval(s"round: expected a number, got ${v.typeName}")
     }
 
@@ -229,6 +229,24 @@ object BuiltinsMath:
       "The float whose IEEE-754 bit pattern is the given int.") { a =>
       VFloat(java.lang.Double.longBitsToDouble(argInt(a, 0, "bitsToDouble")))
     }
+
+  /**
+   * java.lang.Math.round, written out.
+   *
+   * Halves go towards positive infinity, so round(-0.5) is 0 where "away from zero"
+   * would say -1, and the trick below also gets 0.49999999999999994 right — the
+   * largest double below a half, which floor(x + 0.5) famously rounds up. The
+   * runtime's C copy is the same algorithm, and the two have to agree.
+   */
+  private def javaRound(a: Double): Long =
+    val bits = java.lang.Double.doubleToRawLongBits(a)
+    val biasedExp = (bits & 0x7FF0000000000000L) >> 52
+    val shift = 1074L - biasedExp // SIGNIFICAND_WIDTH - 2 + EXP_BIAS
+    if (shift & -64L) == 0 then
+      var r = (bits & 0x000FFFFFFFFFFFFFL) | 0x0010000000000000L
+      if bits < 0 then r = -r
+      ((r >> shift.toInt) + 1) >> 1
+    else a.toLong
 
   private def randomness(): Unit =
     // A seedable generator makes runs reproducible, which Math.random() cannot offer.

@@ -249,4 +249,30 @@ check("per-iteration capture inside a thread", await(spawn(() -> {
 check("compiling from a thread is safe",
   sum(awaitAll(map(range(4), (i) -> spawn(() -> eval("1 + 1"))))), 8)
 
+// lock/unlock is withLock without the safety net: the same mutex, taken and
+// released by hand. A second thread must wait for it, and must be able to see
+// the release.
+val hand = mutex()
+lock(hand)
+check("a lock held by hand keeps another thread out",
+      await(spawn(() -> tryLock(hand, 20))), false)
+unlock(hand)
+check("and lets it in once released", await(spawn(() -> {
+  val got = tryLock(hand, 1000)
+  if (got) then unlock(hand)
+  got
+})), true)
+checkFails("unlocking a lock nobody holds", () -> unlock(mutex()), "does not hold the lock")
+lock(hand)
+unlock(hand)
+check("lock and unlock leave it free for withLock", withLock(hand, () -> "free"), "free")
+
+// yieldThread only hints, so all a test can ask is that it costs nothing and
+// leaves the thread running.
+check("yieldThread returns null", yieldThread(), null)
+check("yielding in a loop changes nothing",
+      { var n = 0; for (i in range(0, 100)) { yieldThread(); n += 1 }; n }, 100)
+check("yieldThread works on a spawned thread",
+      await(spawn(() -> { yieldThread(); currentThreadName() != "" })), true)
+
 report("concurrency")

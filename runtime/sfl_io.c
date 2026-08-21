@@ -22,6 +22,10 @@
    they are not part of the language people write, so they stay out of the listings. */
 static int is_internal(const char *name) { return name[0] == '_' && name[1] == '_'; }
 
+#if defined(__APPLE__)
+#include <mach-o/dyld.h>
+#endif
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -1056,6 +1060,96 @@ SflVal sfl_p_attempt(int64_t argc, SflVal *argv) {
 /* Reflection                                                                 */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * passthrough: the child keeps this process's own stdin, stdout and stderr, so it
+ * can be interactive and its output appears as it happens. Nothing is captured, and
+ * the answer is the exit code — Java reports a signalled child as 128 + signal, and
+ * so does this.
+ */
+SflVal sfl_p_passthrough(int64_t argc, SflVal *argv) {
+  char *cmd = sfl_str_dup_utf8_java(sfl_arg_str(argv, 0, "passthrough"));
+  char *shown = sfl_str_dup_utf8(argv[0]);
+  int64_t extra = 0;
+  if (argc > 1 && argv[1]->tag != SFL_NULL) {
+    if (argv[1]->tag != SFL_ARR)
+      sfl_raise_sig("passthrough", "argument 2 must be an array, got %s", sfl_type_name(argv[1]));
+    extra = (int64_t)argv[1]->aux;
+    for (int64_t i = 0; i < extra; i++)
+      if (argv[1]->u.a.items[i]->tag != SFL_STR)
+        sfl_raise_sig("passthrough",
+                      "argument %lld of the args array must be a string, got %s",
+                      (long long)(i + 1), sfl_type_name(argv[1]->u.a.items[i]));
+  }
+  char **args = (char **)sfl_raw_alloc(((size_t)extra + 2) * sizeof(char *));
+  args[0] = cmd;
+  for (int64_t i = 0; i < extra; i++)
+    args[i + 1] = sfl_str_dup_utf8_java(argv[1]->u.a.items[i]);
+  args[extra + 1] = NULL;
+
+  int failfd[2] = {-1, -1};
+  if (pipe(failfd) != 0) {
+    int saved = errno;
+    free_argv(args);
+    sfl_raw_free(shown);
+    sfl_raise_sig("passthrough", "%s", strerror(saved));
+  }
+  /* The child's end closes on a successful exec, which is how the parent learns
+     that exec worked: a short read means it did. */
+  fcntl(failfd[1], F_SETFD, FD_CLOEXEC);
+
+  pid_t pid = fork();
+  if (pid == 0) {
+    close(failfd[0]);
+    execvp(args[0], args);
+    int e = errno;
+    ssize_t ignored = write(failfd[1], &e, sizeof e);
+    (void)ignored;
+    _exit(127);
+  }
+  close(failfd[1]);
+  if (pid < 0) {
+    int saved = errno;
+    close(failfd[0]);
+    free_argv(args);
+    sfl_raw_free(shown);
+    sfl_raise_sig("passthrough", "%s", strerror(saved));
+  }
+  int child_errno = 0;
+  ssize_t got = read(failfd[0], &child_errno, sizeof child_errno);
+  close(failfd[0]);
+  int status = 0;
+  while (waitpid(pid, &status, 0) < 0 && errno == EINTR) continue;
+  free_argv(args);
+  if (got == (ssize_t)sizeof child_errno) {
+    char msg[512];
+    snprintf(msg, sizeof msg, "passthrough: cannot run '%s'", shown);
+    sfl_raw_free(shown);
+    sfl_raise_hint(msg, strerror(child_errno));
+  }
+  sfl_raw_free(shown);
+  return sfl_int(WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status));
+}
+
+/*
+ * The running binary's path: the loader's answer on macOS, /proc on Linux, and
+ * nothing anywhere else. Canonicalised so callers can hand it to a subprocess
+ * regardless of how the program was invoked.
+ */
+SflVal sfl_p_exePath(int64_t argc, SflVal *argv) {
+  char raw[4096];
+  const char *found = NULL;
+#if defined(__APPLE__)
+  uint32_t size = (uint32_t)sizeof raw;
+  if (_NSGetExecutablePath(raw, &size) == 0) found = raw;
+#elif defined(__linux__)
+  found = "/proc/self/exe";
+#endif
+  if (found == NULL) return sfl_null;
+  char resolved[4096];
+  if (realpath(found, resolved) == NULL) return sfl_null;
+  return sfl_str_utf8(resolved, -1);
+}
+
 SflVal sfl_p_builtins(int64_t argc, SflVal *argv) {
   SflVal out = sfl_arr_new(sfl_native_count);
   for (int i = 0; i < sfl_native_count; i++) {
@@ -1093,8 +1187,7 @@ SflVal sfl_p_describe(int64_t argc, SflVal *argv) {
   }
   SflVal o = sfl_obj_new();
   put_field(o, "name", sfl_str_utf8(n->name, -1));
-  /* The group lives only in the interpreter's registry, so it comes back empty. */
-  put_field(o, "group", sfl_str_empty());
+  put_field(o, "group", sfl_str_utf8(n->group, -1));
   put_field(o, "signature", sfl_str_utf8(n->signature, -1));
   put_field(o, "doc", sfl_str_utf8(n->doc, -1));
   put_field(o, "minArity", sfl_int(n->min));
@@ -1102,12 +1195,28 @@ SflVal sfl_p_describe(int64_t argc, SflVal *argv) {
   return o;
 }
 
-static int cmp_native_name(const void *a, const void *b) {
+/* Grouped the way the reference is: by group, then by name inside it. */
+static int cmp_native_ref(const void *a, const void *b) {
   const SflNative *x = *(const SflNative *const *)a;
   const SflNative *y = *(const SflNative *const *)b;
-  return strcmp(x->name, y->name);
+  int g = strcmp(x->group, y->group);
+  return g != 0 ? g : strcmp(x->name, y->name);
 }
 
+static int contains_lower(const char *haystack, const char *needle) {
+  char buf[512];
+  snprintf(buf, sizeof buf, "%s", haystack);
+  ascii_lower(buf);
+  return strstr(buf, needle) != NULL;
+}
+
+/*
+ * Builtins.helpText, in C: the same table, the same order, the same padding.
+ * The interpreter is where the groups and the doc lines are written, and the
+ * compiler copies both into the natives table, so both engines can print the
+ * reference and print it identically. Colour is the interpreter's own; a
+ * compiled program never has a terminal's opinion to consult here.
+ */
 SflVal sfl_p_help(int64_t argc, SflVal *argv) {
   char *filter = argc > 0 ? sfl_str_dup_utf8_java(sfl_display(argv[0])) : dup_cstr("");
   char *lower = dup_cstr(filter);
@@ -1117,22 +1226,42 @@ SflVal sfl_p_help(int64_t argc, SflVal *argv) {
       (const SflNative **)sfl_raw_alloc((size_t)sfl_native_count * sizeof(*hits));
   int n = 0;
   for (int i = 0; i < sfl_native_count; i++) {
-    if (is_internal(sfl_natives[i].name)) continue;
-    char name[128];
-    snprintf(name, sizeof name, "%s", sfl_natives[i].name);
-    ascii_lower(name);
-    if (*lower == '\0' || strstr(name, lower) != NULL) hits[n++] = &sfl_natives[i];
+    const SflNative *b = &sfl_natives[i];
+    if (is_internal(b->name)) continue;
+    if (*lower == '\0' || contains_lower(b->name, lower) ||
+        contains_lower(b->doc, lower)) {
+      hits[n++] = b;
+      continue;
+    }
+    char grp[128];
+    snprintf(grp, sizeof grp, "%s", b->group);
+    ascii_lower(grp);
+    if (strcmp(grp, lower) == 0) hits[n++] = b;
   }
 
   if (n == 0) {
     printf("no builtin matches '%s'\n", filter);
   } else {
-    qsort(hits, (size_t)n, sizeof(*hits), cmp_native_name);
-    /* The reference the interpreter prints is grouped and annotated from its
-       registry; the runtime only knows names and signatures, so that is what
-       this lists. */
-    for (int i = 0; i < n; i++) printf("  %s\n", hits[i]->signature);
-    putchar('\n');
+    qsort(hits, (size_t)n, sizeof(*hits), cmp_native_ref);
+    int i = 0;
+    while (i < n) {
+      int j = i;
+      size_t width = 0;
+      while (j < n && strcmp(hits[j]->group, hits[i]->group) == 0) {
+        size_t len = strlen(hits[j]->signature);
+        if (len > width) width = len;
+        j++;
+      }
+      printf("%s\n", hits[i]->group);
+      for (int k = i; k < j; k++) {
+        printf("  %s%*s  %s\n", hits[k]->signature,
+               (int)(width - strlen(hits[k]->signature)), "", hits[k]->doc);
+      }
+      /* A blank line after every group, including the last: the interpreter's
+         helpText strips one trailing newline and println puts it back. */
+      putchar('\n');
+      i = j;
+    }
   }
   sfl_raw_free(hits);
   sfl_raw_free(lower);

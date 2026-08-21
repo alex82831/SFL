@@ -38,8 +38,8 @@ def parse(spec, argv = null) {
 // The pure parser: returns {flags, options, positionals} or raises with a
 // message naming the problem.
 def parseArgs(spec, argv) {
-  val flagSpecs = if (contains(spec, "flags")) then spec.flags else {}
-  val optSpecs = if (contains(spec, "options")) then spec.options else {}
+  val flagSpecs = if (contains(spec, "flags")) then spec.flags else object()
+  val optSpecs = if (contains(spec, "options")) then spec.options else object()
   val posSpecs = if (contains(spec, "positionals")) then spec.positionals else []
 
   // Short spellings resolve through one table; ambiguity is a spec bug.
@@ -159,8 +159,8 @@ def help(spec) {
   var out = ""
   if (contains(spec, "doc")) then out += spec.doc + "\n\n"
   out += "Usage: " + name
-  val flagSpecs = if (contains(spec, "flags")) then spec.flags else {}
-  val optSpecs = if (contains(spec, "options")) then spec.options else {}
+  val flagSpecs = if (contains(spec, "flags")) then spec.flags else object()
+  val optSpecs = if (contains(spec, "options")) then spec.options else object()
   val posSpecs = if (contains(spec, "positionals")) then spec.positionals else []
   if (size(flagSpecs) > 0 || size(optSpecs) > 0) then out += " [options]"
   for (d in posSpecs) {

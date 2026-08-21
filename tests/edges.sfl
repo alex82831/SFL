@@ -1,0 +1,332 @@
+// The corners: integers at the ends of their range, floats that are not numbers,
+// text outside the BMP, and structures that contain themselves.
+//
+// Everything here is a place where the two engines could disagree — the compiler
+// has machine instructions for what the interpreter does in Scala — so the suite
+// is written to run compiled as well, and the differential run holds the two to
+// the same bytes.
+import "lib/assert"
+
+// Values the parser is not allowed to fold, so the work happens at run time on
+// both engines rather than in the compiler's constant folder.
+var one = 1
+var two = 2
+var three = 3
+var seven = 7
+var ten = 10
+var negOne = -1
+var zero = 0
+var oneF = 1.0
+var zeroF = 0.0
+val maxInt = 9223372036854775807
+val minInt = 0 - maxInt - one
+val inf = oneF / zeroF
+val negInf = (0.0 - oneF) / zeroF
+val nan = zeroF / zeroF
+
+// ------------------------------------------------------- integers at the ends
+
+check("min int", minInt, -9223372036854775808)
+check("abs of the largest int", abs(maxInt), maxInt)
+check("abs of the smallest int has no positive", abs(minInt), minInt)
+check("negating the smallest int wraps", 0 - minInt, minInt)
+check("adding past the top wraps", maxInt + one, minInt)
+check("subtracting past the bottom wraps", minInt - one, maxInt)
+check("multiplying past the top wraps", maxInt * two, -2)
+check("the smallest int divided by minus one wraps", minInt / negOne, minInt)
+check("the smallest int modulo minus one", minInt % negOne, 0)
+check("gcd reaches the smallest int", gcd(minInt, two), 2)
+check("lcm of zero", lcm(zero, 5), 0)
+check("gcd of two zeroes", gcd(zero, zero), 0)
+checkFails("dividing by zero", () -> one / zero, "division by zero")
+checkFails("modulo by zero", () -> one % zero, "modulo by zero")
+check("negative modulo keeps the sign of the left", (0 - seven) % three, -1)
+check("integer division truncates toward zero", (0 - seven) / two, -3)
+
+// ------------------------------------------------------------- shifts and bits
+
+check("shifting left by the width wraps around", shiftLeft(one, 64), 1)
+check("shifting left by more than the width", shiftLeft(one, 65), 2)
+check("shifting left to the sign bit", shiftLeft(one, 63), minInt)
+check("arithmetic shift keeps the sign", shiftRight(0 - 8, one), -4)
+check("logical shift does not", shiftRightU(0 - 8, one), 9223372036854775804)
+check("shifting right by the width", shiftRight(negOne, 64), -1)
+check("bitNot", bitNot(zero), -1)
+check("bitAnd", bitAnd(12, ten), 8)
+check("bitOr", bitOr(12, ten), 14)
+check("bitXor", bitXor(12, ten), 6)
+check("doubleToBits round trip", bitsToDouble(doubleToBits(1.5)), 1.5)
+check("doubleToBits of one", doubleToBits(oneF), 4607182418800017408)
+
+// ------------------------------------------------------- floats that are not numbers
+
+checkTrue("NaN is not equal to itself", nan != nan)
+checkTrue("isNaN", isNaN(nan))
+checkTrue("isNaN says no to an integer", !isNaN(one))
+checkTrue("isInfinite", isInfinite(inf) && isInfinite(negInf))
+checkTrue("isInfinite says no to NaN", !isInfinite(nan))
+check("dividing a float by zero", oneF / zeroF, inf)
+check("NaN is falsy", if (nan) then "t" else "f", "f")
+check("infinity is truthy", if (inf) then "t" else "f", "t")
+check("float modulo by zero is NaN", isNaN(5.0 % zero), true)
+check("overflowing a float", 1e300 * 1e300, inf)
+check("abs of NaN is NaN", isNaN(abs(nan)), true)
+check("abs of negative infinity", abs(negInf), inf)
+check("max with NaN keeps NaN", isNaN(max(oneF, nan)), true)
+check("min with NaN keeps the number", min(nan, oneF), 1.0)
+
+// The conversions to integer: Java's cast saturates and sends NaN to zero, and
+// toInt refuses what has no integer at all.
+check("floor of infinity saturates", floor(inf), maxInt)
+check("floor of negative infinity saturates", floor(negInf), minInt)
+check("floor of NaN is zero", floor(nan), 0)
+check("ceil of infinity saturates", ceil(inf), maxInt)
+check("ceil of NaN is zero", ceil(nan), 0)
+check("round of infinity saturates", round(inf), maxInt)
+check("round of NaN is zero", round(nan), 0)
+check("trunc of infinity saturates", trunc(inf), maxInt)
+check("trunc of NaN is zero", trunc(nan), 0)
+check("trunc past the top of the range saturates", trunc(1.0e19), maxInt)
+check("trunc past the bottom saturates", trunc(-1.0e19), minInt)
+check("toInt past the top saturates", toInt(1.0e19), maxInt)
+check("toInt past the bottom saturates", toInt(-1.0e19), minInt)
+checkFails("toInt of infinity", () -> toInt(inf), "cannot convert Infinity")
+checkFails("toInt of negative infinity", () -> toInt(negInf), "cannot convert -Infinity")
+checkFails("toInt of NaN", () -> toInt(nan), "cannot convert NaN")
+
+// Rounding: halves go towards positive infinity, and the famous near-half that
+// floor(x + 0.5) gets wrong must not round up.
+check("round rounds halves upward", round(0.5), 1)
+check("round of a negative half", round(-0.5), 0)
+check("round of two and a half", round(2.5), 3)
+check("round of minus two and a half", round(-2.5), -2)
+check("round leaves the largest double below a half alone", round(0.49999999999999994), 0)
+check("round to decimal places", round(3.14159, two), 3.14)
+check("round of an integer", round(three), 3)
+checkFails("round rejects too many digits", () -> round(1.5, 16), "at most 15")
+
+// ------------------------------------------------------------------------ pow
+
+check("pow of two ints", pow(two, ten), 1024)
+check("pow of two ints is an int", typeOf(pow(two, ten)), "int")
+check("pow with a negative exponent is a float", pow(two, negOne), 0.5)
+check("pow with a negative exponent has float type", typeOf(pow(two, negOne)), "float")
+check("pow past the top of the range saturates", pow(three, 40), maxInt)
+check("pow computes in double, so it loses the last digit", pow(seven, 20), 79792266297612000)
+check("pow of anything to the zero", pow(zero, zero), 1)
+check("pow with a float base", pow(2.0, three), 8.0)
+check("pow with a float base has float type", typeOf(pow(2.0, three)), "float")
+check("sqrt", sqrt(16), 4.0)
+checkFails("sqrt of a negative", () -> sqrt(0 - one), "must not be negative")
+check("sqrt of negative zero", sqrt(-0.0), -0.0)
+check("cbrt of a negative", cbrt(-8) < 0, true)
+check("hypot", hypot(three, 4), 5.0)
+checkFails("log of zero", () -> log(zero), "must be positive")
+checkFails("log of a negative", () -> log(0 - one), "must be positive")
+check("log2", log2(1024), 10.0)
+check("log10", log10(1000), 3.0)
+check("exp of zero", exp(zero), 1.0)
+check("exp overflows to infinity", exp(1000), inf)
+
+// The trigonometric family, at values where the answer is exact.
+check("sin of zero", sin(zero), 0.0)
+check("cos of zero", cos(zero), 1.0)
+check("tan of zero", tan(zero), 0.0)
+check("asin of zero", asin(zero), 0.0)
+check("acos of one", acos(one), 0.0)
+check("atan of zero", atan(zero), 0.0)
+check("sinh of zero", sinh(zero), 0.0)
+check("cosh of zero", cosh(zero), 1.0)
+check("tanh of zero", tanh(zero), 0.0)
+checkTrue("asin outside its domain is NaN", isNaN(asin(two)))
+checkTrue("acos outside its domain is NaN", isNaN(acos(two)))
+check("atan2 of the diagonal", atan2(one, one), PI() / 4)
+check("PI", round(PI(), 5), 3.14159)
+check("E", round(E(), 5), 2.71828)
+checkTrue("INF", isInfinite(INF()))
+checkTrue("NAN", isNaN(NAN()))
+
+// ------------------------------------------------------------ text past the BMP
+
+// A code point outside the BMP is two code units, and every builtin has to agree
+// about which of the two counts it reports.
+val clef = chr(0x1D11E)
+check("an astral character is two code units", length(clef), 2)
+check("an astral character is four bytes", utf8Length(clef), 4)
+check("ord decodes the pair", ord(clef), 0x1D11E)
+check("chr of the maximum code point", ord(chr(0x10FFFF)), 0x10FFFF)
+checkFails("chr past the maximum", () -> chr(0x110000), "not a valid code point")
+checkFails("chr of a negative", () -> chr(0 - one), "not a valid code point")
+check("chr of zero", length(chr(zero)), 1)
+checkFails("ord of an empty string", () -> ord(""), "string is empty")
+check("ord reads the first character only", ord("abc"), 97)
+
+// Reversing must put the halves of a pair back the right way round, or the text
+// stops being text.
+check("reverse keeps an astral character whole", reverse("a" + clef + "b"), "b" + clef + "a")
+check("reverse of an astral character alone", reverse(clef), clef)
+check("reverse round trips", reverse(reverse("a" + clef + "b")), "a" + clef + "b")
+check("reverse of ascii", reverse("abc"), "cba")
+check("reverse of an empty string", reverse(""), "")
+check("reverse of one character", reverse("a"), "a")
+check("reverse of an array", reverse([1, 2, 3]), [3, 2, 1])
+check("reverse copies the array", { val a = [1, 2]; reverse(a); a }, [1, 2])
+// An unpaired surrogate is a code unit like any other, and reversing must not
+// invent a pair out of two that were never one.
+check("reverse leaves unpaired halves unpaired",
+      reverse(chr(0xDC00) + chr(0xD800)), chr(0xD800) + chr(0xDC00))
+
+check("toUpper past the BMP", toUpper(chr(0x10428)), chr(0x10400))
+check("toLower past the BMP", toLower(chr(0x10400)), chr(0x10428))
+check("an astral character survives a JSON round trip", jsonParse(jsonStringify(clef)), clef)
+check("an astral character can be an object key", keys({}), [])
+val keyed = {}
+keyed[clef] = 1
+check("astral key round trip", keys(keyed), [clef])
+
+// ------------------------------------------------------ structures with no bottom
+
+// A container that contains itself has no end, and every recursive walk over a
+// value has to say so rather than run off the stack.
+val selfArr = []
+push(selfArr, selfArr)
+val selfObj = {}
+selfObj["self"] = selfObj
+val otherArr = []
+push(otherArr, otherArr)
+
+checkTrue("a self-referential array is still an array", isArray(selfArr))
+check("a self-referential array has one element", length(selfArr), 1)
+checkTrue("a self-referential array is its own element", selfArr[0] == selfArr)
+checkFails("printing a self-referential array", () -> toString(selfArr), "nested too deeply")
+checkFails("printing a self-referential object", () -> toString(selfObj), "nested too deeply")
+checkFails("comparing two self-referential arrays",
+           () -> selfArr == otherArr, "nested too deeply")
+checkFails("stringifying a self-referential array",
+           () -> jsonStringify(selfArr), "nested too deeply")
+checkFails("stringifying a self-referential object",
+           () -> jsonStringify(selfObj, true), "nested too deeply")
+checkFails("deep copying a self-referential array",
+           () -> deepCopy(selfArr), "nested too deeply")
+// The program is still running, which is the whole point.
+check("the program survives all of that", one + one, 2)
+
+// Deep but finite structures are not cycles and must still work.
+var deep = [1]
+for (i in range(0, 300)) { deep = [deep] }
+check("a three-hundred deep array prints", length(toString(deep)), 603)
+checkTrue("a three-hundred deep array compares equal to itself", deep == deep)
+
+// --------------------------------------------------------------------- JSON
+
+checkFails("JSON has no NaN", () -> jsonStringify(nan), "cannot convert NaN")
+checkFails("JSON has no infinity", () -> jsonStringify(inf), "cannot convert Infinity")
+checkFails("JSON has no infinity, nested",
+           () -> jsonStringify({"a": [1, inf]}), "cannot convert Infinity")
+check("JSON keeps a float a float", jsonStringify(1.0), "1.0")
+check("JSON of the largest int", jsonStringify(maxInt), "9223372036854775807")
+check("JSON of a control character", jsonStringify(chr(1)), "\"\\u0001\"")
+check("JSON escapes", jsonStringify("a\"b\\c\nd\te"), "\"a\\\"b\\\\c\\nd\\te\"")
+check("JSON round trip of escapes", jsonParse(jsonStringify("a\"b\\c\nd\te")), "a\"b\\c\nd\te")
+check("JSON parses an exponent as a float", jsonParse("1e3"), 1000.0)
+check("JSON keeps the last of duplicate keys", jsonParse("{\"a\":1,\"a\":2}"), {"a": 2})
+checkFails("JSON rejects trailing content", () -> jsonParse("1 2"), "trailing content")
+checkFails("JSON rejects a truncated object", () -> jsonParse("{"), "invalid JSON")
+checkFails("JSON rejects a function", () -> jsonStringify(println), "cannot convert function")
+checkFails("JSON rejects a tuple", () -> jsonStringify((1, 2)), "cannot convert tuple")
+// The path a rejection reports is built as the walk descends, and a deep value
+// runs it past any fixed buffer long before anything else gives way.
+var buried = {"f": println}
+for (i in range(0, 300)) { buried = {"n": buried} }
+checkFails("JSON rejects a deeply buried function",
+           () -> jsonStringify(buried), "cannot convert function")
+var buriedArr = [println]
+for (i in range(0, 300)) { buriedArr = [buriedArr] }
+checkFails("JSON rejects a deeply buried function in arrays",
+           () -> jsonStringify(buriedArr), "cannot convert function")
+
+// ------------------------------------------------- crossing between types
+
+// Where the compiler has proved a machine type, moving a value to another one is
+// an instruction rather than a call — and every pairing has to exist, or the
+// module it emits is not valid at all. These run the ones a program reaches.
+var flag = true
+var whole = 3
+var fraction = 1.5
+check("a bool becomes a float", toFloat(flag), 1.0)
+check("a bool becomes an int", toInt(flag), 1)
+check("a false bool becomes zero", toFloat(false), 0.0)
+check("an int becomes a float", toFloat(whole), 3.0)
+check("a float becomes an int", toInt(fraction), 1)
+check("a float decides a condition", if (fraction) then "t" else "f", "t")
+check("a zero float decides a condition", if (0.0) then "t" else "f", "f")
+check("NaN decides a condition", if (0.0 / zeroF) then "t" else "f", "f")
+check("an int decides a condition", if (whole) then "t" else "f", "t")
+check("a zero int decides a condition", if (0) then "t" else "f", "f")
+check("a float negates", !fraction, false)
+check("an int negates", !0, true)
+check("a float in a conjunction", fraction && flag, true)
+check("an int in a disjunction", 0 || flag, true)
+check("a float drives a while", { var n = 3.0; var c = 0; while (n) { n = n - 1.0; c += 1 }; c }, 3)
+// A branch that yields an int on one side and a float on the other keeps whichever
+// it took, rather than widening both to float.
+check("a conditional keeps the branch's own type", typeOf(if (flag) then whole else fraction), "int")
+check("and the other branch's own type", typeOf(if (!flag) then whole else fraction), "float")
+check("a variable written with both stays what it was last given",
+      { var mixed = 1; mixed = 2.5; mixed = 7; [mixed, typeOf(mixed)] }, [7, "int"])
+def bothTypes(b) = if (b) then 1 else 1.5
+check("a function returning both keeps them apart",
+      [bothTypes(true), typeOf(bothTypes(true)), bothTypes(false)], [1, "int", 1.5])
+def earlyReturn(b) { if (b) { return 2 }; 2.5 }
+check("an early return keeps its own type", typeOf(earlyReturn(true)), "int")
+check("a select keeps the arm's own type",
+      typeOf(select (1) { case 1: 7 case 2: 7.5 }), "int")
+
+// ------------------------------------------------------ the builtin table
+
+// Which category a builtin falls into is invisible to a program: both engines
+// answer the same, including for the two they cannot compile.
+check("builtins lists them all", length(builtins()), 367)
+check("describe reports a group", describe("abs").group, "math")
+check("describe reports the group of a library function", describe("map").group, "array")
+check("describe reports the group of one that cannot be compiled", describe("eval").group, "meta")
+check("eval is still a builtin here", contains(builtins(), "eval"), true)
+check("parse is too", contains(builtins(), "parse"), true)
+check("every builtin has a group", count(builtins(), (n) -> describe(n).group == ""), 0)
+check("every builtin has a doc line", count(builtins(), (n) -> describe(n).doc == ""), 0)
+check("the groups are the ones the manual lists",
+      length(unique(map(builtins(), (n) -> describe(n).group))), 21)
+checkFails("describe of a name that is not a builtin",
+           () -> describe("nosuchbuiltin"), "no builtin named")
+
+// -------------------------------------------------------------- randomness
+
+// A seeded generator has to give the same stream to both engines, or a program
+// that seeds and prints could not be compiled without changing what it says.
+randomSeed(42)
+val firstRun = [random(), randomInt(0, 1000), randomInt(100), random()]
+randomSeed(42)
+check("a seed makes the stream repeatable",
+      [random(), randomInt(0, 1000), randomInt(100), random()], firstRun)
+randomSeed(42)
+check("and the numbers themselves are pinned",
+      [round(random(), 12), randomInt(0, 1000)], [0.727563680033, 683])
+randomSeed(7)
+checkTrue("a different seed gives a different stream", random() != firstRun[0])
+randomSeed(1)
+checkTrue("random stays inside [0, 1)", every(map(range(0, 50), (i) -> random()),
+                                             (r) -> r >= 0.0 && r < 1.0))
+randomSeed(2)
+checkTrue("randomInt stays inside its range",
+          every(map(range(0, 50), (i) -> randomInt(5, 9)), (v) -> v >= 5 && v < 9))
+checkTrue("randomInt with one argument counts from zero",
+          every(map(range(0, 50), (i) -> randomInt(3)), (v) -> v >= 0 && v < 3))
+checkFails("randomInt of an empty range", () -> randomInt(5, 5), "is empty")
+checkFails("randomInt of a backwards range", () -> randomInt(5, 1), "is empty")
+check("randomBytes gives what was asked for", length(randomBytes(16)), 16)
+check("randomBytes of nothing", randomBytes(0), [])
+checkTrue("randomBytes are bytes", every(randomBytes(64), (b) -> b >= 0 && b <= 255))
+checkFails("randomBytes has a ceiling", () -> randomBytes(1048577), "0..1048576")
+checkFails("randomBytes refuses a negative count", () -> randomBytes(-1), "0..1048576")
+
+report("edges")

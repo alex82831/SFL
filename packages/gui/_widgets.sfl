@@ -26,7 +26,8 @@ import "_core"
 // ------------------------------------------------------------ spec helpers
 
 def _props(p) {
-  if (p == null) then {}
+  // `{}` in a branch is an empty body, so the empty table has to be spelled out.
+  if (p == null) then object()
   else {
     if (!isObject(p)) { error("gui: widget props must be an object, got ${typeOf(p)}") }
     copy(p)

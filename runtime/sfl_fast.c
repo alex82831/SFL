@@ -18,23 +18,24 @@
 void sfl_div_zero(void) { sfl_raise("division by zero"); }
 void sfl_mod_zero(void) { sfl_raise("modulo by zero"); }
 
-/* Java's Math.round: half rounds toward positive infinity, unlike llround. */
-int64_t sfl_round(double v) { return (int64_t)floor(v + 0.5); }
+/*
+ * Java's Math.round, and the cast toInt performs. Both go through the same helpers
+ * the primitives use, so an unboxed call cannot round or clamp differently from a
+ * boxed one.
+ */
+int64_t sfl_round(double v) { return sfl_java_round(v); }
+
+int64_t sfl_to_int_f64(double v) {
+  if (isnan(v) || isinf(v)) {
+    char shown[64];
+    sfl_write_double(shown, sizeof shown, v);
+    sfl_raise_sig("toInt", "cannot convert %s", shown);
+  }
+  return sfl_d2l(v);
+}
 
 int64_t sfl_sign_i64(int64_t v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); }
 int64_t sfl_sign_f64(double v) { return v > 0 ? 1 : (v < 0 ? -1 : 0); }
-
-/* Integer power by squaring, matching the interpreter's integer result. */
-int64_t sfl_ipow(int64_t base, int64_t exp) {
-  if (exp < 0) return (int64_t)pow((double)base, (double)exp);
-  int64_t r = 1;
-  while (exp > 0) {
-    if (exp & 1) r *= base;
-    base *= base;
-    exp >>= 1;
-  }
-  return r;
-}
 
 int64_t sfl_gcd(int64_t a, int64_t b) {
   if (a < 0) a = -a;

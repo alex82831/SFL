@@ -341,6 +341,10 @@ def __main() {
   if (length(argv) == 0) { return __dispatch("build", []) }
   val head = argv[0]
   if (head == "-h" || head == "--help") { return __usage() }
+  // A leading flag belongs to the default task, because `sfl build` is shorthand
+  // for `sfl build build`: `sfl build --force` is how the guide spells a clean
+  // rebuild, and it would otherwise be read as the name of a task.
+  if (startsWith(head, "-")) { return __dispatch("build", argv) }
   __dispatch(head, drop(argv, 1))
 }
 

@@ -1,0 +1,49 @@
+// Standard input and the builtin reference, which need a shell to drive them:
+// one wants bytes piped in, the other prints a table both engines must spell the
+// same way. tests/run.sh runs this with and without input, interpreted and
+// compiled, and compares.
+//
+// It lives under lib/ so the suite loop and the differential run — which take
+// every tests/*.sfl — do not pick it up and block waiting for a terminal.
+
+val mode = if (length(args()) > 0) then args()[0] else "lines"
+
+if (mode == "lines") {
+  // readLine hands back one line at a time, without its newline, and null at
+  // the end of input.
+  var n = 0
+  var line = readLine()
+  while (line != null) {
+    println("[${n}] ${line}")
+    n += 1
+    line = readLine()
+  }
+  println("lines: ${n}")
+  println("after the end: ${readLine()}")
+} elsif (mode == "all") {
+  // readAll takes everything that is left, newlines and all.
+  val text = readAll()
+  println("bytes: ${utf8Length(text)}")
+  println("chars: ${length(text)}")
+  println("lines: ${length(lines(text))}")
+  println("text: ${jsonStringify(text)}")
+  println("again: ${jsonStringify(readAll())}")
+} elsif (mode == "mixed") {
+  // The two share one stream: what readLine took, readAll no longer sees.
+  println("first: ${readLine()}")
+  println("rest: ${jsonStringify(readAll())}")
+} elsif (mode == "prompt") {
+  // The prompt goes to the terminal, not into the answer.
+  println("got: ${jsonStringify(readLine("name? "))}")
+} elsif (mode == "help") {
+  // The reference table: whole, filtered by group, filtered by name, filtered by
+  // a word in a doc line, and a filter that matches nothing.
+  help("math")
+  help("bits")
+  help("jsonParse")
+  help("hypotenuse")
+  help("no such builtin anywhere")
+} else {
+  eprintln("stdio_probe: unknown mode '${mode}'")
+  exit(2)
+}

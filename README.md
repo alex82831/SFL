@@ -173,8 +173,9 @@ a namespace: `csv.` offers the package's surface, `math.` the builtin group's.
 
 ```bash
 sbt test               # JUnit tests over the compiler and evaluator
-./tests/run.sh         # language, builtin, command-line and compiler behaviour
-./tests/differential.sh # the suites above, compiled, output required to be identical
+./tests/run.sh         # everything below, plus command-line and tooling behaviour
+./tests/differential.sh # the suites, compiled, output required to be identical
+./tests/examples.sh    # every example project: build setup, build, build test
 ./bench/run.sh         # interpreter benchmarks
 ./bench/compile.sh     # interpreter vs compiler
 ```
@@ -182,6 +183,15 @@ sbt test               # JUnit tests over the compiler and evaluator
 The differential run is the strongest check the compiler has: it compiles the language's
 own test suites — several hundred assertions each — and requires byte-identical output,
 rather than relying on cases written to test the compiler specifically.
+
+Three gates keep the suites honest about what they reach, and each fails on the
+first thing that slips through:
+
+| Gate | What it requires |
+| --- | --- |
+| `tests/coverage.sfl` | every one of the 367 builtins is called by a suite — decided from `sfl --ast`, so a name in a comment or a shadowed one does not count |
+| `tests/pkgcoverage.sfl` | every function the 18 packages export is called by a suite, with a short list of named exceptions that must say which suite drives them |
+| `tests/syntax.sfl` | every keyword and operator `sfl syntax` reports appears in a suite's code, with comments and string literals stripped first |
 
 ## What is in here
 

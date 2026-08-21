@@ -206,12 +206,14 @@ sfl -c program.sfl 2>/dev/null               # 静默编译
 
 | 类别 | 数量 | 实现方式 |
 | --- | --- | --- |
-| C 原语 | 238 | 运行时（`runtime/*.c`） |
-| SFL 标准库 | 81 | SFL 自身，预编译进 `libsflstd.a` |
+| C 原语 | 274 | 运行时（`runtime/*.c`） |
+| SFL 标准库 | 91 | SFL 自身，预编译进 `libsflstd.a` |
 | 无法编译 | 2 | `eval`、`parse` |
 
-一个内置函数属于哪一类，对程序不可见：`typeOf`、`signature`、`describe`、`builtins()`
-对两者的回答一致。
+一个内置函数属于哪一类，对程序不可见：`typeOf`、`signature`、`describe`、`builtins()`、
+`help()` 对两者的回答一致——**包括那两个编译不了的**：编译产物的内置表里也有它们的
+名字、分组、签名与文档，只是没有代码指针；引用它们在编译期就被拒绝，所以运行时永远
+够不着那一行。
 
 ### 新增语言特性的编译方式
 

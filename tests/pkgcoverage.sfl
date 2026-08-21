@@ -1,0 +1,137 @@
+// The package coverage gate: every function a package exports has to be
+// exercised by a suite.
+//
+// A package's surface is its top-level `def`s across all its files, minus the
+// `_`-prefixed ones, which are private to the file that declares them. A name
+// counts as exercised when a suite calls it — qualified (`csv.parse`) or bare,
+// as an `open` import makes it — anywhere under tests/ or examples/.
+//
+// The exemptions below are the handful a suite drives without ever naming: a
+// serve loop the server calls when a connection arrives. Each has to say which
+// suite reaches it, so the list cannot quietly grow.
+import "lib/assert"
+
+val here = dirName(absPath(scriptPath()))
+val root = dirName(here)
+val packages = joinPath(root, "packages")
+
+val exempt = {
+  "httpd.h1Serve": "the HTTP/1.1 loop httpd.server enters per connection; driven by tests/httpd.sfl",
+  "httpd.h2Serve": "the HTTP/2 loop httpd.server enters after the preface; driven by tests/httpd.sfl",
+  "httpd.wsServe": "the WebSocket loop httpd.server enters after the upgrade; driven by tests/httpd.sfl"
+}
+
+// ------------------------------------------------------------ the surface
+
+// A top-level definition is one whose `def` starts a line. Nested ones are
+// indented, so the margin is enough to tell them apart.
+def publicDefs(text) {
+  val out = []
+  for (line in lines(text)) {
+    if (startsWith(line, "def ")) {
+      val rest = subString(line, 4, length(line))
+      val open = strFind(rest, "(")
+      if (open > 0) {
+        val name = trim(subString(rest, 0, open))
+        if (!startsWith(name, "_") && matches(name, "[A-Za-z][A-Za-z0-9_]*")) then push(out, name)
+      }
+    }
+  }
+  unique(out)
+}
+
+val surface = []
+for (pkg in listFiles(packages)) {
+  val dir = joinPath(packages, pkg)
+  if (isDir(dir)) {
+    for (f in listFiles(dir)) {
+      if (endsWith(f, ".sfl")) {
+        for (name in publicDefs(readFile(joinPath(dir, f)))) {
+          push(surface, {pkg: pkg, name: name, key: pkg + "." + name})
+        }
+      }
+    }
+  }
+}
+checkTrue("the packages have a surface to check", length(surface) > 200)
+
+// ------------------------------------------------------------ what is used
+
+// Every .sfl under tests/ and examples/, read once.
+def sflUnder(dir, out) {
+  val entries = listFiles(dir)
+  if (isNull(entries)) then return out
+  for (e in entries) {
+    val p = joinPath(dir, e)
+    if (isDir(p)) then sflUnder(p, out)
+    elsif (endsWith(e, ".sfl")) then push(out, p)
+  }
+  out
+}
+
+val sources = []
+sflUnder(here, sources)
+sflUnder(joinPath(root, "examples"), sources)
+checkTrue("there are suites to read", length(sources) > 50)
+
+// The text of everything a suite could call from, with the packages' own
+// sources left out — a package calling itself proves nothing.
+var corpus = ""
+for (f in sources) {
+  if (!contains(f, "/packages/") && !contains(f, "/sfl_packages/")) {
+    corpus += readFile(f) + "\n"
+  }
+}
+
+// Every call the corpus makes, collected in one pass rather than searched for
+// once per name: split on the open parenthesis and read backwards from the end of
+// each piece, which is where the callee's name sits. Qualified calls keep their
+// namespace, so `csv.parse(...)` and a bare `parse(...)` are told apart.
+def calleeNames(text) {
+  val out = {}
+  val pieces = split(text, "(")
+  var p = 0
+  while (p + 1 < length(pieces)) {
+    val piece = pieces[p]
+    var end = length(piece)
+    // Whitespace may sit between the name and the parenthesis.
+    while (end > 0 && contains(" \t\n\r", charAt(piece, end - 1))) { end -= 1 }
+    var start = end
+    while (start > 0 && _isNameChar(charAt(piece, start - 1))) { start -= 1 }
+    if (start < end) then out[subString(piece, start, end)] = true
+    p += 1
+  }
+  out
+}
+
+def _isNameChar(c) =
+  (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") ||
+  c == "_" || c == "."
+
+val called = calleeNames(corpus)
+checkTrue("the suites call something", length(keys(called)) > 100)
+
+// A bare name counts because an `open` import puts a package's names in reach
+// unqualified; the qualified spelling counts wherever it appears.
+def isCalled(entry) = has(called, entry.name) || has(called, entry.pkg + "." + entry.name)
+
+val missing = []
+for (entry in surface) {
+  if (!isCalled(entry) && !has(exempt, entry.key)) then push(missing, entry.key)
+}
+check("every package function is exercised by a suite", unique(missing), [])
+
+// The exemptions have to stay real: a name that no longer exists, or one a
+// suite now calls, means the list is out of date.
+val names = {}
+for (entry in surface) { names[entry.key] = entry }
+for (k in keys(exempt)) {
+  checkTrue("the exemption for " + k + " names a function that exists", has(names, k))
+  checkTrue("the exemption for " + k + " says which suite reaches it",
+            length(exempt[k]) > 20)
+  if (has(names, k)) {
+    checkTrue("the exemption for " + k + " is still needed", !isCalled(names[k]))
+  }
+}
+
+report("pkgcoverage")
