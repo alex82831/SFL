@@ -183,6 +183,7 @@ final class Lsp:
     // The namespace this file declares into, so a name that landed in some other
     // one — a package imported but not opened — still reads as out of scope.
     intel.rootTag = importer.namespaceOf(path)._1
+    intel.rootFile = path // `_`-private names are keyed by file, not namespace
     try
       new Parser(ref, globals, importer, null,
         mutable.HashMap.empty[String, String], intel).parseProgram()

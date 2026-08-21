@@ -69,6 +69,12 @@ final class ParseIntel:
    * to it is still undefined and still worth a diagnostic.
    */
   var rootTag: String = ""
+  /**
+   * The file being analysed. A `_`-private name is keyed by its file rather than
+   * its namespace — privacy is a property of the file — so the file's own tag has
+   * to count as in scope, or every private definition would read as undefined.
+   */
+  var rootFile: String = ""
   private val visible = mutable.LinkedHashSet.empty[String]
 
   def openInto(into: String, tag: String): Unit = if into == rootTag then visible += tag
@@ -79,7 +85,8 @@ final class ParseIntel:
     if !name.startsWith("__") && !name.contains('.') && !name.contains('#') then
       refs += GlobalRef(name, file, line)
 
-  private def inScope(tag: String): Boolean = tag == rootTag || visible.contains(tag)
+  private def inScope(tag: String): Boolean =
+    tag == rootTag || tag == rootFile || visible.contains(tag)
   def isDefined(name: String): Boolean = defined.get(name).exists(_.exists(inScope))
   def definedNames: Iterable[String] = defined.collect { case (n, ts) if ts.exists(inScope) => n }
 

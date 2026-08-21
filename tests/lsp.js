@@ -313,6 +313,36 @@ async function main() {
   });
   check('references finds both uses', refs.result.length === 2, JSON.stringify(refs.result));
 
+  // -- file-private names are defined in their own file ---------------------------
+  // `_`-private names are keyed by file rather than namespace; the undefined
+  // pass must count the file itself as in scope or every one of them goes red.
+  const privUri = 'file://' + pathmod.join(dir, 'priv.sfl');
+  let privP = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didOpen', {
+    textDocument: {
+      uri: privUri, languageId: 'sfl', version: 1,
+      text: [
+        'def _helper(x) = x * 2',
+        'val _CONST = 7',
+        'def publicOne(y) = _helper(y) + _CONST',
+        'println(publicOne(1))',
+        '',
+      ].join('\n'),
+    },
+  });
+  const privDiags = (await privP).params.diagnostics;
+  check('file-private def/val are not undefined', privDiags.length === 0, JSON.stringify(privDiags));
+
+  privP = nextNotification('textDocument/publishDiagnostics');
+  notify('textDocument/didChange', {
+    textDocument: { uri: privUri, version: 2 },
+    contentChanges: [{ text: 'def _helper(x) = x * 2\nprintln(_missingPrivate(1))\n' }],
+  });
+  const privDiags2 = (await privP).params.diagnostics;
+  check('an undefined private name is still flagged',
+    privDiags2.length === 1 && /_missingPrivate/.test(privDiags2[0].message),
+    JSON.stringify(privDiags2));
+
   // -- build.sfl knows the build tool's DSL ---------------------------------------
   const buildUri = 'file://' + pathmod.join(dir, 'build.sfl');
   let diagsP3 = nextNotification('textDocument/publishDiagnostics');
