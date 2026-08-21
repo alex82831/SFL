@@ -1949,7 +1949,18 @@ final class Parser(
  * reports an error instead of recursing forever, and remembers what has been loaded so
  * repeated imports of a shared module are a no-op.
  */
-final class Importer(val baseDir: File):
+final class Importer(
+    val baseDir: File,
+    /**
+     * The project this importer resolves on behalf of, when it is not simply
+     * "wherever the process was started". Only the language server sets it: it
+     * reads files out of whatever the editor has open, which may be a checkout
+     * of many projects, and each file's packages belong to its own project.
+     * Empty everywhere else, so the interpreter and the compiler keep resolving
+     * packages exactly as the working directory says.
+     */
+    val projectRoot: Option[File] = None
+):
   private val loaded = mutable.HashSet.empty[String]
   private val inFlight = mutable.LinkedHashSet.empty[String]
 
@@ -2099,8 +2110,8 @@ final class Importer(val baseDir: File):
    * never touches packages never parses it, and never fails on it either.
    */
   private lazy val cwdManifest: Option[PkgTool.Manifest] =
-    if PkgTool.manifestFile(new File(".")).isFile then Some(PkgTool.readManifest(new File(".")))
-    else None
+    val dir = projectRoot.getOrElse(new File("."))
+    if PkgTool.manifestFile(dir).isFile then Some(PkgTool.readManifest(dir)) else None
 
   /** The manifest of the package `fromSource` belongs to, if it belongs to one. */
   private def owningPackage(fromSource: SourceRef): Option[PkgTool.Manifest] =
@@ -2128,7 +2139,7 @@ final class Importer(val baseDir: File):
     try
       // The first root that has the package wins outright, so a project-local
       // install shadows the global one instead of competing with it on version.
-      val root = PkgTool.roots.find(r => PkgTool.installedVersions(r, pkgName).nonEmpty) match
+      val root = PkgTool.rootsFor(projectRoot).find(r => PkgTool.installedVersions(r, pkgName).nonEmpty) match
         case Some(r) => r
         case None    => return None
       val installed = PkgTool.installedVersions(root, pkgName)

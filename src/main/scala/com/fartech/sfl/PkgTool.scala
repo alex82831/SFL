@@ -180,6 +180,18 @@ object PkgTool:
   /** Both roots, the project one first — the order every search and listing uses. */
   def roots: List[File] = List(localRoot, globalRoot)
 
+  /**
+   * The roots to search on behalf of a file that belongs to `projectRoot`, that
+   * project's own first. [[roots]] is relative to the working directory, which
+   * is the right question for a command line — `sfl app.sfl` looks where you
+   * are standing — but the wrong one for a tool reading a file out of a
+   * checkout that holds many projects, each with its own packages. Such a tool
+   * passes the project the file belongs to and gets that project's answer.
+   */
+  def rootsFor(projectRoot: Option[File]): List[File] =
+    val own = projectRoot.toList.flatMap(r => List(new File(r, "sfl_packages"), new File(r, "packages")))
+    (own ++ roots).distinctBy(_.getPath)
+
   /** The versions of `name` installed under `root`, lowest first. A directory whose
     * name is not a strict version is ignored rather than reported: the roots are
     * ordinary directories and may hold whatever else the user keeps there. */

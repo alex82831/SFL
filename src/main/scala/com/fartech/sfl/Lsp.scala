@@ -176,7 +176,7 @@ final class Lsp:
   private def analyze(path: String, text: String): List[Value] =
     val ref = SourceRef(path, text)
     val base = new File(path).getParentFile
-    val importer = new Importer(if base != null then base else new File("."))
+    val importer = new Importer(if base != null then base else new File("."), projectRootOf(path))
     val intel = new ParseIntel
     val globals = new Globals
     Builtins.install(globals)
@@ -599,7 +599,7 @@ final class Lsp:
   /** Resolves an import string the way `import` itself would, packages included. */
   private def resolveModule(fromPath: String, name: String): Option[File] =
     val base = new File(fromPath).getParentFile
-    val importer = new Importer(if base != null then base else new File("."))
+    val importer = new Importer(if base != null then base else new File("."), projectRootOf(fromPath))
     val ref = SourceRef(fromPath, "")
     importer.resolve(name, ref).orElse {
       try Some(new File(importer.pathOf(name, ref, Pos.none)))
@@ -719,10 +719,13 @@ final class Lsp:
 
     val base = new File(path).getParentFile
     val libs = new File(sys.env.getOrElse("SFL_HOME", "."), "libs")
+    // The same roots the file's own project resolves against, so the list
+    // offers what an import from this file would actually find.
+    val pkgRoots = PkgTool.rootsFor(projectRootOf(path))
     if dirPart.isEmpty then
       if base != null then addDirListing(base, "this directory")
       addDirListing(libs, "SFL_HOME/libs")
-      for root <- PkgTool.roots do
+      for root <- pkgRoots do
         val kids = root.listFiles()
         if kids != null then
           for f <- kids.sortBy(_.getName)
@@ -735,7 +738,7 @@ final class Lsp:
       addDirListing(new File(libs, dirPart), s"SFL_HOME/libs/$dirPart")
       val pkgName = dirPart.takeWhile(_ != '/')
       val rest = dirPart.drop(pkgName.length).stripPrefix("/")
-      for root <- PkgTool.roots do
+      for root <- pkgRoots do
         val versions = PkgTool.installedVersions(root, pkgName)
         if versions.nonEmpty then
           val vdir = PkgTool.versionDir(root, pkgName, versions.last)
@@ -1064,6 +1067,34 @@ final class Lsp:
       )),
       "serverInfo" -> VObj.of(Seq("name" -> VStr("sfl"), "version" -> VStr(Sfl.version)))
     ))
+
+  /**
+   * The project a file belongs to: the nearest ancestor that declares one with
+   * a build.sfl, or failing that the nearest that keeps installed packages.
+   *
+   * An editor is opened on a checkout, not on a project — examples/ alone holds
+   * thirty-three of them, each with its own sfl_packages — so "the working
+   * directory" is the wrong anchor for resolving one file's imports. The walk
+   * prefers build.sfl so that a package's own source, opened from inside
+   * sfl_packages, still answers with the project that installed it.
+   */
+  private def projectRootOf(path: String): Option[File] =
+    var dir = new File(path).getAbsoluteFile.getParentFile
+    var packagesAnchor: Option[File] = None
+    var depth = 0
+    while dir != null && depth < 64 do
+      if new File(dir, "build.sfl").isFile then return Some(dir)
+      if packagesAnchor.isEmpty
+        && (new File(dir, "sfl_packages").isDirectory || new File(dir, "packages").isDirectory)
+      then packagesAnchor = Some(dir)
+      dir = dir.getParentFile
+      depth += 1
+    packagesAnchor
+
+  /** An importer that resolves `path`'s imports the way its own project would. */
+  private def importerFor(path: String): Importer =
+    val base = new File(path).getAbsoluteFile.getParentFile
+    new Importer(if base != null then base else new File("."), projectRootOf(path))
 
   /** file:// URI -> filesystem path; anything else is used as the display name. */
   private def uriToPath(uri: String): String =

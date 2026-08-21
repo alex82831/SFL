@@ -480,6 +480,55 @@ async function main() {
     nsGlobals.result.some((i) => i.label === 'geo'),
     JSON.stringify(nsGlobals.result.filter((i) => /namespace/.test(i.detail || '')).slice(0, 8)));
 
+  // -- a project's packages resolve wherever the server was started ---------------
+  // The editor opens a checkout, not a project: examples/ alone holds dozens,
+  // each with its own sfl_packages. A file's imports must resolve against its
+  // own project, not against wherever the server happens to be running.
+  const repo = fs.mkdtempSync(pathmod.join(os.tmpdir(), 'sfl-lsp-repo-'));
+  const sub = pathmod.join(repo, 'examples', 'demo');
+  fs.mkdirSync(pathmod.join(sub, 'sfl_packages', 'widget', '0.1.0'), { recursive: true });
+  fs.writeFileSync(pathmod.join(sub, 'sfl_packages', 'widget', '0.1.0', 'sfl.pkg'),
+    '{ "name": "widget", "version": "0.1.0", "main": "main" }\n');
+  fs.writeFileSync(pathmod.join(sub, 'sfl_packages', 'widget', '0.1.0', 'main.sfl'),
+    'def render(x) = "[" + x + "]"\n');
+  fs.mkdirSync(pathmod.join(sub, 'src'));
+  fs.writeFileSync(pathmod.join(sub, 'build.sfl'),
+    'project({ "name": "demo", "version": "0.1.0", "main": "src/main.sfl" })\n');
+  const subMain = pathmod.join(sub, 'src', 'main.sfl');
+  fs.writeFileSync(subMain, 'import "widget"\nprintln(widget.render("hi"))\n');
+
+  // Server started at the checkout root, two levels above the project.
+  const proc3 = spawn(sfl, ['lsp'], { stdio: ['pipe', 'pipe', 'inherit'], cwd: repo });
+  const subDiags = await new Promise((resolve, reject) => {
+    let b = Buffer.alloc(0);
+    proc3.stdout.on('data', (chunk) => {
+      b = Buffer.concat([b, chunk]);
+      for (;;) {
+        const h = b.indexOf('\r\n\r\n');
+        if (h < 0) return;
+        const m = /Content-Length:\s*(\d+)/i.exec(b.slice(0, h).toString('ascii'));
+        const len = parseInt(m[1], 10);
+        if (b.length < h + 4 + len) return;
+        const msg = JSON.parse(b.slice(h + 4, h + 4 + len).toString('utf8'));
+        b = b.slice(h + 4 + len);
+        if (msg.method === 'textDocument/publishDiagnostics') resolve(msg.params.diagnostics);
+      }
+    });
+    const send3 = (obj) => {
+      const buf = Buffer.from(JSON.stringify(obj), 'utf8');
+      proc3.stdin.write(`Content-Length: ${buf.length}\r\n\r\n`);
+      proc3.stdin.write(buf);
+    };
+    send3({ jsonrpc: '2.0', id: 1, method: 'initialize',
+      params: { processId: null, rootUri: 'file://' + repo, capabilities: {} } });
+    setTimeout(() => send3({ jsonrpc: '2.0', method: 'textDocument/didOpen', params: {
+      textDocument: { uri: 'file://' + subMain, languageId: 'sfl', version: 1,
+        text: fs.readFileSync(subMain, 'utf8') } } }), 200);
+    setTimeout(() => reject(new Error('timeout waiting for subproject diagnostics')), 10000);
+  });
+  check('a subproject resolves its own sfl_packages', subDiags.length === 0, JSON.stringify(subDiags));
+  proc3.kill();
+
   // -- shutdown ---------------------------------------------------------------------
   const bye = await request('shutdown', null);
   check('shutdown acknowledged', bye.result === null);
