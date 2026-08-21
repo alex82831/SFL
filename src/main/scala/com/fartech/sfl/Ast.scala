@@ -486,16 +486,23 @@ object Arith:
               case _ =>
                 if y == 0 then Err.eval("modulo by zero") else VInt.of(x % y)
           case VFloat(y) => floatOp(op, x.toDouble, y)
-          case VStr(y)   => if op == BinOp.Add then VStr(a.display + y) else typeErr(op, a, b)
+          // Straight to the text: `display` would build the same characters
+          // through a StringBuilder and copy them once more.
+          case VStr(y)   => if op == BinOp.Add then VStr(x.toString + y) else typeErr(op, a, b)
           case _         => typeErr(op, a, b)
       case VFloat(x) =>
         b match
           case VFloat(y) => floatOp(op, x, y)
           case VInt(y)   => floatOp(op, x, y.toDouble)
-          case VStr(y)   => if op == BinOp.Add then VStr(a.display + y) else typeErr(op, a, b)
+          case VStr(y)   => if op == BinOp.Add then VStr(Values.formatDouble(x) + y) else typeErr(op, a, b)
           case _         => typeErr(op, a, b)
       case VStr(x) =>
-        if op == BinOp.Add then VStr(x + b.display)
+        if op == BinOp.Add then
+          b match
+            case VStr(y)   => VStr(x + y)
+            case VInt(y)   => VStr(x + y)
+            case VFloat(y) => VStr(x + Values.formatDouble(y))
+            case _         => VStr(x + b.display)
         else if op == BinOp.Mul then
           b match
             case VInt(k) =>
@@ -652,7 +659,7 @@ object Index:
     case VStr(s) =>
       val i = normalize(Values.toIndex(k, "string index"), s.length)
       if i < 0 || i >= s.length then outOfBounds("string", k, s.length)
-      VStr(String.valueOf(s.charAt(i)))
+      VStr.ofChar(s.charAt(i))
     case VNull =>
       Err.evalHint(
         "cannot index into null",
@@ -1071,7 +1078,7 @@ object ForIn:
   def iterator(v: Value): Iterator[Value] = v match
     case a: VArr => a.items.iterator
     case o: VObj => o.fields.keysIterator.map(VStr(_))
-    case VStr(s) => s.iterator.map(c => VStr(String.valueOf(c)))
+    case VStr(s) => s.iterator.map(VStr.ofChar)
     case t: VTuple => t.items.iterator
     case i: VIter => i.it
     case other   => Err.eval(s"cannot iterate over ${other.typeName}")
@@ -1083,13 +1090,67 @@ final class Select(
     val orElse: Node,
     val line: Int
 ) extends Node:
+  // A select whose cases are all string literals — the tag-dispatch idiom — is
+  // resolved by hash instead of a comparison chain. Semantics are untouched: a
+  // non-string subject can equal no string case, so it goes straight to the
+  // default, exactly as the chain would have decided. First case wins on a
+  // duplicate, as in the chain. All-int-literal selects get the same treatment,
+  // with a float subject bridged the way Values.equal bridges it.
+  private val strCases: java.util.HashMap[String, Node] =
+    if caseVals.length >= 4 && caseVals.forall {
+      case l: Lit => l.v.isInstanceOf[VStr]
+      case _      => false
+    } then
+      val m = new java.util.HashMap[String, Node](caseVals.length * 2)
+      var i = 0
+      while i < caseVals.length do
+        m.putIfAbsent(caseVals(i).asInstanceOf[Lit].v.asInstanceOf[VStr].v, caseBodies(i))
+        i += 1
+      m
+    else null
+
+  private val intCases: mutable.LongMap[Node] =
+    if strCases == null && caseVals.length >= 4 && caseVals.forall {
+      case l: Lit => l.v.isInstanceOf[VInt]
+      case _      => false
+    } then
+      val m = new mutable.LongMap[Node](caseVals.length * 2)
+      var i = 0
+      while i < caseVals.length do
+        val k = caseVals(i).asInstanceOf[Lit].v.asInstanceOf[VInt].v
+        if !m.contains(k) then m(k) = caseBodies(i)
+        i += 1
+      m
+    else null
+
   def eval(f: Frame, rt: Interp): Value =
     val v = subject.eval(f, rt)
-    var i = 0
-    while i < caseVals.length do
-      if Values.equal(caseVals(i).eval(f, rt), v) then return caseBodies(i).eval(f, rt)
-      i += 1
-    if orElse != null then orElse.eval(f, rt) else VNull
+    if strCases != null then
+      v match
+        case VStr(s) =>
+          val body = strCases.get(s)
+          if body != null then return body.eval(f, rt)
+        case _ => ()
+      if orElse != null then orElse.eval(f, rt) else VNull
+    else if intCases != null then
+      var body: Node = null
+      v match
+        case VInt(x) => body = intCases.getOrNull(x)
+        case VFloat(x) =>
+          // An integral float equals the int with the same value; the round-trip
+          // test rejects anything a long cannot hold exactly.
+          val l = x.toLong
+          if l.toDouble == x then body = intCases.getOrNull(l)
+        case _ => ()
+      if body != null then body.eval(f, rt)
+      else if orElse != null then orElse.eval(f, rt)
+      else VNull
+    else
+      var i = 0
+      while i < caseVals.length do
+        if Values.equal(caseVals(i).eval(f, rt), v) then return caseBodies(i).eval(f, rt)
+        i += 1
+      if orElse != null then orElse.eval(f, rt) else VNull
 
 final class Return(val e: Node, val line: Int) extends Node:
   def eval(f: Frame, rt: Interp): Value =

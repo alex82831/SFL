@@ -87,6 +87,13 @@ final case class VStr(v: String) extends Value:
 object VStr:
   val empty: VStr = VStr("")
 
+  // Single ASCII characters are what string indexing, iteration and charAt hand
+  // back; interning them keeps per-character loops allocation-free. Strings are
+  // immutable, so sharing the instances is unobservable.
+  private val ascii: Array[VStr] = Array.tabulate(128)(c => new VStr(String.valueOf(c.toChar)))
+
+  def ofChar(c: Char): VStr = if c < 128 then ascii(c) else VStr(String.valueOf(c))
+
 final class VArr(val items: mutable.ArrayBuffer[Value]) extends Value:
   def typeName: String = "array"
   def truthy: Boolean = items.nonEmpty

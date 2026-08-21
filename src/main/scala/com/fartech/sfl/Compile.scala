@@ -66,11 +66,21 @@ private final class Fn(
     val proto: FnProto,
     val argTys: Array[Ty],
     val index: Int,
-    val generic: Boolean
+    val generic: Boolean,
+    /**
+     * A generic instance whose body creates no closures keeps its locals out of
+     * the boxed slot array: parameters arrive boxed, but a local with a proven
+     * machine type lives in a typed alloca of its own, so a loop counter in a
+     * dynamically-called function costs what it costs in a specialised one.
+     * With closures in the body every slot may be captured, so all stay boxed.
+     */
+    val mixedLocals: Boolean = false
 ):
   val nSlots: Int = if proto == null then 0 else proto.nSlots
   var ret: Ty = if generic then Ty.Dyn else Ty.Unknown
-  val slots: Array[Ty] = Array.fill(nSlots)(if generic then Ty.Dyn else Ty.Unknown)
+  val slots: Array[Ty] = Array.tabulate(nSlots) { i =>
+    if generic && (!mixedLocals || i < argTys.length) then Ty.Dyn else Ty.Unknown
+  }
   var emitted = false
 
   val symbol: String =
@@ -438,7 +448,8 @@ final class Compiler(val globals: Globals, val src: SourceRef):
     val key = Fn.keyOf(proto, argTys, generic)
     fns.getOrElseUpdate(key, {
       changed = true
-      new Fn(proto, argTys, fns.size, generic)
+      new Fn(proto, argTys, fns.size, generic,
+        mixedLocals = generic && proto != null && !heapFrame(proto))
     })
 
   /** The generic instance of a proto, which every dynamic use goes through. */
@@ -587,7 +598,10 @@ final class Compiler(val globals: Globals, val src: SourceRef):
     val builtin = builtinOf(c.callee)
     val argTys = c.args.map(a => tyOf(a, fn))
     if builtin.nonEmpty then
-      Intrinsics.staticRet(builtin, argTys).getOrElse(Ty.Dyn)
+      // A primitive with a guaranteed machine result stays typed even when the
+      // intrinsic table cannot open-code it; see Intrinsics.PrimRet.
+      Intrinsics.staticRet(builtin, argTys)
+        .getOrElse(Intrinsics.PrimRet.retTy(builtin, c.args.length))
     else
       val proto = userFnOf(c.callee)
       if proto == null then
@@ -797,7 +811,11 @@ final class Compiler(val globals: Globals, val src: SourceRef):
   private def gslot(i: Int): String = s"getelementptr inbounds (ptr, ptr $slotsGlobal, i64 $i)"
 
   private def slotAddr(i: Int): String =
-    if slotsBase.isEmpty && !inDefaults then slotPtr(i)
+    // A mixed generic instance routes its machine-typed locals to their own
+    // allocas; everything else — parameters, Dyn locals, loop-frame slots —
+    // stays in the boxed array.
+    if !inDefaults && i < slotPtr.length && slotPtr(i).nonEmpty then slotPtr(i)
+    else if slotsBase.isEmpty && !inDefaults then slotPtr(i)
     else
       val base = if slotsBase.nonEmpty then slotsBase else envSlots()
       val r = tmp()
@@ -1217,7 +1235,11 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       // the ambient one comes back right after.
       if ix.col > 0 then setPos(ix, ix.col)
       val r = tmp()
-      emit(s"$r = call ptr @sfl_index_get(ptr ${box(recv, rt)}, ptr ${box(key, kt)})")
+      // A machine-integer key skips the boxing and the dynamic index check.
+      if kt == Ty.I64 then
+        emit(s"$r = call ptr @sfl_index_get_i(ptr ${box(recv, rt)}, i64 $key)")
+      else
+        emit(s"$r = call ptr @sfl_index_get(ptr ${box(recv, rt)}, ptr ${box(key, kt)})")
       if ix.col > 0 then restoreAmbient()
       (r, Ty.Dyn)
 
@@ -1227,7 +1249,10 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       val (v, vt) = emitExpr(ix.value)
       // Assignment does not pin in the interpreter; the statement or call shows through.
       val r = tmp()
-      emit(s"$r = call ptr @sfl_index_set(ptr ${box(recv, rt)}, ptr ${box(key, kt)}, ptr ${box(v, vt)})")
+      if kt == Ty.I64 then
+        emit(s"$r = call ptr @sfl_index_set_i(ptr ${box(recv, rt)}, i64 $key, ptr ${box(v, vt)})")
+      else
+        emit(s"$r = call ptr @sfl_index_set(ptr ${box(recv, rt)}, ptr ${box(key, kt)}, ptr ${box(v, vt)})")
       (r, Ty.Dyn)
 
     case ix: IndexCompound =>
@@ -1235,8 +1260,12 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       val (key, kt) = emitExpr(ix.key)
       val (v, vt) = emitExpr(ix.value)
       val r = tmp()
-      emit(s"$r = call ptr @sfl_index_compound(ptr ${box(recv, rt)}, ptr ${box(key, kt)}, " +
-        s"i32 ${ix.op}, ptr ${box(v, vt)})")
+      if kt == Ty.I64 then
+        emit(s"$r = call ptr @sfl_index_compound_i(ptr ${box(recv, rt)}, i64 $key, " +
+          s"i32 ${ix.op}, ptr ${box(v, vt)})")
+      else
+        emit(s"$r = call ptr @sfl_index_compound(ptr ${box(recv, rt)}, ptr ${box(key, kt)}, " +
+          s"i32 ${ix.op}, ptr ${box(v, vt)})")
       (r, Ty.Dyn)
 
     case c: Call => emitCall(c)
@@ -1321,7 +1350,19 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       (r, t)
     else
       val r = tmp()
-      emit(s"$r = call ptr @sfl_arith(i32 ${a.op}, ptr ${box(lv0, lt)}, ptr ${box(rv0, rt)})")
+      // One machine-numeric side skips its boxing; the runtime dispatches on
+      // the other operand exactly as the fully boxed route does.
+      (lt, rt) match
+        case (Ty.I64, Ty.Dyn) =>
+          emit(s"$r = call ptr @sfl_arith_iv(i32 ${a.op}, i64 $lv0, ptr $rv0)")
+        case (Ty.F64, Ty.Dyn) =>
+          emit(s"$r = call ptr @sfl_arith_dv(i32 ${a.op}, double $lv0, ptr $rv0)")
+        case (Ty.Dyn, Ty.I64) =>
+          emit(s"$r = call ptr @sfl_arith_vi(i32 ${a.op}, ptr $lv0, i64 $rv0)")
+        case (Ty.Dyn, Ty.F64) =>
+          emit(s"$r = call ptr @sfl_arith_vd(i32 ${a.op}, ptr $lv0, double $rv0)")
+        case _ =>
+          emit(s"$r = call ptr @sfl_arith(i32 ${a.op}, ptr ${box(lv0, lt)}, ptr ${box(rv0, rt)})")
       (r, Ty.Dyn)
 
   private def guardNonZero(v: String, isDiv: Boolean): Unit =
@@ -1757,10 +1798,35 @@ final class Compiler(val globals: Globals, val src: SourceRef):
               emitLabel(label("after_arity"))
               ("@sfl_null_obj", Ty.Dyn)
             else
-              val r = tmp()
-              emit(s"$r = call ptr @${p.symbol}(i64 $n, ptr $argv)")
               usedPrims += p
-              (r, Ty.Dyn)
+              Intrinsics.PrimRet.of(name, n) match
+                case Some(fact) if fact.core.nonEmpty =>
+                  // The unboxed twin: same checks and messages, no result cell.
+                  val r = tmp()
+                  emit(s"$r = call ${fact.ret.llvm} @${fact.core}(i64 $n, ptr $argv)")
+                  (r, fact.ret)
+                case Some(fact) =>
+                  val r0 = tmp()
+                  emit(s"$r0 = call ptr @${p.symbol}(i64 $n, ptr $argv)")
+                  fact.ret match
+                    case Ty.I64 =>
+                      val r = tmp()
+                      emit(s"$r = call i64 @sfl_int_raw(ptr $r0)")
+                      (r, Ty.I64)
+                    case Ty.F64 =>
+                      val r = tmp()
+                      emit(s"$r = call double @sfl_float_raw(ptr $r0)")
+                      (r, Ty.F64)
+                    case _ =>
+                      val b = tmp()
+                      emit(s"$b = call i32 @sfl_istrue_raw(ptr $r0)")
+                      val r = tmp()
+                      emit(s"$r = icmp ne i32 $b, 0")
+                      (r, Ty.Bool)
+                case None =>
+                  val r = tmp()
+                  emit(s"$r = call ptr @${p.symbol}(i64 $n, ptr $argv)")
+                  (r, Ty.Dyn)
           case None =>
             Stdlib.byName.get(name) match
               case Some(f) =>
@@ -1880,6 +1946,17 @@ final class Compiler(val globals: Globals, val src: SourceRef):
         val b = entryAlloca(s"[${math.max(proto.nSlots, 1)} x ptr]")
         emit(s"call void @llvm.memset.p0.i64(ptr $b, i8 0, i64 ${math.max(proto.nSlots, 1) * 8}, i1 false)")
         slotsBase = b
+        if f.mixedLocals then
+          // Machine-typed locals get their own allocas, zeroed like a
+          // specialised instance's; the boxed array keeps their entries null.
+          slotPtr = Array.fill(proto.nSlots)("")
+          var si = proto.params.length
+          while si < proto.nSlots do
+            val t = f.slots(si)
+            if Ty.unboxed(t) then
+              slotPtr(si) = entryAlloca(t.llvm)
+              emit(s"store ${t.llvm} ${zeroOf(t)}, ptr ${slotPtr(si)}")
+            si += 1
       val filled = tmp()
       emit(s"$filled = call i64 @sfl_bind_args_raw(ptr $slotsBase, ptr ${protoRef(proto)}, " +
         s"i64 %argc, ptr %argv)")
@@ -2368,6 +2445,10 @@ private object Compiler:
       |declare double @sfl_unbox_float(ptr)
       |declare i32 @sfl_truthy(ptr)
       |declare ptr @sfl_arith(i32, ptr, ptr)
+      |declare ptr @sfl_arith_iv(i32, i64, ptr)
+      |declare ptr @sfl_arith_vi(i32, ptr, i64)
+      |declare ptr @sfl_arith_dv(i32, double, ptr)
+      |declare ptr @sfl_arith_vd(i32, ptr, double)
       |declare ptr @sfl_neg(ptr)
       |declare i32 @sfl_equal(ptr, ptr)
       |declare i32 @sfl_compare(ptr, ptr)
@@ -2415,6 +2496,38 @@ private object Compiler:
       |declare i64 @sfl_sign_f64(double)
       |declare i64 @sfl_to_int_f64(double)
       |declare i64 @sfl_gcd(i64, i64)
+      |declare i64 @sfl_lcm_i64(i64, i64)
+      |declare i64 @sfl_d2l(double)
+      |declare i64 @sfl_time_nanos()
+      |declare double @sfl_random_f64()
+      |declare double @sfl_sqrt_ck(double)
+      |declare double @sfl_log_ck(double)
+      |declare double @sfl_log2_ck(double)
+      |declare double @sfl_log10_ck(double)
+      |declare i64 @sfl_clamp_i64_ck(i64, i64, i64)
+      |declare double @sfl_clamp_f64_ck(double, double, double)
+      |declare double @cbrt(double)
+      |declare double @tan(double)
+      |declare double @asin(double)
+      |declare double @acos(double)
+      |declare double @atan(double)
+      |declare double @sinh(double)
+      |declare double @cosh(double)
+      |declare double @tanh(double)
+      |declare double @atan2(double, double)
+      |declare double @hypot(double, double)
+      |declare i64 @sfl_int_raw(ptr)
+      |declare double @sfl_float_raw(ptr)
+      |declare i32 @sfl_istrue_raw(ptr)
+      |declare i64 @sfl_length_i(i64, ptr)
+      |declare i64 @sfl_size_i(i64, ptr)
+      |declare i64 @sfl_indexOf_i(i64, ptr)
+      |declare i64 @sfl_lastIndexOf_i(i64, ptr)
+      |declare i64 @sfl_strFind_i(i64, ptr)
+      |declare i64 @sfl_ord_i(i64, ptr)
+      |declare ptr @sfl_index_get_i(ptr, i64)
+      |declare ptr @sfl_index_set_i(ptr, i64, ptr)
+      |declare ptr @sfl_index_compound_i(ptr, i64, i32, ptr)
       |declare double @llvm.sqrt.f64(double)
       |declare double @llvm.fabs.f64(double)
       |declare i64 @llvm.fptosi.sat.i64.f64(double)

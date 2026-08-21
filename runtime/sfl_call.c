@@ -696,6 +696,7 @@ static void install_stack_guard(void *bottom) {
 void sfl_init(int argc, char **argv, void *stack_bottom) {
   sfl_argc = argc;
   sfl_argv = argv;
+  sfl_value_init_caches();
   sfl_gc_set_stack_bottom(stack_bottom);
   sfl_gc_thread_init(stack_bottom);
   install_stack_guard(stack_bottom);

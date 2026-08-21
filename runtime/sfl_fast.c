@@ -198,3 +198,96 @@ void sfl_arity_fail(const char *name, int64_t argc) {
   snprintf(hint, sizeof hint, "the signature is %s", n->signature);
   sfl_raise_hint2(msg, hint, n->doc);
 }
+
+/* ------------------------------------------------------------------------- */
+/* Unboxed primitive results                                                  */
+/*                                                                            */
+/* A primitive that provably returns one machine type lets the compiler read  */
+/* the result raw and keep inference typed past the call. The table of which  */
+/* primitives qualify lives with the compiler (Intrinsics.PrimRet); these are */
+/* the readers it emits. A primitive that raises never returns, so the reads  */
+/* cannot see a wrong tag.                                                    */
+/* ------------------------------------------------------------------------- */
+
+int64_t sfl_int_raw(SflVal v) { return v->u.i; }
+double sfl_float_raw(SflVal v) { return v->u.d; }
+int32_t sfl_istrue_raw(SflVal v) { return v == sfl_true; }
+
+/* ------------------------------------------------------------------------- */
+/* Checked math fast paths                                                    */
+/*                                                                            */
+/* Each reproduces its primitive exactly — same domain check, same message,   */
+/* same libm call — minus the boxing on both sides.                           */
+/* ------------------------------------------------------------------------- */
+
+double sfl_sqrt_ck(double x) {
+  if (x < 0) sfl_raise_sig("sqrt", "argument must not be negative");
+  return sqrt(x);
+}
+
+double sfl_log_ck(double x) {
+  if (x <= 0) sfl_raise_sig("log", "argument must be positive");
+  return log(x);
+}
+
+double sfl_log2_ck(double x) {
+  if (x <= 0) sfl_raise_sig("log2", "argument must be positive");
+  /* Divided rather than log2(), because that is what the primitive computes. */
+  return log(x) / log(2.0);
+}
+
+double sfl_log10_ck(double x) {
+  if (x <= 0) sfl_raise_sig("log10", "argument must be positive");
+  return log10(x);
+}
+
+/* The primitive's lcm on two machine ints: abs through unsigned so that
+   INT64_MIN survives, quotient guarded, product left to wrap as the JVM does. */
+int64_t sfl_lcm_i64(int64_t x, int64_t y) {
+  if (x < 0) x = (int64_t)(0 - (uint64_t)x);
+  if (y < 0) y = (int64_t)(0 - (uint64_t)y);
+  if (x == 0 || y == 0) return 0;
+  int64_t g = x, h = y;
+  while (h != 0) {
+    int64_t t = g % h;
+    g = h;
+    h = t;
+  }
+  int64_t q = (x == INT64_MIN && g == -1) ? INT64_MIN : x / g;
+  return (int64_t)((uint64_t)q * (uint64_t)y);
+}
+
+/* clamp's primitive works in doubles whatever it was given — bounds checked
+   against each other first, message rendered from the doubles — and narrows
+   back to an int only when every argument was one. These two mirror that. */
+/* Math.min/max as the primitive spells them: NaN in the first operand wins,
+   and -0.0 sorts below 0.0 — fmin/fmax honour neither. */
+static double clamp_jmin(double a, double b) {
+  if (isnan(a)) return a;
+  if (a == 0.0 && b == 0.0 && signbit(b)) return b;
+  return a <= b ? a : b;
+}
+
+static double clamp_jmax(double a, double b) {
+  if (isnan(a)) return a;
+  if (a == 0.0 && b == 0.0 && signbit(a)) return b;
+  return a >= b ? a : b;
+}
+
+static double clamp_core(double x, double lo, double hi) {
+  if (lo > hi) {
+    char slo[64], shi[64];
+    sfl_write_double(slo, sizeof slo, lo);
+    sfl_write_double(shi, sizeof shi, hi);
+    sfl_raise_sig("clamp", "lower bound %s is greater than upper bound %s", slo, shi);
+  }
+  return clamp_jmax(lo, clamp_jmin(hi, x));
+}
+
+int64_t sfl_clamp_i64_ck(int64_t x, int64_t lo, int64_t hi) {
+  return sfl_d2l(clamp_core((double)x, (double)lo, (double)hi));
+}
+
+double sfl_clamp_f64_ck(double x, double lo, double hi) {
+  return clamp_core(x, lo, hi);
+}

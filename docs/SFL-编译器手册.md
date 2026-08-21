@@ -328,13 +328,51 @@ println(label)
 
 ### 哪些内置函数会被内联
 
-编译器为 16 个数值内置函数直接生成机器指令，前提是参数类型已知：
-`abs` `min` `max` `exp` `sin` `cos` `floor` `ceil` `round` `trunc` `sign` `pow`
-`gcd` `toInt` `toFloat` `timeMillis`。`println` 的参数全是数字或布尔值时也会走直接
-打印，不构造字符串对象。
+编译器为 47 个内置函数直接生成机器指令，前提是参数类型已知：
+
+- 数值与转换：`abs` `min` `max` `floor` `ceil` `round` `trunc` `sign` `pow` `gcd`
+  `lcm` `clamp` `toInt` `toFloat` `parseInt` `parseFloat` `timeMillis` `timeNanos`
+  `random`；
+- 超越函数：`exp` `sin` `cos` `sqrt` `log` `log2` `log10` `cbrt` `tan` `asin` `acos`
+  `atan` `sinh` `cosh` `tanh` `atan2` `hypot`——带定义域检查的四个走一个与原语同文
+  同判的 C 助手，其余直接调用原语自己调用的那个 libm 符号；
+- 位运算：`bitAnd` `bitOr` `bitXor` `bitNot` `shiftLeft` `shiftRight` `shiftRightU`
+  （移位量按 JVM 语义取模 64）、`doubleToBits` `bitsToDouble`；
+- 浮点判定：`isNaN` `isInfinite`。
+
+`println` 的参数全是数字或布尔值时也会走直接打印，不构造字符串对象。
 
 内联只在**逐位产生与原语相同结果**时才做。`min(1, 2.5)` 在解释器里返回整数 `1`，而一份
-特化只有一种返回类型，所以混合情形交回原语；`sqrt` 与 `log` 需要检查定义域，也交回原语。
+特化只有一种返回类型，所以混合情形交回原语。
+
+### 参数未知时，结果仍然有类型
+
+上面的内联要求参数类型已知。参数是动态值时调用仍去原语，但有一张**原语结果表**
+（`Intrinsics.PrimRet`，每一项都对照过 C 实现验证）记着哪些原语的结果必然是同一种
+机器类型——要么返回它，要么抛错不返回。这些调用的结果以裸机器值读出，推断在调用
+之后保持有类型：
+
+- 必然整数：`length` `size` `indexOf` `lastIndexOf` `strFind` `ord` `compare`
+  `utf8Length` 及上面数值组的整数结果者——其中最热的六个
+  （`length` `size` `indexOf` `lastIndexOf` `strFind` `ord`）有免装箱的孪生入口
+  （`sfl_length_i` 一族），连结果单元都不分配；
+- 必然浮点：`toFloat` `parseFloat` 与全部超越函数；
+- 必然布尔：全部 `is*` 判定、`toBool` `isEmpty` `contains` `startsWith` `endsWith`
+  `has` `hasNext`——布尔单元本来就是单例，读出是一次指针比较。
+
+这就是 `while (i < length(arr))` 的循环变量保持 i64 的原因：`length` 的结果不再把
+比较拖成动态的。
+
+### 通用入口里的局部变量也拆箱
+
+函数体不创建闭包时，它的通用入口把**证明出机器类型的局部变量**放进自己的带类型
+alloca，装箱的槽数组只留参数与动态局部——所以一个被动态调用的函数里，循环计数器
+的开销与特化实例相同。体内有闭包的函数每个槽都可能被捕获，全部保持装箱。
+
+配套的还有两组免装箱的运行时入口：下标的键是机器整数时走 `sfl_index_get_i` 一族
+（不装箱键、不做动态下标检查，错误路径装箱后交回通用例程，消息逐字节相同）；算术
+的一侧是机器数、另一侧是动态值时走 `sfl_arith_iv` 一族（机器侧不装箱，另一侧照常
+分派）。
 
 ---
 
@@ -351,6 +389,11 @@ println(label)
 **字符串是 UTF-16 码元序列**，与解释器的 Java 字符串一致。这不是实现细节：它决定了
 `length("héllo")` 是 5、`s[1]` 取到哪个字符，以及非 ASCII 文本上的一切下标行为，两边
 必须相同。
+
+**小整数与单字符是驻留的静态单元**：-128..1024 的整数、128 个 ASCII 单字符字符串与
+空字符串各有一个不进堆、不被回收的单元（与 `null`、`true`、`false` 同一机制，解释器
+以同一范围缓存 `VInt` 与单字符 `VStr`）。循环计数器、`s[i]`、`charAt` 与逐字符循环
+因此不分配。字符串不可变，共享单元不可观察。
 
 **对象保持插入顺序**，`keys()`、`for (k in o)` 与 JSON 输出的次序都与解释器一致；条目
 数超过阈值后自动建立哈希索引，查找不再是线性的。
@@ -755,7 +798,10 @@ objects          0.107s      0.048s       2.2x  97 21599820000
 1. 在 `runtime/primitives.def` 里加一行 `SFL_PRIM(名字, 符号, 签名, 最少, 最多, 模块)`；
 2. 在对应的 `runtime/sfl_<模块>.c` 里实现 `SflVal 符号(int64_t argc, SflVal *argv)`；
 3. 在解释器里也实现同名内置函数——它才是规范；
-4. 写一个用例放进 `tests/compile/accept/`，差分测试会盯着它。
+4. 写一个用例放进 `tests/compile/accept/`，差分测试会盯着它；
+5. 若它的每条返回路径都构造同一种机器类型（或抛错），把它登进
+   `Intrinsics.PrimRet`——调用方就能以裸值读结果，推断保持有类型。登记前逐条
+   核对 C 实现：这张表是保证，不是猜测。
 
 能由已有原语组合出来的，写进 `stdlib/`：写成普通 SFL，加到某个模块里，然后跑
 `tests/stdlib.sfl`（324 条断言跑在你的实现上）并在

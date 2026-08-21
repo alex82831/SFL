@@ -41,7 +41,7 @@ object BuiltinsText:
       val s = argStr(a, 0, "charAt")
       val i = Index.normalize(argIdx(a, 1, "charAt"), s.length)
       if i < 0 || i >= s.length then Err.eval(s"charAt: index out of bounds (length ${s.length})")
-      VStr(String.valueOf(s.charAt(i)))
+      VStr.ofChar(s.charAt(i))
     }
 
     define("subString", 2, 3, "string", "subString(s, start, end?)",
@@ -144,7 +144,7 @@ object BuiltinsText:
     define("chr", 1, 1, "string", "chr(code)", "Character for a Unicode code point.") { a =>
       val cp = argIdx(a, 0, "chr")
       if cp < 0 || cp > 0x10ffff then Err.eval(s"chr: $cp is not a valid code point")
-      VStr(new String(Character.toChars(cp)))
+      if cp < 128 then VStr.ofChar(cp.toChar) else VStr(new String(Character.toChars(cp)))
     }
 
     define("ord", 1, 1, "string", "ord(s)", "Unicode code point of the first character.") { a =>

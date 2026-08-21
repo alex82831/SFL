@@ -286,15 +286,21 @@ static int64_t str_last_index_of(SflVal hay, SflVal needle) {
 /* length, isEmpty, charAt                                                    */
 /* ------------------------------------------------------------------------- */
 
-SflVal sfl_p_length(int64_t argc, SflVal *argv) {
+/* The unboxed core; the compiler calls it directly where the result feeds
+   typed code, so a loop bound like `i < length(arr)` costs no allocation. */
+int64_t sfl_length_i(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   switch (v->tag) {
     case SFL_STR:
     case SFL_ARR:
-    case SFL_OBJ: return sfl_int(v->aux);
-    case SFL_NULL: return sfl_int(0);
+    case SFL_OBJ: return (int64_t)v->aux;
+    case SFL_NULL: return 0;
     default: sfl_raise_sig("length", "%s has no length", sfl_type_name(v));
   }
+}
+
+SflVal sfl_p_length(int64_t argc, SflVal *argv) {
+  return sfl_int(sfl_length_i(argc, argv));
 }
 
 SflVal sfl_p_isEmpty(int64_t argc, SflVal *argv) {
@@ -532,16 +538,18 @@ SflVal sfl_p_reverse(int64_t argc, SflVal *argv) {
 /* Searching primitives                                                       */
 /* ------------------------------------------------------------------------- */
 
-static SflVal index_of_impl(int64_t argc, SflVal *argv, const char *fn) {
+static int64_t index_of_impl(int64_t argc, SflVal *argv, const char *fn) {
   SflVal s = sfl_arg_str(argv, 0, fn);
   SflVal needle = sfl_arg_str(argv, 1, fn);
   int64_t from = argc > 2 ? sfl_arg_idx(argv, 2, fn) : 0;
-  return sfl_int(str_index_of(s, needle, from));
+  return str_index_of(s, needle, from);
 }
 
-SflVal sfl_p_strFind(int64_t argc, SflVal *argv) { return index_of_impl(argc, argv, "strFind"); }
+int64_t sfl_strFind_i(int64_t argc, SflVal *argv) { return index_of_impl(argc, argv, "strFind"); }
 
-SflVal sfl_p_indexOf(int64_t argc, SflVal *argv) {
+SflVal sfl_p_strFind(int64_t argc, SflVal *argv) { return sfl_int(sfl_strFind_i(argc, argv)); }
+
+int64_t sfl_indexOf_i(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   if (v->tag == SFL_STR) return index_of_impl(argc, argv, "indexOf");
   if (v->tag == SFL_ARR) {
@@ -551,22 +559,30 @@ SflVal sfl_p_indexOf(int64_t argc, SflVal *argv) {
       if (from < 0) from = 0;
     }
     for (int64_t i = from; i < (int64_t)v->aux; i++)
-      if (sfl_equal(v->u.a.items[i], argv[1])) return sfl_int(i);
-    return sfl_int(-1);
+      if (sfl_equal(v->u.a.items[i], argv[1])) return i;
+    return -1;
   }
   sfl_raise_sig("indexOf", "expected a string or array, got %s", sfl_type_name(v));
 }
 
-SflVal sfl_p_lastIndexOf(int64_t argc, SflVal *argv) {
+SflVal sfl_p_indexOf(int64_t argc, SflVal *argv) {
+  return sfl_int(sfl_indexOf_i(argc, argv));
+}
+
+int64_t sfl_lastIndexOf_i(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   if (v->tag == SFL_STR)
-    return sfl_int(str_last_index_of(v, sfl_arg_str(argv, 1, "lastIndexOf")));
+    return str_last_index_of(v, sfl_arg_str(argv, 1, "lastIndexOf"));
   if (v->tag == SFL_ARR) {
     for (int64_t i = (int64_t)v->aux - 1; i >= 0; i--)
-      if (sfl_equal(v->u.a.items[i], argv[1])) return sfl_int(i);
-    return sfl_int(-1);
+      if (sfl_equal(v->u.a.items[i], argv[1])) return i;
+    return -1;
   }
   sfl_raise_sig("lastIndexOf", "expected a string or array, got %s", sfl_type_name(v));
+}
+
+SflVal sfl_p_lastIndexOf(int64_t argc, SflVal *argv) {
+  return sfl_int(sfl_lastIndexOf_i(argc, argv));
 }
 
 SflVal sfl_p_contains(int64_t argc, SflVal *argv) {
@@ -620,17 +636,19 @@ SflVal sfl_p_chr(int64_t argc, SflVal *argv) {
   return sfl_str_utf16(pair, 2);
 }
 
-SflVal sfl_p_ord(int64_t argc, SflVal *argv) {
+int64_t sfl_ord_i(int64_t argc, SflVal *argv) {
   SflVal s = sfl_arg_str(argv, 0, "ord");
   if (s->aux == 0) sfl_raise_sig("ord", "string is empty");
   uint16_t c = s->u.s.chars[0];
   if (c >= 0xD800 && c < 0xDC00 && s->aux > 1) {
     uint16_t d = s->u.s.chars[1];
     if (d >= 0xDC00 && d < 0xE000)
-      return sfl_int(0x10000 + (((int64_t)c - 0xD800) << 10) + (d - 0xDC00));
+      return 0x10000 + (((int64_t)c - 0xD800) << 10) + (d - 0xDC00);
   }
-  return sfl_int(c);
+  return c;
 }
+
+SflVal sfl_p_ord(int64_t argc, SflVal *argv) { return sfl_int(sfl_ord_i(argc, argv)); }
 
 /* ------------------------------------------------------------------------- */
 /* format                                                                     */

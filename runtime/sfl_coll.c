@@ -236,18 +236,20 @@ SflVal sfl_p_remove(int64_t argc, SflVal *argv) {
   return v;
 }
 
-SflVal sfl_p_size(int64_t argc, SflVal *argv) {
+int64_t sfl_size_i(int64_t argc, SflVal *argv) {
   SflVal v = argv[0];
   switch (v->tag) {
     case SFL_STR:
     case SFL_ARR:
     case SFL_TUPLE:
     case SFL_OBJ:
-      return sfl_int((int64_t)v->aux);
+      return (int64_t)v->aux;
     default:
       sfl_raise_sig("size", "%s has no size", sfl_type_name(v));
   }
 }
+
+SflVal sfl_p_size(int64_t argc, SflVal *argv) { return sfl_int(sfl_size_i(argc, argv)); }
 
 /* ------------------------------------------------------------------------- */
 /* Iterators                                                                  */

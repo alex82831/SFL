@@ -1,0 +1,123 @@
+// The unboxed fast paths: intrinsics with known argument types, primitives with
+// guaranteed machine results feeding typed code, machine-integer indexing, mixed
+// machine/dynamic arithmetic, and machine-typed locals inside a generic entry.
+// The differential runner holds every line against the interpreter.
+
+// --- machine locals in a dynamically-called function (generic entry) ---------
+
+def scan(arr) {
+  var hits = 0
+  var i = 0
+  while (i < length(arr)) {
+    val v = arr[i]
+    if (isInt(v) && v % 3 == 0) {
+      hits += 1
+    }
+    i += 1
+  }
+  hits
+}
+
+val data = []
+for (k in range(0, 200)) {
+  push(data, if (k % 7 == 0) then "s" + k else k)
+}
+val fns = [scan]
+println(fns[0](data))
+println(scan(data))
+
+// --- primitives with guaranteed results, on dynamic arguments ----------------
+
+val text = "The quick brown fox jumps over the lazy dog"
+println(length(text) * 2 + 1)
+println(indexOf(text, "fox") + lastIndexOf(text, "o") + strFind(text, "o", 5))
+println(ord("A") + ord("€") + ord("𝄞"))
+println(compare("b", "a") + compare([1, 2], [1, 2]) - compare(1, 2.5))
+if (contains(text, "quick") && startsWith(text, "The") && endsWith(text, "dog")) {
+  println("predicates hold")
+}
+println(size({"a": 1, "b": 2}) + size((1, 2, 3)) + utf8Length("héllo"))
+println(toInt("42") + toInt(3.9) + floor(2.9) + ceil(2.1) + trunc(-2.9) + sign(-9))
+println(round(2.5) + round(-2.5))
+println(gcd(84, 132) + lcm(4, 6))
+
+// --- numeric intrinsics ------------------------------------------------------
+
+val two = 2.0
+println(sqrt(two * 8))
+println(sqrt(144))
+println(log(E()) + log2(8) + log10(1000.0))
+println(cbrt(27.0) + tan(0.0) + asin(0.0) + acos(1.0) + atan(0.0))
+println(sinh(0.0) + cosh(0.0) + tanh(0.0))
+println(atan2(1.0, 1.0) + hypot(3.0, 4.0))
+println(isNaN(0.0 / 0.0))
+println(isNaN(1.5))
+println(isInfinite(1.0 / 0.0))
+println(isInfinite(-1.0 / 0.0))
+println(clamp(15, 0, 10) + clamp(-5, 0, 10))
+println(clamp(2.5, 0.0, 10))
+println(parseInt(7) + parseInt(3.99))
+println(parseFloat(3) + parseFloat(0.5))
+println(doubleToBits(1.0))
+println(doubleToBits(0.0 / 0.0))
+println(bitsToDouble(4611686018427387904))
+
+// --- bit intrinsics, typed and dynamic ---------------------------------------
+
+var acc = 0
+for (i in range(0, 64)) {
+  acc = bitOr(acc, shiftLeft(1, i))
+}
+println(acc)
+println(bitAnd(0xff00, 0x0ff0))
+println(bitXor(-1, 255))
+println(bitNot(0))
+println(shiftLeft(1, 70))
+println(shiftRight(-256, 4))
+println(shiftRightU(-1, 60))
+val dynBits = [255, 8]
+println(bitAnd(dynBits[0], 129) + shiftLeft(dynBits[1], 2))
+
+// --- machine-integer indexing, reads and writes ------------------------------
+
+val grid = [[1, 2, 3], [4, 5, 6]]
+var total = 0
+var r = 0
+while (r < length(grid)) {
+  var c = 0
+  while (c < length(grid[r])) {
+    grid[r][c] += 10
+    total += grid[r][c]
+    c += 1
+  }
+  r += 1
+}
+println(total)
+println(grid[-1][-1])
+println(text[4] + text[-3])
+val t = (7, 8, 9)
+println(t[1] + t[-1])
+
+// --- mixed machine/dynamic arithmetic ----------------------------------------
+
+val box = [10, 2.5, "s"]
+var lhs = 4
+println(lhs + box[0])
+println(lhs - box[1])
+println(box[0] * 3)
+println(box[1] / 2.0)
+println(2.0 * box[0])
+println(box[2] + 1)
+println("n=" + box[0])
+println(attempt(() -> lhs / (box[0] - 10), "caught"))
+println(attempt(() -> box[0] % (lhs - 4), "caught"))
+
+// --- interned characters keep their behaviour --------------------------------
+
+var glued = ""
+for (ch in "abc") {
+  glued += ch
+}
+println(glued == "abc")
+println("a"[0] == chr(97))
+println(charAt("xyz", 1) + charAt("xyz", -1))

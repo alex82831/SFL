@@ -536,6 +536,9 @@ static double rng_double(void) {
 
 SflVal sfl_p_random(int64_t argc, SflVal *argv) { return sfl_float(rng_double()); }
 
+/* The compiler's unboxed call for random(); one shared state, same sequence. */
+double sfl_random_f64(void) { return rng_double(); }
+
 SflVal sfl_p_randomInt(int64_t argc, SflVal *argv) {
   int64_t lo, hi;
   if (argc == 1) {

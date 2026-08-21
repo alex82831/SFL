@@ -137,6 +137,16 @@ struct SflObj {
   } u;
 };
 
+/* The compiler open-codes type predicates as a load of the tag and a compare,
+   so the field's place and these values are ABI the generated IR bakes in.
+   The enum is already frozen (new tags are appended); this pins it. */
+_Static_assert(offsetof(struct SflObj, tag) == 0,
+               "generated code loads the tag at offset 0");
+_Static_assert(SFL_NULL == 0 && SFL_BOOL == 1 && SFL_INT == 2 && SFL_FLOAT == 3 &&
+                   SFL_STR == 4 && SFL_ARR == 5 && SFL_OBJ == 6 && SFL_FUN == 7 &&
+                   SFL_NATIVE == 8 && SFL_TUPLE == 12,
+               "generated code bakes these tag values in");
+
 /* Singletons. Never allocated, never collected, safe to compare by pointer. */
 extern SflObj sfl_null_obj;
 extern SflObj sfl_true_obj;
@@ -207,6 +217,9 @@ int64_t sfl_gc_protect_mark(void);
 SflVal sfl_int(int64_t v);
 SflVal sfl_float(double v);
 SflVal sfl_bool(int v);
+/* Builds the interned small-int and single-character cells; called once from
+   sfl_init before any thread exists. */
+void sfl_value_init_caches(void);
 
 SflVal sfl_str_utf8(const char *bytes, int64_t nbytes);
 SflVal sfl_str_utf16(const uint16_t *units, int64_t count);
@@ -263,6 +276,11 @@ const char *sfl_type_name(SflVal v);
 
 /* op is 0..4 for + - * / %, matching BinOp in the interpreter. */
 SflVal sfl_arith(int32_t op, SflVal a, SflVal b);
+/* The same, with one operand already unboxed. */
+SflVal sfl_arith_iv(int32_t op, int64_t x, SflVal b);
+SflVal sfl_arith_vi(int32_t op, SflVal a, int64_t y);
+SflVal sfl_arith_dv(int32_t op, double x, SflVal b);
+SflVal sfl_arith_vd(int32_t op, SflVal a, double y);
 SflVal sfl_neg(SflVal a);
 int sfl_equal(SflVal a, SflVal b);
 /* The nesting cap every recursive walk over a value shares; see sfl_value.c. */
@@ -275,6 +293,10 @@ SflVal sfl_cmp(int32_t op, SflVal a, SflVal b);
 SflVal sfl_index_get(SflVal recv, SflVal key);
 SflVal sfl_index_set(SflVal recv, SflVal key, SflVal v);
 SflVal sfl_index_compound(SflVal recv, SflVal key, int32_t op, SflVal v);
+/* The same, for a key the compiler already holds unboxed. */
+SflVal sfl_index_get_i(SflVal recv, int64_t key);
+SflVal sfl_index_set_i(SflVal recv, int64_t key, SflVal v);
+SflVal sfl_index_compound_i(SflVal recv, int64_t key, int32_t op, SflVal v);
 
 /* ------------------------------------------------------------------------- */
 /* Calling                                                                    */
@@ -486,6 +508,32 @@ SflVal sfl_intern(const char *utf8, int64_t nbytes);
 extern const SflNative sfl_natives[];
 extern const int sfl_native_count;
 const SflNative *sfl_native_find(const char *name);
+
+/*
+ * Unboxed primitive cores and result readers. A primitive that provably
+ * returns one machine type either exposes its core with the primitive calling
+ * convention minus the boxing, or the compiler reads the boxed result raw —
+ * see Intrinsics.PrimRet on the Scala side for the table.
+ */
+int64_t sfl_int_raw(SflVal v);
+double sfl_float_raw(SflVal v);
+int32_t sfl_istrue_raw(SflVal v);
+int64_t sfl_length_i(int64_t argc, SflVal *argv);
+int64_t sfl_size_i(int64_t argc, SflVal *argv);
+int64_t sfl_indexOf_i(int64_t argc, SflVal *argv);
+int64_t sfl_lastIndexOf_i(int64_t argc, SflVal *argv);
+int64_t sfl_strFind_i(int64_t argc, SflVal *argv);
+int64_t sfl_ord_i(int64_t argc, SflVal *argv);
+int64_t sfl_time_nanos(void);
+double sfl_random_f64(void);
+/* Checked unboxed math: same domain checks and messages as the primitives. */
+double sfl_sqrt_ck(double x);
+double sfl_log_ck(double x);
+double sfl_log2_ck(double x);
+double sfl_log10_ck(double x);
+int64_t sfl_lcm_i64(int64_t x, int64_t y);
+int64_t sfl_clamp_i64_ck(int64_t x, int64_t lo, int64_t hi);
+double sfl_clamp_f64_ck(double x, double lo, double hi);
 
 /* Fast paths the compiler emits when it knows the argument types. */
 void sfl_print_i64(int64_t v, int nl);

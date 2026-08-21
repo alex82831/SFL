@@ -187,20 +187,60 @@ char *sfl_str_dup_utf8_java(SflVal s) {
 static SflObj int_cache[INT_CACHE_HI - INT_CACHE_LO + 1];
 static int int_cache_ready;
 
+static void int_cache_init(void) {
+  for (int64_t i = INT_CACHE_LO; i <= INT_CACHE_HI; i++) {
+    int_cache[i - INT_CACHE_LO].tag = SFL_INT;
+    int_cache[i - INT_CACHE_LO].u.i = i;
+  }
+  int_cache_ready = 1;
+}
+
 SflVal sfl_int(int64_t v) {
   if (v >= INT_CACHE_LO && v <= INT_CACHE_HI) {
-    if (!int_cache_ready) {
-      for (int64_t i = INT_CACHE_LO; i <= INT_CACHE_HI; i++) {
-        int_cache[i - INT_CACHE_LO].tag = SFL_INT;
-        int_cache[i - INT_CACHE_LO].u.i = i;
-      }
-      int_cache_ready = 1;
-    }
+    if (!int_cache_ready) int_cache_init();
     return &int_cache[v - INT_CACHE_LO];
   }
   SflVal o = sfl_alloc(SFL_INT);
   o->u.i = v;
   return o;
+}
+
+/*
+ * Single ASCII characters, interned. String indexing, iteration and every
+ * per-character loop produce these; a static cell per character makes those
+ * loops allocation-free the way the cache above frees loop counters. Strings
+ * are immutable after construction, so sharing cells is unobservable — equal
+ * strings were already indistinguishable. Like sfl_null_obj, the cells live
+ * outside the heap, so the collector's page test skips them by itself.
+ */
+static SflObj char_cache[128];
+static uint16_t char_cache_units[128];
+static int char_cache_ready;
+
+static void char_cache_init(void) {
+  for (int i = 0; i < 128; i++) {
+    char_cache_units[i] = (uint16_t)i;
+    char_cache[i].tag = SFL_STR;
+    char_cache[i].aux = 1;
+    char_cache[i].u.s.chars = &char_cache_units[i];
+    char_cache[i].u.s.hash = i; /* h*31 + c over one character is c itself */
+    char_cache[i].u.s.hashed = 1;
+  }
+  char_cache_ready = 1;
+}
+
+/* The empty string, likewise a singleton. `chars` points at a real (unused)
+   unit so no reader ever holds a null buffer pointer. */
+static uint16_t empty_str_unit;
+static SflObj empty_str = {SFL_STR, 0, {0}};
+
+/* Called once from sfl_init, before any thread exists, so no spawned thread can
+   race the lazy initialisation above on a weakly ordered machine. */
+void sfl_value_init_caches(void) {
+  if (!int_cache_ready) int_cache_init();
+  if (!char_cache_ready) char_cache_init();
+  empty_str.u.s.chars = &empty_str_unit;
+  empty_str.u.s.hashed = 1;
 }
 
 SflVal sfl_float(double v) {
@@ -212,15 +252,25 @@ SflVal sfl_float(double v) {
 SflVal sfl_bool(int v) { return v ? sfl_true : sfl_false; }
 
 SflVal sfl_str_utf16(const uint16_t *units, int64_t count) {
+  if (count == 1 && units[0] < 128) {
+    if (!char_cache_ready) char_cache_init();
+    return &char_cache[units[0]];
+  }
+  if (count == 0) return sfl_str_empty();
   SflVal s = sfl_alloc(SFL_STR);
-  s->u.s.chars = (uint16_t *)sfl_raw_alloc((size_t)(count ? count : 1) * 2);
-  if (count) memcpy(s->u.s.chars, units, (size_t)count * 2);
+  s->u.s.chars = (uint16_t *)sfl_raw_alloc((size_t)count * 2);
+  memcpy(s->u.s.chars, units, (size_t)count * 2);
   s->aux = (uint32_t)count;
   return s;
 }
 
 SflVal sfl_str_utf8(const char *bytes, int64_t nbytes) {
   if (nbytes < 0) nbytes = (int64_t)strlen(bytes);
+  if (nbytes == 1 && (unsigned char)bytes[0] < 0x80) {
+    if (!char_cache_ready) char_cache_init();
+    return &char_cache[(unsigned char)bytes[0]];
+  }
+  if (nbytes == 0) return sfl_str_empty();
   int64_t units = utf16_len_of_utf8(bytes, nbytes);
   SflVal s = sfl_alloc(SFL_STR);
   s->u.s.chars = (uint16_t *)sfl_raw_alloc((size_t)(units ? units : 1) * 2);
@@ -229,7 +279,10 @@ SflVal sfl_str_utf8(const char *bytes, int64_t nbytes) {
   return s;
 }
 
-SflVal sfl_str_empty(void) { return sfl_str_utf8("", 0); }
+SflVal sfl_str_empty(void) {
+  if (empty_str.u.s.chars == NULL) empty_str.u.s.chars = &empty_str_unit;
+  return &empty_str;
+}
 
 SflVal sfl_arr_new(int64_t capacity) {
   if (capacity < 4) capacity = 4;
@@ -905,24 +958,25 @@ static double float_op(int32_t op, double x, double y) {
   }
 }
 
+static SflVal arith_int(int32_t op, int64_t x, int64_t y) {
+  switch (op) {
+    case 0: return sfl_int(x + y);
+    case 1: return sfl_int(x - y);
+    case 2: return sfl_int(x * y);
+    case 3:
+      if (y == 0) sfl_raise("division by zero");
+      if (x == INT64_MIN && y == -1) return sfl_int(INT64_MIN);
+      return sfl_int(x / y);
+    default:
+      if (y == 0) sfl_raise("modulo by zero");
+      if (x == INT64_MIN && y == -1) return sfl_int(0);
+      return sfl_int(x % y);
+  }
+}
+
 SflVal sfl_arith(int32_t op, SflVal a, SflVal b) {
   if (a->tag == SFL_INT) {
-    if (b->tag == SFL_INT) {
-      int64_t x = a->u.i, y = b->u.i;
-      switch (op) {
-        case 0: return sfl_int(x + y);
-        case 1: return sfl_int(x - y);
-        case 2: return sfl_int(x * y);
-        case 3:
-          if (y == 0) sfl_raise("division by zero");
-          if (x == INT64_MIN && y == -1) return sfl_int(INT64_MIN);
-          return sfl_int(x / y);
-        default:
-          if (y == 0) sfl_raise("modulo by zero");
-          if (x == INT64_MIN && y == -1) return sfl_int(0);
-          return sfl_int(x % y);
-      }
-    }
+    if (b->tag == SFL_INT) return arith_int(op, a->u.i, b->u.i);
     if (b->tag == SFL_FLOAT) return sfl_float(float_op(op, (double)a->u.i, b->u.d));
     if (b->tag == SFL_STR && op == 0) return concat_strings(a, b);
     arith_type_error(op, a, b);
@@ -970,6 +1024,36 @@ SflVal sfl_neg(SflVal a) {
   if (a->tag == SFL_INT) return sfl_int(-a->u.i);
   if (a->tag == SFL_FLOAT) return sfl_float(-a->u.d);
   sfl_raise("cannot negate %s", sfl_type_name(a));
+}
+
+/*
+ * The four mixed forms, for one operand the compiler already holds unboxed.
+ * Numbers are handled in place; anything else — concatenation, repetition, the
+ * type error — boxes the machine side and takes the general route, whose work
+ * dwarfs one allocation.
+ */
+SflVal sfl_arith_iv(int32_t op, int64_t x, SflVal b) {
+  if (b->tag == SFL_INT) return arith_int(op, x, b->u.i);
+  if (b->tag == SFL_FLOAT) return sfl_float(float_op(op, (double)x, b->u.d));
+  return sfl_arith(op, sfl_int(x), b);
+}
+
+SflVal sfl_arith_vi(int32_t op, SflVal a, int64_t y) {
+  if (a->tag == SFL_INT) return arith_int(op, a->u.i, y);
+  if (a->tag == SFL_FLOAT) return sfl_float(float_op(op, a->u.d, (double)y));
+  return sfl_arith(op, a, sfl_int(y));
+}
+
+SflVal sfl_arith_dv(int32_t op, double x, SflVal b) {
+  if (b->tag == SFL_FLOAT) return sfl_float(float_op(op, x, b->u.d));
+  if (b->tag == SFL_INT) return sfl_float(float_op(op, x, (double)b->u.i));
+  return sfl_arith(op, sfl_float(x), b);
+}
+
+SflVal sfl_arith_vd(int32_t op, SflVal a, double y) {
+  if (a->tag == SFL_FLOAT) return sfl_float(float_op(op, a->u.d, y));
+  if (a->tag == SFL_INT) return sfl_float(float_op(op, (double)a->u.i, y));
+  return sfl_arith(op, a, sfl_float(y));
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1094,6 +1178,48 @@ SflVal sfl_index_set(SflVal recv, SflVal key, SflVal v) {
 SflVal sfl_index_compound(SflVal recv, SflVal key, int32_t op, SflVal v) {
   SflVal cur = sfl_index_get(recv, key);
   return sfl_index_set(recv, key, sfl_arith(op, cur, v));
+}
+
+/*
+ * The same three, for a key the compiler already holds as a machine integer.
+ * The hot paths never box the key; every failing path hands a boxed copy to the
+ * general routine (or the shared error), so the messages stay byte-identical.
+ */
+SflVal sfl_index_get_i(SflVal recv, int64_t key) {
+  switch (recv->tag) {
+    case SFL_ARR: {
+      int64_t i = key < 0 ? key + recv->aux : key;
+      if (i < 0 || i >= (int64_t)recv->aux) out_of_bounds("array", sfl_int(key), recv->aux);
+      return recv->u.a.items[i];
+    }
+    case SFL_TUPLE: {
+      int64_t i = key < 0 ? key + recv->aux : key;
+      if (i < 0 || i >= (int64_t)recv->aux) out_of_bounds("tuple", sfl_int(key), recv->aux);
+      return recv->u.t.items[i];
+    }
+    case SFL_STR: {
+      int64_t i = key < 0 ? key + recv->aux : key;
+      if (i < 0 || i >= (int64_t)recv->aux) out_of_bounds("string", sfl_int(key), recv->aux);
+      return sfl_str_utf16(recv->u.s.chars + i, 1);
+    }
+    default:
+      return sfl_index_get(recv, sfl_int(key));
+  }
+}
+
+SflVal sfl_index_set_i(SflVal recv, int64_t key, SflVal v) {
+  if (recv->tag == SFL_ARR) {
+    int64_t i = key < 0 ? key + recv->aux : key;
+    if (i < 0 || i >= (int64_t)recv->aux) out_of_bounds("array", sfl_int(key), recv->aux);
+    recv->u.a.items[i] = v;
+    return v;
+  }
+  return sfl_index_set(recv, sfl_int(key), v);
+}
+
+SflVal sfl_index_compound_i(SflVal recv, int64_t key, int32_t op, SflVal v) {
+  SflVal cur = sfl_index_get_i(recv, key);
+  return sfl_index_set_i(recv, key, sfl_arith(op, cur, v));
 }
 
 /* ------------------------------------------------------------------------- */

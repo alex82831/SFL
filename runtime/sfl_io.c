@@ -925,12 +925,14 @@ int64_t sfl_time_millis(void) {
 
 SflVal sfl_p_timeMillis(int64_t argc, SflVal *argv) { return sfl_int(sfl_time_millis()); }
 
-SflVal sfl_p_timeNanos(int64_t argc, SflVal *argv) {
+int64_t sfl_time_nanos(void) {
   /* System.nanoTime is monotonic and unrelated to the wall clock. */
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return sfl_int((int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec);
+  return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
+
+SflVal sfl_p_timeNanos(int64_t argc, SflVal *argv) { return sfl_int(sfl_time_nanos()); }
 
 /* Seconds truncate toward zero, exactly as the interpreter's `millis / 1000`. */
 static void broken_down(int64_t millis, int utc, struct tm *out) {
