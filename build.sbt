@@ -3,7 +3,7 @@ import scala.sys.process.*
 import scala.util.Try
 
 name         := "sfl"
-version      := "0.8.1"
+version      := "0.8.2"
 organization := "com.fartech"
 scalaVersion := "3.8.4"
 

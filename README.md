@@ -247,6 +247,31 @@ a compiled binary quotes and underlines the failing line exactly as the interpre
 
 ## Version history
 
+**0.8.2** — The coverage release. Three gates now decide what is untested, and
+they decide it from the parsed program rather than from prose: every one of the
+367 builtins has to be called by a suite (read out of `sfl --ast`, so a name in a
+comment or a shadowed one does not count), every function the 18 packages export
+has to be called by one too, and every keyword and operator `sfl syntax` reports
+has to appear in a suite's code. The 33 example projects, whose suites nothing
+had ever run, are built and tested by `tests/examples.sh`. Reaching every corner
+turned up twenty-four bugs, all fixed here. The compiler emitted invalid IR for
+`toFloat(a bool)`, widened anything mixing int and float so `if (c) then 1 else
+1.5` printed `1.0` where the interpreter printed `1`, and left `abs(Long.MinValue)`,
+`Long.MinValue / -1` and out-of-range float-to-int conversions as LLVM poison;
+`pow(int, int)` disagreed with the interpreter on overflow, precision and negative
+exponents. `describe().group`, `builtins()` and `help()` now answer the same from
+either engine, `passthrough` and `exePath` compile (so only `eval` and `parse` are
+out of reach, as the manual always said), and a seeded `randomSeed` gives both
+engines the same stream. In the interpreter, `reverse` no longer splits surrogate
+pairs, `round` follows Math.round at the awkward half, a NaN is equal to nothing
+including itself, `readAll()` after `readLine()` no longer comes back empty, and
+`fileMtime` reports milliseconds — which is how `sfl build` was missing an edit
+made in the same second as the build before it. A structure that contains itself
+is reported rather than crashing the process, and `jsonStringify` refuses NaN and
+infinity instead of emitting text its own parser rejects. `cli` and `gui` stopped
+reading `else {}` as an empty object, `:load` puts a file's definitions in the
+session that asked for them, and `sfl build --force` works as the guide spells it.
+
 **0.8.1** — Editor release. The IntelliJ plugin grows an SFL tool window in the
 shape of the Gradle and sbt ones: every linked project with its tasks, sources
 and dependencies, read from `sfl build describe` rather than from build.sfl, so
