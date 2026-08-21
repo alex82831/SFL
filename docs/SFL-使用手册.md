@@ -2518,10 +2518,16 @@ timeIt("求和", () -> sum(range(1000000)))
 
 | 变量 | 作用 |
 | --- | --- |
-| `SFL_HOME` | `import` 会额外搜索 `$SFL_HOME/libs/` |
+| `SFL_HOME` | `import` 会额外搜索 `$SFL_HOME/libs/`；`sfl pkg` 也把包装在这里 |
 | `SFL_MAX_DEPTH` | 非尾调用的最大嵌套深度，超过则报“stack overflow”而不是崩溃，默认 1200；尾调用不受限制 |
+| `HOME` | REPL 的历史文件写在 `$HOME/.sfl_history` |
 | `NO_COLOR` | 设置后关闭彩色输出 |
 | `COLUMNS` | 无法通过终端查询宽度时，用它作为终端列数 |
+
+工具链自己的几个变量在各自的手册里：编译器的归档缓存 `SFL_CACHE`（见
+[《编译器手册》](SFL-编译器手册.md)）、包索引 `SFL_REGISTRY`（见
+[《项目与构建指南》](SFL-项目与构建指南.md)）、GUI 的 `SFL_GUI_BROWSER` 与
+`SFL_GUI_NO_WINDOW`（见[《软件包参考》](SFL-软件包参考.md)）。
 
 ---
 

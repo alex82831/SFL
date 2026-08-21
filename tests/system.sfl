@@ -1,0 +1,211 @@
+// The builtins that talk to the machine: files, directories, paths, the
+// environment, subprocesses, standard input and the clock.
+//
+// The suite runs compiled as well as interpreted, so nothing here may print
+// anything that varies between runs — every temporary name, timestamp and pid
+// stays inside an assertion.
+import "lib/assert"
+
+// A directory of our own, removed at the end, so a failure cannot leave litter
+// behind and two runs cannot collide.
+val root = tempFile(".workdir")
+removeFile(root)
+mkdirs(root)
+def at(name) = joinPath(root, name)
+
+// ------------------------------------------------------------------- paths
+
+check("joinPath two", joinPath("a", "b"), "a/b")
+check("joinPath keeps one separator", joinPath("a/", "b"), "a/b")
+// A leading separator on the right does not restart the path: the segments are
+// joined, and exactly one separator ends up between them.
+check("joinPath keeps an absolute-looking right side relative", joinPath("a", "/b"), "a/b")
+check("joinPath single", joinPath("a"), "a")
+check("joinPath empty left", joinPath("", "b"), "b")
+check("joinPath many", joinPath("a", "b", "c"), "a/b/c")
+check("baseName file", baseName("/a/b/c.txt"), "c.txt")
+check("baseName trailing slash", baseName("/a/b/"), "b")
+check("baseName bare", baseName("x"), "x")
+check("baseName root", baseName("/"), "")
+check("dirName file", dirName("/a/b/c.txt"), "/a/b")
+check("dirName bare", dirName("x"), ".")
+check("dirName root", dirName("/"), ".")
+checkTrue("absPath is absolute", startsWith(absPath("x"), "/"))
+check("absPath normalises", absPath(joinPath(root, "..", baseName(root))), absPath(root))
+
+// --------------------------------------------------------------- files
+
+writeFile(at("a.txt"), "hello")
+check("readFile", readFile(at("a.txt")), "hello")
+check("fileSize", fileSize(at("a.txt")), 5)
+check("fileSize missing", fileSize(at("nope")), -1)
+checkTrue("exists", exists(at("a.txt")))
+checkTrue("exists is false for a missing file", !exists(at("nope")))
+checkTrue("isFile", isFile(at("a.txt")) && !isFile(root))
+checkTrue("isDir", isDir(root) && !isDir(at("a.txt")))
+checkTrue("fileMtime is a real timestamp", fileMtime(at("a.txt")) > 1000000000000)
+check("fileMtime missing", fileMtime(at("nope")), -1)
+
+writeFile(at("a.txt"), "replaced")
+check("writeFile replaces", readFile(at("a.txt")), "replaced")
+appendFile(at("a.txt"), "-more")
+check("appendFile", readFile(at("a.txt")), "replaced-more")
+appendFile(at("fresh.txt"), "new")
+check("appendFile creates", readFile(at("fresh.txt")), "new")
+writeFile(at("empty.txt"), "")
+check("empty file reads empty", readFile(at("empty.txt")), "")
+check("empty file has size 0", fileSize(at("empty.txt")), 0)
+
+writeFile(at("utf8.txt"), "中文 — ok")
+check("utf8 round trip", readFile(at("utf8.txt")), "中文 — ok")
+check("utf8 byte size", fileSize(at("utf8.txt")), utf8Length("中文 — ok"))
+
+writeFile(at("lines.txt"), "l1\nl2\n")
+check("readLines trailing newline", readLines(at("lines.txt")), ["l1", "l2", ""])
+writeFile(at("lines.txt"), "l1\nl2")
+check("readLines without trailing newline", readLines(at("lines.txt")), ["l1", "l2"])
+writeFile(at("lines.txt"), "")
+check("readLines of an empty file", readLines(at("lines.txt")), [""])
+writeFile(at("crlf.txt"), "a\r\nb")
+check("readLines splits CRLF", readLines(at("crlf.txt")), ["a", "b"])
+
+checkFails("readFile missing", () -> readFile(at("nope")), "file not found")
+checkFails("readLines missing", () -> readLines(at("nope")), "file not found")
+checkFails("writeFile into a missing directory", () -> writeFile(at("nodir/x"), "y"), "cannot write")
+
+copyFile(at("a.txt"), at("copy.txt"))
+check("copyFile", readFile(at("copy.txt")), "replaced-more")
+writeFile(at("other.txt"), "other")
+copyFile(at("other.txt"), at("copy.txt"))
+check("copyFile replaces the destination", readFile(at("copy.txt")), "other")
+checkFails("copyFile missing source", () -> copyFile(at("nope"), at("x")), "copyFile")
+
+checkTrue("moveFile", moveFile(at("copy.txt"), at("moved.txt")))
+checkTrue("moveFile removes the source", !exists(at("copy.txt")))
+check("moveFile keeps the content", readFile(at("moved.txt")), "other")
+checkTrue("moveFile of a missing source is false", !moveFile(at("nope"), at("x")))
+
+checkTrue("removeFile", removeFile(at("moved.txt")))
+checkTrue("removeFile of a missing file is false", !removeFile(at("moved.txt")))
+
+// ---------------------------------------------------------- directories
+
+mkdirs(at("sub/deeper"))
+checkTrue("mkdirs creates parents", isDir(at("sub/deeper")))
+checkTrue("mkdirs on an existing directory", mkdirs(at("sub")))
+writeFile(at("sub/one.txt"), "1")
+writeFile(at("sub/two.txt"), "2")
+check("listFiles is sorted", listFiles(at("sub")), ["deeper", "one.txt", "two.txt"])
+check("listFiles of a missing path", listFiles(at("nope")), null)
+check("listFiles of a file", listFiles(at("a.txt")), null)
+removeFile(at("sub/one.txt"))
+removeFile(at("sub/two.txt"))
+checkTrue("removeFile removes an empty directory", removeFile(at("sub/deeper")))
+removeFile(at("sub"))
+
+val tmp = tempFile(".probe")
+checkTrue("tempFile exists", exists(tmp))
+check("tempFile is empty", fileSize(tmp), 0)
+checkTrue("tempFile honours the suffix", endsWith(tmp, ".probe"))
+checkTrue("tempFile names differ", tempFile(".probe") != tmp)
+removeFile(tmp)
+checkTrue("tempFile with no suffix", exists(tempFile()))
+
+// ------------------------------------------------------- the environment
+
+check("getEnv missing", getEnv("SFL_TEST_ABSENT_NAME"), null)
+check("getEnv default", getEnv("SFL_TEST_ABSENT_NAME", "fallback"), "fallback")
+setEnv("SFL_TEST_PRESENT", "value-1")
+check("setEnv then getEnv", getEnv("SFL_TEST_PRESENT"), "value-1")
+setEnv("SFL_TEST_PRESENT", "value-2")
+check("setEnv overwrites", getEnv("SFL_TEST_PRESENT"), "value-2")
+setEnv("SFL_TEST_PRESENT", "")
+check("an empty variable is still set", getEnv("SFL_TEST_PRESENT", "fallback"), "")
+
+checkTrue("cwd is absolute", startsWith(cwd(), "/"))
+checkTrue("cwd exists", isDir(cwd()))
+checkTrue("args is an array", isArray(args()))
+checkTrue("osName is named", length(osName()) > 0)
+// Compiled, the running program is the binary rather than a source file, so all
+// that holds either way is that there is an absolute path.
+checkTrue("scriptPath is absolute", startsWith(scriptPath(), "/"))
+checkTrue("exePath is absolute or null", isNull(exePath()) || startsWith(exePath(), "/"))
+
+check("uuid length", length(uuid()), 36)
+checkTrue("uuid is dashed in the usual places", charAt(uuid(), 8) == "-" && charAt(uuid(), 23) == "-")
+checkTrue("uuid does not repeat", uuid() != uuid())
+
+// ------------------------------------------------------------ the clock
+
+checkTrue("timeMillis is after 2020", timeMillis() > 1577836800000)
+checkTrue("timeNanos counts up", timeNanos() > 0)
+val t0 = timeNanos()
+sleep(5)
+checkTrue("sleep advances the monotonic clock", timeNanos() - t0 >= 4000000)
+checkFails("sleep rejects a negative duration", () -> sleep(-1), "must not be negative")
+
+check("formatTime at the epoch", formatTime(0, "%Y-%m-%d %H:%M:%S", true), "1970-01-01 00:00:00")
+check("formatTime default format", formatTime(0), formatTime(0, "%Y-%m-%d %H:%M:%S"))
+check("formatTime defaults to local time", formatTime(0, "%Y"), formatTime(0, "%Y", false))
+check("formatTime a known instant", formatTime(1700000000000, "%Y-%m-%dT%H:%M:%S", true), "2023-11-14T22:13:20")
+check("formatTime escapes a percent", formatTime(0, "%%", true), "%")
+check("formatTime passes text through", formatTime(0, "plain", true), "plain")
+
+val parts = timeParts(0, true)
+check("timeParts year", parts.year, 1970)
+check("timeParts month", parts.month, 1)
+check("timeParts day", parts.day, 1)
+check("timeParts hour", parts.hour, 0)
+check("timeParts minute", parts.minute, 0)
+check("timeParts second", parts.second, 0)
+check("timeParts weekday", parts.weekday, 4)
+check("timeParts yearday", parts.yearday, 1)
+check("timeParts millis", parts.millis, 0)
+// `millis` is the instant the parts came from, not the sub-second remainder.
+check("timeParts echoes the instant", timeParts(1234, true).millis, 1234)
+check("timeParts still splits out the second", timeParts(1234, true).second, 1)
+val later = timeParts(1700000000000, true)
+check("timeParts of a known instant", [later.year, later.month, later.day], [2023, 11, 14])
+checkFails("timeParts rejects a string", () -> timeParts("x"), "must be an integer")
+
+// ----------------------------------------------------------- subprocesses
+
+val ok = execute("printf 'out'")
+check("execute exit code", ok.code, 0)
+check("execute stdout", ok.out, "out")
+check("execute stderr", ok.err, "")
+val bad = execute("printf 'e' >&2; exit 3")
+check("execute reports a failing code", bad.code, 3)
+check("execute captures stderr", bad.err, "e")
+check("execute without a shell", execute("/bin/echo hi", false).out, "hi\n")
+checkFails("execute rejects an array", () -> execute(["/bin/echo"]), "must be a string")
+
+// passthrough runs a program on this process's own streams and answers with its
+// exit code. Nothing is captured, so only programs that print nothing belong here.
+check("passthrough returns a success code", passthrough("/bin/true"), 0)
+check("passthrough returns a failure code", passthrough("/bin/false"), 1)
+check("passthrough passes its arguments on", passthrough("/bin/sh", ["-c", "exit 7"]), 7)
+check("passthrough reports a signalled child as 128 plus the signal",
+      passthrough("/bin/sh", ["-c", "kill -TERM $$"]), 143)
+check("passthrough with no arguments", passthrough("/bin/true", []), 0)
+checkFails("passthrough names a program it cannot run",
+           () -> passthrough("/no/such/program"), "cannot run")
+checkFails("passthrough wants strings in the args array",
+           () -> passthrough("/bin/true", [1]), "must be a string")
+checkFails("passthrough wants an array of arguments",
+           () -> passthrough("/bin/true", "x"), "must be an array")
+
+// print and printf write where they are told; the differential run compares the
+// bytes, so these have to be the same every time.
+print("")
+printf("%s", "")
+flush()
+check("printf formats", format("%05.2f|%s|%d", 3.14159, "x", 42), "03.14|x|42")
+
+// --------------------------------------------------------------- cleanup
+
+for (f in listFiles(root)) { removeFile(joinPath(root, f)) }
+checkTrue("the work directory is empty again", length(listFiles(root)) == 0)
+checkTrue("the work directory goes away", removeFile(root))
+
+report("system")

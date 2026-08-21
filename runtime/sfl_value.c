@@ -570,7 +570,21 @@ static void buf_quoted(Buf *b, SflVal s) {
   buf_ch(b, '"');
 }
 
-static void write_value(Buf *b, SflVal v, int quoted) {
+/*
+ * How many containers a walk over a value may enter. A structure that contains
+ * itself has no bottom, and every recursive walk here — rendering, equality,
+ * ordering, JSON, deep copying — would otherwise run off the stack and take the
+ * whole process with it. The limit sits far above any structure real data has and
+ * far below what the stack can hold, so the only thing it ever catches is a cycle.
+ * Values.NestLimit in the interpreter holds the same number.
+ */
+void sfl_check_nesting(int64_t depth) {
+  if (depth >= SFL_NEST_LIMIT)
+    sfl_raise_hint("structure is nested too deeply",
+                   "a value may not nest more than 10000 deep");
+}
+
+static void write_value(Buf *b, SflVal v, int quoted, int64_t depth) {
   char tmp[64];
   switch (v->tag) {
     case SFL_NULL: buf_ascii(b, "null"); break;
@@ -587,30 +601,33 @@ static void write_value(Buf *b, SflVal v, int quoted) {
       if (quoted) buf_quoted(b, v); else buf_str(b, v);
       break;
     case SFL_ARR:
+      sfl_check_nesting(depth);
       buf_ch(b, '[');
       for (uint32_t i = 0; i < v->aux; i++) {
         if (i) buf_ascii(b, ", ");
-        write_value(b, v->u.a.items[i], 1);
+        write_value(b, v->u.a.items[i], 1, depth + 1);
       }
       buf_ch(b, ']');
       break;
     case SFL_TUPLE:
       /* VTuple.write: parentheses, elements always quoted — the elements of a
          container render source-like even when the container prints bare. */
+      sfl_check_nesting(depth);
       buf_ch(b, '(');
       for (uint32_t i = 0; i < v->aux; i++) {
         if (i) buf_ascii(b, ", ");
-        write_value(b, v->u.t.items[i], 1);
+        write_value(b, v->u.t.items[i], 1, depth + 1);
       }
       buf_ch(b, ')');
       break;
     case SFL_OBJ:
+      sfl_check_nesting(depth);
       buf_ch(b, '{');
       for (uint32_t i = 0; i < v->aux; i++) {
         if (i) buf_ascii(b, ", ");
         buf_quoted(b, v->u.o.keys[i]);
         buf_ascii(b, ": ");
-        write_value(b, v->u.o.vals[i], 1);
+        write_value(b, v->u.o.vals[i], 1, depth + 1);
       }
       buf_ch(b, '}');
       break;
@@ -650,19 +667,20 @@ SflVal sfl_display(SflVal v) {
   if (v->tag == SFL_STR) return v;
   Buf b;
   buf_init(&b);
-  write_value(&b, v, 0);
+  write_value(&b, v, 0, 0);
   return buf_take(&b);
 }
 
 SflVal sfl_repr(SflVal v) {
   Buf b;
   buf_init(&b);
-  write_value(&b, v, 1);
+  write_value(&b, v, 1, 0);
   return buf_take(&b);
 }
 
 static void pretty_into(Buf *b, SflVal v, int64_t indent, int64_t depth) {
   if (v->tag == SFL_ARR && v->aux) {
+    sfl_check_nesting(depth);
     buf_ascii(b, "[\n");
     for (uint32_t i = 0; i < v->aux; i++) {
       for (int64_t k = 0; k < (depth + 1) * indent; k++) buf_ch(b, ' ');
@@ -673,6 +691,7 @@ static void pretty_into(Buf *b, SflVal v, int64_t indent, int64_t depth) {
     for (int64_t k = 0; k < depth * indent; k++) buf_ch(b, ' ');
     buf_ch(b, ']');
   } else if (v->tag == SFL_OBJ && v->aux) {
+    sfl_check_nesting(depth);
     buf_ascii(b, "{\n");
     for (uint32_t i = 0; i < v->aux; i++) {
       for (int64_t k = 0; k < (depth + 1) * indent; k++) buf_ch(b, ' ');
@@ -685,7 +704,7 @@ static void pretty_into(Buf *b, SflVal v, int64_t indent, int64_t depth) {
     for (int64_t k = 0; k < depth * indent; k++) buf_ch(b, ' ');
     buf_ch(b, '}');
   } else {
-    write_value(b, v, 1);
+    write_value(b, v, 1, depth);
   }
 }
 
@@ -712,8 +731,15 @@ static SflVal show(SflVal v) {
 /* Equality and ordering                                                      */
 /* ------------------------------------------------------------------------- */
 
-int sfl_equal(SflVal a, SflVal b) {
-  if (a == b) return 1;
+static int equal_at(SflVal a, SflVal b, int64_t depth);
+
+int sfl_equal(SflVal a, SflVal b) { return equal_at(a, b, 0); }
+
+static int equal_at(SflVal a, SflVal b, int64_t depth) {
+  /* Identity settles it for everything except a NaN, which IEEE says is equal to
+     nothing at all — including the very same NaN, so `n == n` is false there just
+     as `NAN() == NAN()` is. */
+  if (a == b && !(a->tag == SFL_FLOAT && a->u.d != a->u.d)) return 1;
   switch (a->tag) {
     case SFL_INT:
       if (b->tag == SFL_INT) return a->u.i == b->u.i;
@@ -731,24 +757,27 @@ int sfl_equal(SflVal a, SflVal b) {
       return b->tag == SFL_NULL;
     case SFL_ARR: {
       if (b->tag != SFL_ARR || a->aux != b->aux) return 0;
+      sfl_check_nesting(depth);
       for (uint32_t i = 0; i < a->aux; i++)
-        if (!sfl_equal(a->u.a.items[i], b->u.a.items[i])) return 0;
+        if (!equal_at(a->u.a.items[i], b->u.a.items[i], depth + 1)) return 0;
       return 1;
     }
     case SFL_TUPLE: {
       /* Element-wise like arrays, but only against another tuple: (1, 2) and
          [1, 2] are different values, which is what makes a tuple pattern safe. */
       if (b->tag != SFL_TUPLE || a->aux != b->aux) return 0;
+      sfl_check_nesting(depth);
       for (uint32_t i = 0; i < a->aux; i++)
-        if (!sfl_equal(a->u.t.items[i], b->u.t.items[i])) return 0;
+        if (!equal_at(a->u.t.items[i], b->u.t.items[i], depth + 1)) return 0;
       return 1;
     }
     case SFL_OBJ: {
       /* Order-insensitive, exactly as the interpreter compares objects. */
       if (b->tag != SFL_OBJ || a->aux != b->aux) return 0;
+      sfl_check_nesting(depth);
       for (uint32_t i = 0; i < a->aux; i++) {
         SflVal other = sfl_obj_get(b, a->u.o.keys[i]);
-        if (other == NULL || !sfl_equal(a->u.o.vals[i], other)) return 0;
+        if (other == NULL || !equal_at(a->u.o.vals[i], other, depth + 1)) return 0;
       }
       return 1;
     }
@@ -796,6 +825,7 @@ int32_t sfl_compare(SflVal a, SflVal b) {
       /* Lexicographic, length last — so ("b", 1) sorts after ("a", 9), which is
          what sorting an array of pairs needs. Recursing raises when an element
          pair is itself incomparable, exactly as the interpreter's compare does. */
+      sfl_check_nesting(0);
       uint32_t n = a->aux < b->aux ? a->aux : b->aux;
       for (uint32_t i = 0; i < n; i++) {
         int32_t c = sfl_compare(a->u.t.items[i], b->u.t.items[i]);

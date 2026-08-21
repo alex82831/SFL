@@ -37,6 +37,19 @@ object Ty:
     else if (a == I64 && b == F64) || (a == F64 && b == I64) then F64
     else Dyn
 
+  /**
+   * The type of a value that reaches a place unchanged: a variable written from
+   * two branches, a function that returns from two, the value of an `if` or a
+   * `select`. Unlike [[join]], int and float do not meet in float here — widening
+   * would hand back 1.0 where the interpreter hands back 1 — so anything mixed is
+   * carried boxed instead.
+   */
+  def unify(a: Ty, b: Ty): Ty =
+    if a == b then a
+    else if a == Unknown then b
+    else if b == Unknown then a
+    else Dyn
+
   def numeric(t: Ty): Boolean = t == I64 || t == F64
   def unboxed(t: Ty): Boolean = t == I64 || t == F64 || t == Bool
 
@@ -434,7 +447,7 @@ final class Compiler(val globals: Globals, val src: SourceRef):
 
   private def setSlot(fn: Fn, slot: Int, t: Ty): Unit =
     if !frozen && slot < fn.slots.length then
-      val joined = Ty.join(fn.slots(slot), t)
+      val joined = Ty.unify(fn.slots(slot), t)
       if joined != fn.slots(slot) then
         fn.slots(slot) = joined
         changed = true
@@ -442,14 +455,14 @@ final class Compiler(val globals: Globals, val src: SourceRef):
   private def setGlobal(id: Int, t: Ty): Unit =
     if frozen then return
     val prev = globalTys.getOrElse(id, Ty.Unknown)
-    val joined = Ty.join(prev, t)
+    val joined = Ty.unify(prev, t)
     if joined != prev then
       globalTys(id) = joined
       changed = true
 
   private def recordReturn(fn: Fn, t: Ty): Unit =
     if !frozen && t != Ty.Unknown then
-      val joined = Ty.join(fn.ret, t)
+      val joined = Ty.unify(fn.ret, t)
       if joined != fn.ret then
         fn.ret = joined
         changed = true
@@ -511,9 +524,9 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       var k = 0
       while k < i.conds.length do
         tyOf(i.conds(k), fn)
-        t = Ty.join(t, tyOf(i.bodies(k), fn))
+        t = Ty.unify(t, tyOf(i.bodies(k), fn))
         k += 1
-      if i.orElse != null then Ty.join(t, tyOf(i.orElse, fn)) else Ty.Dyn
+      if i.orElse != null then Ty.unify(t, tyOf(i.orElse, fn)) else Ty.Dyn
 
     case w: While => tyOf(w.cond, fn); tyOf(w.body, fn); Ty.Dyn
     case f: ForIn => tyOfForIn(f, fn)
@@ -532,9 +545,9 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       var k = 0
       while k < s.caseVals.length do
         tyOf(s.caseVals(k), fn)
-        t = Ty.join(t, tyOf(s.caseBodies(k), fn))
+        t = Ty.unify(t, tyOf(s.caseBodies(k), fn))
         k += 1
-      if s.orElse != null then Ty.join(t, tyOf(s.orElse, fn)) else Ty.Dyn
+      if s.orElse != null then Ty.unify(t, tyOf(s.orElse, fn)) else Ty.Dyn
 
     case m: MakeFun =>
       genericOf(m.proto)
@@ -837,7 +850,13 @@ final class Compiler(val globals: Globals, val src: SourceRef):
       val r = tmp(); emit(s"$r = sitofp i64 $v to double"); r
     else if from == Ty.Bool && to == Ty.I64 then
       val r = tmp(); emit(s"$r = zext i1 $v to i64"); r
-    else if from == Ty.Dyn && to == Ty.Bool then truthy(v, Ty.Dyn)
+    else if from == Ty.Bool && to == Ty.F64 then
+      val r = tmp(); emit(s"$r = uitofp i1 $v to double"); r
+    else if from == Ty.F64 && to == Ty.I64 then
+      // Java's (long) cast saturates and sends NaN to zero; LLVM's plain fptosi is
+      // poison outside the range, so the saturating intrinsic is the matching one.
+      val r = tmp(); emit(s"$r = call i64 @llvm.fptosi.sat.i64.f64(double $v)"); r
+    else if to == Ty.Bool then truthy(v, from)
     else if from == Ty.Unknown then zeroOf(to)
     else v
 
@@ -1280,16 +1299,32 @@ final class Compiler(val globals: Globals, val src: SourceRef):
           case _ =>
             // SFL reports division by zero; machine code would trap instead. The
             // position is only stored on the failing path, so the check is free.
-            guardNonZero(rv, a)
-            if a.op == BinOp.Div then emit(s"$r = sdiv i64 $lv, $rv")
-            else emit(s"$r = srem i64 $lv, $rv")
+            val isDiv = a.op == BinOp.Div
+            guardNonZero(rv, isDiv)
+            // Long.MinValue / -1 overflows: the machine traps and LLVM calls it
+            // poison, while the interpreter wraps the way Java does. Dividing by 1
+            // instead and negating afterwards reproduces that without a branch.
+            val negOne = tmp()
+            emit(s"$negOne = icmp eq i64 $rv, -1")
+            val safe = tmp()
+            emit(s"$safe = select i1 $negOne, i64 1, i64 $rv")
+            if isDiv then
+              val q = tmp()
+              emit(s"$q = sdiv i64 $lv, $safe")
+              val neg = tmp()
+              emit(s"$neg = sub i64 0, $lv")
+              emit(s"$r = select i1 $negOne, i64 $neg, i64 $q")
+            else
+              val m = tmp()
+              emit(s"$m = srem i64 $lv, $safe")
+              emit(s"$r = select i1 $negOne, i64 0, i64 $m")
       (r, t)
     else
       val r = tmp()
       emit(s"$r = call ptr @sfl_arith(i32 ${a.op}, ptr ${box(lv0, lt)}, ptr ${box(rv0, rt)})")
       (r, Ty.Dyn)
 
-  private def guardNonZero(v: String, n: Node): Unit =
+  private def guardNonZero(v: String, isDiv: Boolean): Unit =
     val isZero = tmp()
     val bad = label("divzero")
     val ok = label("divok")
@@ -1297,8 +1332,9 @@ final class Compiler(val globals: Globals, val src: SourceRef):
     emit(s"br i1 $isZero, label %$bad, label %$ok")
     emitLabel(bad)
     // Division does not pin in the interpreter: the enclosing call or statement
-    // position is already in sfl_pos, and that is what gets reported.
-    emit("call void @sfl_div_zero()")
+    // position is already in sfl_pos, and that is what gets reported. The two
+    // operators word it differently, and so must this.
+    emit(s"call void @${if isDiv then "sfl_div_zero" else "sfl_mod_zero"}()")
     emit("unreachable")
     emitLabel(ok)
 
@@ -2257,23 +2293,33 @@ final class Compiler(val globals: Globals, val src: SourceRef):
   private def nativesTable(): String =
     val used = usedPrims.map(_.name).toSet
     val sb = new StringBuilder
-    // Doc lines come from the interpreter's registry, which is the one place they
-    // are written; arity errors and describe() must show the same text either way.
+    // Doc lines and groups come from the interpreter's registry, which is the one
+    // place they are written; arity errors and describe() must show the same text
+    // either way.
     def docOf(name: String): String = Builtins.lookup(name).map(_.doc).getOrElse("")
+    def groupOf(name: String): String = Builtins.lookup(name).map(_.group).getOrElse("")
+    def row(name: String, signature: String, min: Int, max: Int, fn: String): String =
+      s"%SflNative { ptr ${cstr(name)}, ptr ${cstr(groupOf(name))}, ptr ${cstr(signature)}, " +
+        s"ptr ${cstr(docOf(name))}, i32 $min, i32 $max, $fn }"
     val primRows = Prims.all.map { p =>
-      val fn = if used.contains(p.name) then s"ptr @${p.symbol}" else "ptr null"
-      s"%SflNative { ptr ${cstr(p.name)}, ptr ${cstr(p.signature)}, ptr ${cstr(docOf(p.name))}, " +
-        s"i32 ${p.min}, i32 ${p.max}, $fn }"
+      row(p.name, p.signature, p.min, p.max,
+        if used.contains(p.name) then s"ptr @${p.symbol}" else "ptr null")
     }
     // Library functions appear here as description only: a program reaches them by
     // name at compile time, but `builtins()` and `describe()` must still see them,
     // because to a program they are builtins like any other. A name a primitive
     // covers already has a row above; its SFL twin exists only for importers.
     val stdRows = Stdlib.all.filterNot(f => Prims.byName.contains(f.name)).map { f =>
-      s"%SflNative { ptr ${cstr(f.name)}, ptr ${cstr(f.signature)}, ptr ${cstr(docOf(f.name))}, " +
-        s"i32 ${f.min}, i32 ${f.max}, ptr null }"
+      row(f.name, f.signature, f.min, f.max, "ptr null")
     }
-    val rows = primRows ++ stdRows
+    // And the handful a compiled program cannot carry at all. They are rejected at
+    // every reference, so no code can reach the row — but the manual promises that
+    // which category a builtin falls into is invisible, and `builtins()` and
+    // `describe()` are where that promise is kept.
+    val describedOnly = Builtins.all
+      .filterNot(b => Prims.byName.contains(b.name) || Stdlib.byName.contains(b.name))
+      .map(b => row(b.name, b.signature, b.minArity, b.maxArity, "ptr null"))
+    val rows = primRows ++ stdRows ++ describedOnly
     sb.append(s"@sfl_natives = global [${rows.size} x %SflNative] [\n  ")
     sb.append(rows.mkString(",\n  "))
     sb.append("\n]\n")
@@ -2307,7 +2353,7 @@ private object Compiler:
   /** Everything the generated module needs from the runtime. */
   private val declares: String =
     """%SflProto = type { ptr, ptr, i32, i32, i32, i32, i32 }
-      |%SflNative = type { ptr, ptr, ptr, i32, i32, ptr }
+      |%SflNative = type { ptr, ptr, ptr, ptr, i32, i32, ptr }
       |
       |@sfl_pos = external global i64
       |@sfl_null_obj = external global i8
@@ -2357,6 +2403,7 @@ private object Compiler:
       |@sfl_stack_limit = external thread_local global ptr
       |declare void @sfl_arity_fail(ptr, i64)
       |declare void @sfl_div_zero()
+      |declare void @sfl_mod_zero()
       |declare void @sfl_print_i64(i64, i32)
       |declare void @sfl_print_f64(double, i32)
       |declare void @sfl_print_bool(i32, i32)
@@ -2366,10 +2413,11 @@ private object Compiler:
       |declare i64 @sfl_round(double)
       |declare i64 @sfl_sign_i64(i64)
       |declare i64 @sfl_sign_f64(double)
-      |declare i64 @sfl_ipow(i64, i64)
+      |declare i64 @sfl_to_int_f64(double)
       |declare i64 @sfl_gcd(i64, i64)
       |declare double @llvm.sqrt.f64(double)
       |declare double @llvm.fabs.f64(double)
+      |declare i64 @llvm.fptosi.sat.i64.f64(double)
       |declare double @llvm.floor.f64(double)
       |declare double @llvm.ceil.f64(double)
       |declare double @llvm.pow.f64(double, double)

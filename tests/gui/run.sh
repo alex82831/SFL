@@ -36,10 +36,10 @@ mkdir -p "$proj/lib"
 printf '{ "name": "guitests", "version": "0.0.1", "deps": { "gui": "^0.1.0", "httpd": "^0.1.0" } }\n' > "$proj/sfl.pkg"
 cp ../lib/assert.sfl "$proj/lib/assert.sfl"
 cp wsc.sfl "$proj/lib/wsc.sfl"
-cp core.sfl app.sfl demo.sfl parity.sfl "$proj/"
+cp core.sfl widgets.sfl app.sfl demo.sfl parity.sfl "$proj/"
 
 parts=0
-for suite in core app demo; do
+for suite in core widgets app demo; do
   parts=$((parts + 1))
   if out=$(cd "$proj" && "$SFL" "$suite.sfl" 2>&1); then
     printf '  %s\n' "$out"

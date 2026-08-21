@@ -1,0 +1,202 @@
+// csv, uuid, log, cli, and the parts of ansi the other package suite does not
+// reach. One suite because none of them needs a server, a socket or a clock.
+import "lib/assert"
+import "../packages/csv/main"
+import "../packages/uuid/main"
+import "../packages/log/main"
+import "../packages/cli/main"
+import "../packages/ansi/main"
+
+// --------------------------------------------------------------------- csv
+
+check("parse a header and a row", csv.parse("a,b\n1,2"), [["a", "b"], ["1", "2"]])
+check("parse leaves cells as strings", csv.parse("1")[0][0], "1")
+check("parse an empty text", csv.parse(""), [])
+check("parse a single field", csv.parse("x"), [["x"]])
+check("parse an empty field", csv.parse("a,,c"), [["a", "", "c"]])
+check("parse a trailing newline adds no row", csv.parse("a\n"), [["a"]])
+check("parse CRLF line endings", csv.parse("a,b\r\n1,2\r\n"), [["a", "b"], ["1", "2"]])
+check("parse a lone CR", csv.parse("a\rb"), [["a"], ["b"]])
+check("parse an empty line is one empty field", csv.parse("a\n\nb"), [["a"], [""], ["b"]])
+check("parse a quoted field", csv.parse("\"a,b\",c"), [["a,b", "c"]])
+check("parse a doubled quote", csv.parse("\"say \"\"hi\"\"\""), [["say \"hi\""]])
+check("parse a newline inside quotes", csv.parse("\"a\nb\",c"), [["a\nb", "c"]])
+check("parse a quote that is not at the start stays literal",
+      csv.parse("a\"b"), [["a\"b"]])
+check("parse another separator", csv.parse("a;b", {sep: ";"}), [["a", "b"]])
+check("parse tab separated", csv.parse("a\tb", {sep: "\t"}), [["a", "b"]])
+checkFails("parse rejects a non-string", () -> csv.parse(1), "expected a string")
+
+check("parseObjects", csv.parseObjects("a,b\n1,2"), [{"a": "1", "b": "2"}])
+check("parseObjects with no data rows", csv.parseObjects("a,b"), [])
+check("parseObjects of nothing", csv.parseObjects(""), [])
+check("parseObjects pads a short row", csv.parseObjects("a,b\n1"), [{"a": "1", "b": ""}])
+check("parseObjects drops the extra cells of a long row",
+      length(keys(csv.parseObjects("a\n1,2")[0])), 1)
+
+check("stringify", csv.stringify([["a", "b"], ["1", "2"]]), "a,b\n1,2\n")
+check("stringify quotes a separator", csv.stringify([["x", "y,z"]]), "x,\"y,z\"\n")
+check("stringify doubles a quote", csv.stringify([["a\"b"]]), "\"a\"\"b\"\n")
+check("stringify quotes a newline", csv.stringify([["a\nb"]]), "\"a\nb\"\n")
+check("stringify renders non-strings", csv.stringify([[1, true]]), "1,true\n")
+check("stringify writes null as an empty cell", csv.stringify([[1, null, 2]]), "1,,2\n")
+check("stringify of nothing", csv.stringify([]), "")
+check("stringify with another separator", csv.stringify([["a", "b"]], {sep: ";"}), "a;b\n")
+check("stringify quotes the chosen separator", csv.stringify([["a;b"]], {sep: ";"}), "\"a;b\"\n")
+
+check("stringifyObjects", csv.stringifyObjects([{"a": 1, "b": 2}]), "a,b\n1,2\n")
+check("stringifyObjects of nothing", csv.stringifyObjects([]), "")
+check("stringifyObjects takes its columns from the first object",
+      csv.stringifyObjects([{"a": 1}, {"a": 2, "b": 3}]), "a\n1\n2\n")
+check("stringifyObjects honours a column list",
+      csv.stringifyObjects([{"a": 1, "b": 2}], {columns: ["b", "a"]}), "b,a\n2,1\n")
+check("stringifyObjects leaves a missing key empty",
+      csv.stringifyObjects([{"a": 1}], {columns: ["a", "z"]}), "a,z\n1,\n")
+check("csv round trips", csv.parse(csv.stringify([["a,1", "b\"2", "c\n3"]])),
+      [["a,1", "b\"2", "c\n3"]])
+
+// -------------------------------------------------------------------- uuid
+
+check("nil", uuid.nil(), "00000000-0000-0000-0000-000000000000")
+check("v4 is 36 characters", length(uuid.v4()), 36)
+check("v4 says it is version four", uuid.version(uuid.v4()), 4)
+check("v7 says it is version seven", uuid.version(uuid.v7()), 7)
+checkTrue("v4 validates", uuid.validate(uuid.v4()))
+checkTrue("v7 validates", uuid.validate(uuid.v7()))
+checkTrue("two v4s differ", uuid.v4() != uuid.v4())
+// v7 puts 48 bits of the clock first, so two made a millisecond apart sort by
+// when they were made. Within one millisecond only the random tail separates
+// them, which is why the sleep is here.
+val earlier = uuid.v7()
+sleep(2)
+checkTrue("v7 sorts by time", earlier < uuid.v7())
+checkTrue("v4 sets the variant bits", contains("89ab", subString(uuid.v4(), 19, 20)))
+checkTrue("validate accepts upper case",
+          uuid.validate("8F14E45F-CEEA-467F-A0E6-6FFBC0EAFD6A"))
+checkTrue("validate refuses a short string", !uuid.validate("8f14e45f"))
+checkTrue("validate refuses the wrong dashes",
+          !uuid.validate("8f14e45fceea-467f-a0e6-6ffbc0eafd6a"))
+checkTrue("validate refuses a non-hex digit",
+          !uuid.validate("gf14e45f-ceea-467f-a0e6-6ffbc0eafd6a"))
+checkTrue("validate refuses a number", !uuid.validate(1))
+checkTrue("validate refuses null", !uuid.validate(null))
+check("version of the nil uuid", uuid.version(uuid.nil()), 0)
+checkFails("version of a non-uuid", () -> uuid.version("x"), "is not a UUID")
+check("toBytes is sixteen bytes", length(uuid.toBytes(uuid.nil())), 16)
+check("toBytes of the nil uuid", uuid.toBytes(uuid.nil()), newArray(16, 0))
+checkFails("toBytes of a non-uuid", () -> uuid.toBytes("x"), "is not a UUID")
+check("fromBytes inverts toBytes", uuid.fromBytes(uuid.toBytes(uuid.nil())), uuid.nil())
+checkFails("fromBytes wants sixteen", () -> uuid.fromBytes([1, 2]), "expected 16 bytes")
+checkFails("fromBytes wants an array", () -> uuid.fromBytes("x"), "expected 16 bytes")
+val someV4 = uuid.v4()
+check("a v4 survives a byte round trip", uuid.fromBytes(uuid.toBytes(someV4)), toLower(someV4))
+
+// --------------------------------------------------------------------- log
+
+// Every line goes to a sink of our own, so the suite prints nothing and can read
+// back exactly what would have been written.
+val lines = []
+log.setSink((line) -> push(lines, line))
+check("setLevel returns the previous name", log.setLevel("debug"), "info")
+check("level reads back", log.level(), "debug")
+log.debug("d")
+log.info("i")
+log.warn("w")
+log.error("e")
+check("every level logs at debug", length(lines), 4)
+checkTrue("a line carries its label", contains(lines[0], "DEBUG") && contains(lines[0], "d"))
+checkTrue("a line carries a timestamp", matches(subString(lines[0], 0, 19),
+          "\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}"))
+clear(lines)
+log.setLevel("warn")
+log.debug("d")
+log.info("i")
+log.warn("w")
+log.error("e")
+check("a level filters what is less serious", length(lines), 2)
+checkTrue("warn survives", contains(lines[0], "WARN"))
+clear(lines)
+log.setLevel("off")
+log.error("e")
+check("off logs nothing", length(lines), 0)
+log.setLevel("info")
+clear(lines)
+log.info("with", {"port": 8080}, 3)
+checkTrue("extra arguments are rendered and joined",
+          contains(lines[0], "with {\"port\": 8080} 3"))
+checkFails("an unknown level is named", () -> log.setLevel("chatty"), "chatty")
+
+// The file sink appends every line as well.
+val logFile = tempFile(".log")
+clear(lines)
+log.setFile(logFile)
+log.info("to the file")
+check("the sink still sees it", length(lines), 1)
+checkTrue("and so does the file", contains(readFile(logFile), "to the file"))
+log.info("second")
+check("the file is appended to", length(readLines(logFile)), 3)
+log.setFile(null)
+log.info("after")
+check("turning the file off stops the appending",
+      length(filter(readLines(logFile), (l) -> contains(l, "after"))), 0)
+removeFile(logFile)
+log.setSink(null)
+log.setLevel("info")
+
+// --------------------------------------------------------------------- cli
+
+val spec = {
+  "name": "greet",
+  "doc": "Greets people.",
+  "flags": {"loud": {"short": "l", "doc": "Shout it"}},
+  "options": {"times": {"short": "n", "doc": "How many times", "default": "1"}},
+  "positionals": [{"name": "who", "required": true, "doc": "Whom to greet"},
+                  {"name": "others", "variadic": true, "doc": "More of them"}]
+}
+
+val got = cli.parseArgs(spec, ["--loud", "--times", "3", "ann", "bo", "cy"])
+check("a long flag is set", got.flags.loud, true)
+check("a long option takes the next word", got.options.times, "3")
+check("a required positional is bound", got.positionals.who, "ann")
+check("a variadic positional collects the rest", got.positionals.others, ["bo", "cy"])
+check("an unset flag is false", cli.parseArgs(spec, ["x"]).flags.loud, false)
+check("an option falls back to its default", cli.parseArgs(spec, ["x"]).options.times, "1")
+check("a variadic positional may be empty", cli.parseArgs(spec, ["x"]).positionals.others, [])
+check("--option=value", cli.parseArgs(spec, ["--times=9", "x"]).options.times, "9")
+check("a short flag", cli.parseArgs(spec, ["-l", "x"]).flags.loud, true)
+check("a short option", cli.parseArgs(spec, ["-n", "2", "x"]).options.times, "2")
+check("-- ends the options",
+      cli.parseArgs(spec, ["--", "--times", "x"]).positionals.who, "--times")
+checkFails("an unknown option is named", () -> cli.parseArgs(spec, ["--nope", "x"]), "nope")
+checkFails("a missing required positional is named", () -> cli.parseArgs(spec, []), "who")
+checkFails("an option with nothing after it", () -> cli.parseArgs(spec, ["--times"]), "times")
+
+val helpText = cli.help(spec)
+checkTrue("help names the program", contains(helpText, "greet"))
+checkTrue("help carries the summary", contains(helpText, "Greets people."))
+checkTrue("help lists the flags", contains(helpText, "--loud") && contains(helpText, "Shout it"))
+checkTrue("help lists the options", contains(helpText, "--times"))
+checkTrue("help lists the positionals", contains(helpText, "who"))
+checkTrue("help of a bare spec still works", length(cli.help({})) > 0)
+
+// -------------------------------------------------------------------- ansi
+
+ansi.setEnabled(true)
+val esc = chr(27)
+check("blue", ansi.blue("x"), esc + "[34mx" + esc + "[0m")
+check("cyan", ansi.cyan("x"), esc + "[36mx" + esc + "[0m")
+check("magenta", ansi.magenta("x"), esc + "[35mx" + esc + "[0m")
+check("gray", ansi.gray("x"), esc + "[90mx" + esc + "[0m")
+check("underline", ansi.underline("x"), esc + "[4mx" + esc + "[0m")
+check("dim", ansi.dim("x"), esc + "[2mx" + esc + "[0m")
+check("bold", ansi.bold("x"), esc + "[1mx" + esc + "[0m")
+check("green", ansi.green("x"), esc + "[32mx" + esc + "[0m")
+check("yellow", ansi.yellow("x"), esc + "[33mx" + esc + "[0m")
+checkTrue("codes names every style it accepts", length(keys(ansi.codes())) > 10)
+checkTrue("codes agrees with style",
+          ansi.style("x", "red") == esc + "[" + toString(ansi.codes().red) + "mx" + esc + "[0m")
+ansi.setEnabled(false)
+check("disabled blue is the identity", ansi.blue("x"), "x")
+ansi.setEnabled(true)
+
+report("utilpkgs")

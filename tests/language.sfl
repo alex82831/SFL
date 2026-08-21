@@ -342,4 +342,117 @@ check("and can still reach past it", eval("std.toUpper(\"x\")"), "X")
 checkFails("a private name stays inside its file",
   () -> eval("geometryPrivateProbe()"), "undefined variable")
 
+// ============================================================ syntax corners
+//
+// The spellings and the shapes that the rest of the suites never happen to
+// reach: the second name for `elsif`, the compound assignments that are not
+// `+=`, the comment forms, and the two places where `{` means one thing and
+// looks like another.
+
+// `elif` and `else if` are the other two spellings of `elsif`; all three build
+// the same chain, and the parser has to accept them mixed.
+def gradeElif(n) = if (n > 8) then "high" elif (n > 4) then "mid" else "low"
+check("elif takes the first arm", gradeElif(9), "high")
+check("elif takes a middle arm", gradeElif(5), "mid")
+check("elif falls through to else", gradeElif(1), "low")
+def gradeElseIf(n) = if (n > 8) then "high" else if (n > 4) then "mid" else "low"
+check("else if takes a middle arm", gradeElseIf(5), "mid")
+def gradeMixed(n) {
+  if (n > 8) { "high" }
+  elif (n > 6) { "upper" }
+  elsif (n > 4) { "mid" }
+  else if (n > 2) { "lower" }
+  else { "low" }
+}
+check("the three spellings mix in one chain",
+      map([9, 7, 5, 3, 1], gradeMixed), ["high", "upper", "mid", "lower", "low"])
+check("elif works as a statement",
+      { var out = ""; val n = 5
+        if (n > 8) { out = "high" } elif (n > 4) { out = "mid" } else { out = "low" }
+        out }, "mid")
+
+// The compound assignments, on a variable, an array element and an object field.
+// The receiver and the key are evaluated once, which is what makes them more
+// than sugar for `a = a + b`.
+var comp = 10
+comp += 5
+check("+= on a variable", comp, 15)
+comp -= 3
+check("-= on a variable", comp, 12)
+comp *= 4
+check("*= on a variable", comp, 48)
+comp /= 6
+check("/= on a variable", comp, 8)
+comp %= 3
+check("%= on a variable", comp, 2)
+
+val cells = [10, 20]
+cells[0] += 1
+check("+= on an array element", cells[0], 11)
+cells[0] -= 2
+check("-= on an array element", cells[0], 9)
+cells[0] *= 3
+check("*= on an array element", cells[0], 27)
+cells[0] /= 4
+check("/= on an array element", cells[0], 6)
+cells[0] %= 4
+check("%= on an array element", cells[0], 2)
+check("the other element is untouched", cells[1], 20)
+
+val rec = {"n": 10}
+rec.n += 5
+check("+= on an object field", rec.n, 15)
+rec.n -= 3
+check("-= on an object field", rec.n, 12)
+rec.n *= 2
+check("*= on an object field", rec.n, 24)
+rec.n /= 8
+check("/= on an object field", rec.n, 3)
+rec.n %= 2
+check("%= on an object field", rec.n, 1)
+
+// The receiver and the key are evaluated once each, not twice.
+var reads = 0
+def once(v) { reads += 1; v }
+val target = [0, 0]
+once(target)[once(1)] += 5
+check("a compound assignment evaluates each side once", reads, 2)
+check("and still writes the right cell", target, [0, 5])
+
+// Compound assignment follows the same rules as the operator it names.
+var text = "a"
+text += "b"
+check("+= concatenates strings", text, "ab")
+text *= 2
+check("*= repeats a string", text, "abab")
+var floaty = 7
+floaty /= 2
+check("/= on two ints stays integer division", floaty, 3)
+checkFails("/= by zero", () -> { var z = 1; z /= 0 }, "division by zero")
+checkFails("%= by zero", () -> { var z = 1; z %= 0 }, "modulo by zero")
+checkFails("a compound assignment needs a var",
+           () -> eval("val fixed = 1\nfixed += 1"), "val")
+
+// Comments: to the end of the line, and between the braces of a block.
+val commented = 1 // to the end of the line
+check("a line comment ends at the newline", commented, 1)
+check("a block comment is whitespace", 1 /* here */ + 2, 3)
+check("a block comment can span lines", 1 + /* one
+two
+three */ 2, 3)
+check("a block comment inside a call", max(1, /* pick */ 2), 2)
+check("a comment is not a string", length("// not a comment"), 16)
+
+// `{` after an arrow is the lambda's body, so an object literal there needs
+// parentheses. This is the one ambiguity the language keeps, and it is written
+// down so a change to it shows up here.
+val bodyBrace = () -> {"a": 1}
+check("a brace after an arrow opens the lambda body", typeOf(bodyBrace()), "object")
+check("and the object is reached by parenthesising", (() -> ({"a": 1}).a)(), 1)
+// In a branch, `{}` is an empty body rather than an empty object, so a function
+// that wants the empty table spells it out.
+check("an empty brace in a branch is an empty body", if (true) then {} else 1, null)
+check("an empty brace elsewhere is an empty object", typeOf({}), "object")
+check("object() is the unambiguous spelling", if (true) then object() else 1, {})
+
 report("language")

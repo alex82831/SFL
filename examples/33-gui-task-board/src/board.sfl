@@ -146,7 +146,7 @@ def boardUi(ctx) {
         checkbox("", {id: "chk-${t.id}", checked: t.done,
                       onChange: (on) -> boardSet(t.id, on)}),
         text(t.title, {id: "task-${t.id}", grow: true,
-                       style: if (t.done) then {"text-decoration": "line-through"} else {}}),
+                       style: if (t.done) then {"text-decoration": "line-through"} else object()}),
         when(t.priority == "high", () -> badge("high", {color: "warn"})),
         button("✕", {kind: "ghost", small: true, id: "del-${t.id}",
                      onClick: () -> boardRemove(t.id)})

@@ -3,6 +3,9 @@ package com.fartech.sfl
 import Builtins.*
 import java.io.File
 import scala.scalanative.posix.stdlib
+import scala.scalanative.posix.sys.stat
+import scala.scalanative.posix.sys.statOps.statOps
+import scala.scalanative.posix.timeOps.timespecValueOps
 // Import narrowly: scalanative.unsafe also exports a `define`, which would shadow ours.
 import scala.scalanative.unsafe.{CString, Ptr, Zone, extern, fromCString, stackalloc, toCString}
 import scala.scalanative.unsigned.{UInt, UnsignedRichInt}
@@ -96,8 +99,7 @@ object BuiltinsSys:
     }
     define("fileMtime", 1, 1, "fs", "fileMtime(path)",
       "Last modification time in milliseconds since the epoch, or -1 when missing.") { a =>
-      val f = new File(argStr(a, 0, "fileMtime"))
-      VInt.of(if f.exists() then f.lastModified() else -1L)
+      VInt.of(mtimeMillis(argStr(a, 0, "fileMtime")))
     }
 
     define("copyFile", 2, 2, "fs", "copyFile(from, to)", "Copies a file, replacing the destination.") { a =>
@@ -287,6 +289,21 @@ object BuiltinsSys:
     raw.flatMap { p =>
       try Some(new File(p).getCanonicalPath)
       catch case _: java.io.IOException => None
+    }
+
+  /**
+   * Modification time in milliseconds.
+   *
+   * `File.lastModified` reports whole seconds here, which is coarse enough for a
+   * build tool to miss an edit made in the same second as the build that preceded
+   * it — and coarser than the compiled runtime, which reads the nanosecond field
+   * and so answered differently. stat(2) has what both need.
+   */
+  private def mtimeMillis(path: String): Long =
+    Zone.acquire { implicit z =>
+      val st = stackalloc[stat.stat]()
+      if stat.stat(toCString(path), st) != 0 then -1L
+      else st.st_mtim.tv_sec.toLong * 1000L + st.st_mtim.tv_nsec.toLong / 1000000L
     }
 
   private def envVar(name: String): String =

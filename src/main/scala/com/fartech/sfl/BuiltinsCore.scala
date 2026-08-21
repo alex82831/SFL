@@ -42,12 +42,12 @@ object BuiltinsCore:
       if a.nonEmpty then
         Console.out.print(a(0).display)
         Console.out.flush()
-      val line = scala.io.StdIn.readLine()
+      val line = Stdin.readLine()
       if line == null then VNull else VStr(line)
     }
 
     define("readAll", 0, 0, "io", "readAll()", "Reads all of standard input as one string.") { _ =>
-      VStr(FileUtil.readStream(System.in))
+      VStr(Stdin.readAll())
     }
 
   private def joined(a: Array[Value]): String =
@@ -58,7 +58,7 @@ object BuiltinsCore:
       var i = 0
       while i < a.length do
         if i > 0 then sb.append(' ')
-        a(i).write(sb, quoted = false)
+        a(i).write(sb, quoted = false, 0)
         i += 1
       sb.toString
 
@@ -227,3 +227,39 @@ object BuiltinsCore:
         "maxArity" -> VInt.of(native.maxArity.toLong)
       ))
     }
+
+/**
+ * Standard input, read through one buffer.
+ *
+ * `readLine` and `readAll` are two views of the same stream, so they have to share
+ * the place the bytes are held: a reader of its own for each would let the first
+ * one buffer ahead and the second find an empty stream — which is what happened,
+ * silently, to everything typed after the first line. The C runtime reads both
+ * through one FILE\*, and this is the same arrangement.
+ */
+private object Stdin:
+  private val in = new java.io.BufferedInputStream(System.in, 8192)
+
+  /** The next line without its terminator, or null at the end of input. */
+  def readLine(): String =
+    val buf = new java.io.ByteArrayOutputStream(128)
+    var b = in.read()
+    if b < 0 then return null
+    while b >= 0 && b != '\n' do
+      buf.write(b)
+      b = in.read()
+    val bytes = buf.toByteArray
+    // A CRLF terminator: the '\r' belongs to the line ending, not to the line.
+    val n = if bytes.length > 0 && bytes(bytes.length - 1) == '\r'.toByte then bytes.length - 1
+            else bytes.length
+    new String(bytes, 0, n, java.nio.charset.StandardCharsets.UTF_8)
+
+  /** Everything that is left, decoded as UTF-8. */
+  def readAll(): String =
+    val out = new java.io.ByteArrayOutputStream(8192)
+    val chunk = new Array[Byte](8192)
+    var n = in.read(chunk)
+    while n > 0 do
+      out.write(chunk, 0, n)
+      n = in.read(chunk)
+    new String(out.toByteArray, java.nio.charset.StandardCharsets.UTF_8)

@@ -401,4 +401,30 @@ closeUdp(udpA) // close() twice is a no-op
 checkFails("use after close raises", () -> udpReceive(udpA, 10), "Socket closed")
 checkFails("poll refuses a closed udp socket", () -> poll([udpA], 10), "Socket closed")
 
+// processWrite writes without adding a newline, and flushes: the child sees the
+// bytes before the pipe is closed.
+val catP = processStart(["/bin/cat"])
+processWrite(catP, "no newline yet")
+processWrite(catP, " and more\n")
+check("processWrite reaches the child unbuffered", processReadLine(catP), "no newline yet and more")
+processCloseInput(catP)
+processWait(catP)
+checkFails("processWrite checks its handle",
+           () -> processWrite(byteBuf, "x"), "must be a process")
+
+// fileFlush pushes what a line handle has buffered without closing it.
+val flushed = tempFile(".flush")
+val fh = openFile(flushed, "w")
+fileWrite(fh, "partial")
+fileFlush(fh)
+check("fileFlush makes a partial write visible", readFile(flushed), "partial")
+fileWrite(fh, "-more")
+fileFlush(fh)
+check("fileFlush again appends", readFile(flushed), "partial-more")
+check("fileFlush returns null", fileFlush(fh), null)
+fileClose(fh)
+check("closing flushes too", readFile(flushed), "partial-more")
+removeFile(flushed)
+checkFails("fileFlush checks its handle", () -> fileFlush(byteBuf), "must be a file")
+
 report("ipc")

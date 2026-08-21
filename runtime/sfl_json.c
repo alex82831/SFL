@@ -13,6 +13,7 @@
  */
 #include "sfl.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -338,27 +339,68 @@ SflVal sfl_p_jsonParse(int64_t argc, SflVal *argv) {
  * interpreter does and what keeps jsonStringify usable for debug output.
  */
 /*
+ * Appends one step to the path being reported, and answers where the next step
+ * starts. A deeply nested value runs the path past the buffer long before it runs
+ * anything else out, and snprintf answers with the length it *would* have written
+ * — so the offset has to be clamped here, or the next call writes past the end.
+ */
+static size_t path_push(char *path, size_t cap, size_t at, const char *step) {
+  if (at >= cap - 1) return cap - 1;
+  size_t room = cap - at;
+  int n = snprintf(path + at, room, "%s", step);
+  if (n <= 0) return at;
+  size_t next = at + (size_t)n;
+  return next < cap - 1 ? next : cap - 1;
+}
+
+static size_t path_push2(char *path, size_t cap, size_t at, const char *a, const char *b) {
+  if (at >= cap - 1) return cap - 1;
+  size_t room = cap - at;
+  int n = snprintf(path + at, room, "%s%s", a, b);
+  if (n <= 0) return at;
+  size_t next = at + (size_t)n;
+  return next < cap - 1 ? next : cap - 1;
+}
+
+/*
  * Refuses a value JSON cannot represent.
  *
  * Rendering a function produced `<fn lambda/0>`, which is not JSON and which this
  * module's own parser rejects — so the output looked like a result and was not one.
  * The path is reported because the offending value is usually nested.
  */
-static void json_reject(SflVal v, char *path, size_t cap, size_t at) {
+static void json_reject(SflVal v, char *path, size_t cap, size_t at, int64_t depth) {
   switch (v->tag) {
+    case SFL_FLOAT: {
+      /* NaN and the infinities have no JSON spelling: emitting them produced text
+         this module's own parser rejects. */
+      if (!isnan(v->u.d) && !isinf(v->u.d)) return;
+      char shown[64], msg[160], hint[320];
+      sfl_write_double(shown, sizeof shown, v->u.d);
+      snprintf(msg, sizeof msg, "jsonStringify: cannot convert %s to JSON", shown);
+      if (at == 0)
+        snprintf(hint, sizeof hint, "JSON has no spelling for NaN or infinity");
+      else
+        snprintf(hint, sizeof hint,
+                 "the number at %s is %s, which JSON cannot spell", path, shown);
+      sfl_raise_hint(msg, hint);
+    }
     case SFL_ARR:
+      sfl_check_nesting(depth);
       for (uint32_t i = 0; i < v->aux; i++) {
-        int n = snprintf(path + at, cap - at, "[%u]", i);
-        json_reject(v->u.a.items[i], path, cap, n > 0 ? at + (size_t)n : at);
+        char step[32];
+        snprintf(step, sizeof step, "[%u]", i);
+        json_reject(v->u.a.items[i], path, cap, path_push(path, cap, at, step), depth + 1);
         path[at] = '\0';
       }
       return;
     case SFL_OBJ:
+      sfl_check_nesting(depth);
       for (uint32_t i = 0; i < v->aux; i++) {
         char *key = sfl_str_dup_utf8(v->u.o.keys[i]);
-        int n = snprintf(path + at, cap - at, ".%s", key);
+        size_t next = path_push2(path, cap, at, ".", key);
         sfl_raw_free(key);
-        json_reject(v->u.o.vals[i], path, cap, n > 0 ? at + (size_t)n : at);
+        json_reject(v->u.o.vals[i], path, cap, next, depth + 1);
         path[at] = '\0';
       }
       return;
@@ -396,7 +438,7 @@ static void json_reject(SflVal v, char *path, size_t cap, size_t at) {
 SflVal sfl_p_jsonStringify(int64_t argc, SflVal *argv) {
   char path[512];
   path[0] = '\0';
-  json_reject(argv[0], path, sizeof path, 0);
+  json_reject(argv[0], path, sizeof path, 0, 0);
   if (sfl_truthy(sfl_opt(argc, argv, 1))) return sfl_pretty(argv[0], 2);
   return sfl_repr(argv[0]);
 }

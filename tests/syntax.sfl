@@ -1,0 +1,148 @@
+// The syntax coverage gate: every keyword, operator, bracket and literal form the
+// language has must appear in a suite.
+//
+// The list is not written here — it is read from `sfl syntax`, the same dump the
+// editors generate their tables from, so a new keyword or operator arrives in this
+// check the moment it is added to the lexer. What the suites are searched in is
+// their code: comments and string literals are stripped first, so a keyword that
+// only ever appears in prose does not count as tested.
+import "lib/assert"
+
+val sfl = getEnv("SFL")
+if (isNull(sfl)) then error("syntax: set SFL to the binary under test")
+val here = dirName(absPath(scriptPath()))
+
+val dump = execute(sfl + " syntax")
+check("the syntax dump is available", dump.code, 0)
+val syntax = jsonParse(dump.out)
+
+// ------------------------------------------------------- reading the suites
+
+// Strips comments and string literals, leaving the code. Line comments run to the
+// newline, block comments to the first `*/`, and a string ends at its own quote
+// with backslash escapes skipped over — enough to keep a keyword inside text from
+// counting as a use of it.
+def stripText(src) {
+  val out = []
+  val n = length(src)
+  var i = 0
+  while (i < n) {
+    val c = charAt(src, i)
+    val next = if (i + 1 < n) then charAt(src, i + 1) else ""
+    if (c == "/" && next == "/") {
+      while (i < n && charAt(src, i) != "\n") { i += 1 }
+    } elsif (c == "/" && next == "*") {
+      i += 2
+      while (i + 1 < n && !(charAt(src, i) == "*" && charAt(src, i + 1) == "/")) { i += 1 }
+      i += 2
+    } elsif (c == "\"" && next == "\"" && i + 2 < n && charAt(src, i + 2) == "\"") {
+      i += 3
+      while (i + 2 < n && !(charAt(src, i) == "\"" && charAt(src, i + 1) == "\"" &&
+                            charAt(src, i + 2) == "\"")) { i += 1 }
+      i += 3
+    } elsif (c == "\"" || c == "'") {
+      val quote = c
+      i += 1
+      while (i < n && charAt(src, i) != quote) {
+        if (charAt(src, i) == "\\") then i += 1
+        i += 1
+      }
+      i += 1
+    } else {
+      push(out, c)
+      i += 1
+    }
+  }
+  join(out, "")
+}
+
+def sflUnder(dir, out) {
+  val entries = listFiles(dir)
+  if (isNull(entries)) then return out
+  for (e in entries) {
+    val p = joinPath(dir, e)
+    if (isDir(p)) then sflUnder(p, out)
+    elsif (endsWith(e, ".sfl")) then push(out, p)
+  }
+  out
+}
+
+val files = sflUnder(here, [])
+checkTrue("there are suites to read", length(files) > 50)
+
+var code = ""
+for (f in files) {
+  // This file names every keyword and operator to look for; counting itself
+  // would make the check pass no matter what the suites do.
+  if (!endsWith(f, "/syntax.sfl")) then code += stripText(readFile(f)) + "\n"
+}
+checkTrue("the suites have code in them", length(code) > 100000)
+
+check("stripping leaves code alone", trim(stripText("val a = 1")), "val a = 1")
+check("stripping removes a line comment", trim(stripText("val a = 1 // for while")), "val a = 1")
+check("stripping removes a block comment", trim(stripText("val /* if else */ a = 1")),
+      "val  a = 1")
+check("stripping removes a string", trim(stripText("val a = \"break continue\"")), "val a =")
+check("stripping removes a single-quoted string", trim(stripText("val a = 'select'")), "val a =")
+check("stripping keeps an escaped quote inside a string",
+      trim(stripText("val a = \"x\\\"y\" + b")), "val a =  + b")
+
+// ------------------------------------------------------------- the keywords
+
+// A keyword counts when it stands alone: `in` inside `insert` is not a use of it.
+def usesWord(word) = regexFind(code, "(^|[^A-Za-z0-9_])" + word + "([^A-Za-z0-9_]|$)") != null
+
+val missingWords = filter(syntax.keywords, (k) -> !usesWord(k))
+check("every keyword appears in a suite", missingWords, [])
+checkTrue("there are keywords to check", length(syntax.keywords) >= 20)
+
+// ------------------------------------------------------------ the operators
+
+// Operators are punctuation, so the longest spelling has to be looked for first:
+// `+` occurs inside `+=`, and `<` inside `<=`. Counting a longer operator's
+// occurrences and subtracting them leaves the shorter one's own uses.
+def countOf(needle) {
+  var n = 0
+  var from = 0
+  var at = strFind(code, needle, from)
+  while (at >= 0) {
+    n += 1
+    at = strFind(code, needle, at + length(needle))
+  }
+  n
+}
+
+val ops = syntax.operators
+def usesOp(op) {
+  val longer = filter(ops, (other) -> other != op && contains(other, op))
+  var own = countOf(op)
+  for (other in longer) { own -= countOf(other) }
+  own > 0
+}
+
+val missingOps = filter(ops, (op) -> !usesOp(op))
+check("every operator appears in a suite", missingOps, [])
+checkTrue("there are operators to check", length(ops) >= 25)
+
+// --------------------------------------------------------------- the rest
+
+for (pair in syntax.brackets) {
+  checkTrue("the " + pair[0] + " bracket appears in a suite", contains(code, pair[0]))
+  checkTrue("the " + pair[1] + " bracket appears in a suite", contains(code, pair[1]))
+}
+checkTrue("line comments appear in a suite", contains(readFile(joinPath(here, "language.sfl")),
+                                                      syntax.lineComment))
+checkTrue("block comments appear in a suite",
+          contains(join(map(files, (f) -> readFile(f)), "\n"), syntax.blockComment[0]))
+
+// The literal forms the lexer knows, checked by running them rather than by
+// searching for them: a spelling that stopped working would still be findable.
+check("a double-quoted string", "a", "a")
+check("a single-quoted string", 'a', "a")
+check("a triple-quoted string", """a""", "a")
+check("interpolation", "${1 + 1}", "2")
+check("a raw string", r"a\d", "a" + "\\" + "d")
+check("a raw single-quoted string", r'a\d', "a" + "\\" + "d")
+check("a raw triple-quoted string", r"""a\d""", "a" + "\\" + "d")
+
+report("syntax")

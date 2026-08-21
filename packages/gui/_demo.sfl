@@ -152,7 +152,7 @@ def _dataTab(ctx) {
             for (x in xs) { if (x.id == it.id) { x.done = v } }
           })
         }}),
-        text(it.task, {grow: true, style: if (it.done) then {"text-decoration": "line-through"} else {}}),
+        text(it.task, {grow: true, style: if (it.done) then {"text-decoration": "line-through"} else object()}),
         button("✕", {kind: "ghost", small: true, onClick: () ->
           items.update(xs -> filter(xs, (x) -> x.id != it.id))})
       ], {gap: 8, key: it.id})),

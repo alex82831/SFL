@@ -19,26 +19,31 @@ sealed abstract class Value:
   /** Human-facing rendering: strings appear bare, as `print` should show them. */
   final def display: String =
     val sb = new StringBuilder
-    write(sb, quoted = false)
+    write(sb, quoted = false, 0)
     sb.toString
 
   /** Source-like rendering: strings are quoted and escaped. Used by the REPL echo. */
   final def repr: String =
     val sb = new StringBuilder
-    write(sb, quoted = true)
+    write(sb, quoted = true, 0)
     sb.toString
 
-  def write(sb: StringBuilder, quoted: Boolean): Unit
+  /**
+   * Appends this value's text. `depth` counts the containers already entered, so a
+   * structure that contains itself is reported rather than run into the stack; see
+   * [[Values.NestLimit]].
+   */
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit
 
 case object VNull extends Value:
   def typeName: String = "null"
   def truthy: Boolean = false
-  def write(sb: StringBuilder, quoted: Boolean): Unit = sb.append("null")
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit = sb.append("null")
 
 final class VBool private (val b: Boolean) extends Value:
   def typeName: String = "bool"
   def truthy: Boolean = b
-  def write(sb: StringBuilder, quoted: Boolean): Unit = sb.append(if b then "true" else "false")
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit = sb.append(if b then "true" else "false")
   override def equals(o: Any): Boolean = o match
     case that: VBool => that.b == b
     case _           => false
@@ -53,7 +58,7 @@ object VBool:
 final case class VInt(v: Long) extends Value:
   def typeName: String = "int"
   def truthy: Boolean = v != 0L
-  def write(sb: StringBuilder, quoted: Boolean): Unit = sb.append(v)
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit = sb.append(v)
 
 object VInt:
   // Loop counters and indices dominate integer allocation, so cache the common range.
@@ -71,12 +76,12 @@ object VInt:
 final case class VFloat(v: Double) extends Value:
   def typeName: String = "float"
   def truthy: Boolean = v != 0.0 && !java.lang.Double.isNaN(v)
-  def write(sb: StringBuilder, quoted: Boolean): Unit = sb.append(Values.formatDouble(v))
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit = sb.append(Values.formatDouble(v))
 
 final case class VStr(v: String) extends Value:
   def typeName: String = "string"
   def truthy: Boolean = v.nonEmpty
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
     if quoted then Values.quote(v, sb) else sb.append(v)
 
 object VStr:
@@ -86,12 +91,13 @@ final class VArr(val items: mutable.ArrayBuffer[Value]) extends Value:
   def typeName: String = "array"
   def truthy: Boolean = items.nonEmpty
   def length: Int = items.length
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
+    Values.checkNesting(depth)
     sb.append('[')
     var i = 0
     while i < items.length do
       if i > 0 then sb.append(", ")
-      items(i).write(sb, quoted = true)
+      items(i).write(sb, quoted = true, depth + 1)
       i += 1
     sb.append(']')
 
@@ -108,12 +114,13 @@ object VArr:
 final class VTuple(val items: Array[Value]) extends Value:
   def typeName: String = "tuple"
   def truthy: Boolean = true // always at least two elements; the parser has no 0/1-tuples
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
+    Values.checkNesting(depth)
     sb.append('(')
     var i = 0
     while i < items.length do
       if i > 0 then sb.append(", ")
-      items(i).write(sb, quoted = true)
+      items(i).write(sb, quoted = true, depth + 1)
       i += 1
     sb.append(')')
 
@@ -121,7 +128,8 @@ final class VTuple(val items: Array[Value]) extends Value:
 final class VObj(val fields: mutable.LinkedHashMap[String, Value]) extends Value:
   def typeName: String = "object"
   def truthy: Boolean = fields.nonEmpty
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
+    Values.checkNesting(depth)
     sb.append('{')
     var first = true
     for (k, v) <- fields do
@@ -129,7 +137,7 @@ final class VObj(val fields: mutable.LinkedHashMap[String, Value]) extends Value
       first = false
       Values.quote(k, sb)
       sb.append(": ")
-      v.write(sb, quoted = true)
+      v.write(sb, quoted = true, depth + 1)
     sb.append('}')
 
 object VObj:
@@ -141,7 +149,7 @@ object VObj:
 final class VFun(val proto: FnProto, val env: Frame) extends Value:
   def typeName: String = "function"
   def truthy: Boolean = true
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
     sb.append("<fn ").append(proto.name).append('/').append(proto.params.length).append('>')
 
 /**
@@ -154,7 +162,7 @@ final class VFun(val proto: FnProto, val env: Frame) extends Value:
 final class VLazyStdlib(val module: String, val name: String) extends Value:
   def typeName: String = "function"
   def truthy: Boolean = true
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
     sb.append("<builtin ").append(name).append('>')
 
 /** A builtin implemented in Scala. `maxArity` of -1 means variadic. */
@@ -169,14 +177,14 @@ final class VNative(
 ) extends Value:
   def typeName: String = "function"
   def truthy: Boolean = true
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
     sb.append("<builtin ").append(name).append('>')
 
 /** Handle returned by `iter`, consumed by `hasNext` / `iterNext`. */
 final class VIter(val it: Iterator[Value], val over: String) extends Value:
   def typeName: String = "iterator"
   def truthy: Boolean = true
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
     sb.append("<iterator over ").append(over).append('>')
 
 /**
@@ -187,7 +195,7 @@ final class VIter(val it: Iterator[Value], val over: String) extends Value:
 final class VHandle(val kind: String, val payload: Any, val label: String) extends Value:
   def typeName: String = kind
   def truthy: Boolean = true
-  def write(sb: StringBuilder, quoted: Boolean): Unit =
+  def write(sb: StringBuilder, quoted: Boolean, depth: Int): Unit =
     sb.append('<').append(kind)
     if label.nonEmpty then sb.append(' ').append(label)
     sb.append('>')
@@ -267,8 +275,13 @@ object Values:
    * Structural equality as the language sees it. Ints and floats compare by numeric
    * value so `1 == 1.0` holds; containers compare element-wise.
    */
-  def equal(a: Value, b: Value): Boolean =
-    if a eq b then true
+  def equal(a: Value, b: Value): Boolean = equal(a, b, 0)
+
+  private def equal(a: Value, b: Value, depth: Int): Boolean =
+    // Identity settles it for everything except a NaN, which IEEE says is equal to
+    // nothing at all — including the very same NaN, so `n == n` is false there just
+    // as `NAN() == NAN()` is.
+    if (a eq b) && !isNan(a) then true
     else
       a match
         case VInt(x) =>
@@ -285,6 +298,7 @@ object Values:
         case x: VBool => b match { case y: VBool => x.b == y.b; case _ => false }
         case VNull    => b eq VNull
         case x: VArr =>
+          checkNesting(depth)
           b match
             case y: VArr =>
               if x.items.length != y.items.length then false
@@ -292,11 +306,12 @@ object Values:
                 var i = 0
                 var eq = true
                 while eq && i < x.items.length do
-                  if !equal(x.items(i), y.items(i)) then eq = false
+                  if !equal(x.items(i), y.items(i), depth + 1) then eq = false
                   i += 1
                 eq
             case _ => false
         case x: VTuple =>
+          checkNesting(depth)
           b match
             case y: VTuple =>
               if x.items.length != y.items.length then false
@@ -304,20 +319,27 @@ object Values:
                 var i = 0
                 var eq = true
                 while eq && i < x.items.length do
-                  if !equal(x.items(i), y.items(i)) then eq = false
+                  if !equal(x.items(i), y.items(i), depth + 1) then eq = false
                   i += 1
                 eq
             case _ => false
         case x: VObj =>
+          checkNesting(depth)
           b match
             case y: VObj =>
               if x.fields.size != y.fields.size then false
-              else x.fields.forall { case (k, v) => y.fields.get(k).exists(equal(v, _)) }
+              else x.fields.forall { case (k, v) => y.fields.get(k).exists(equal(v, _, depth + 1)) }
             case _ => false
         case _ => false
 
+  private def isNan(v: Value): Boolean = v match
+    case VFloat(d) => java.lang.Double.isNaN(d)
+    case _         => false
+
   /** Ordering for `<`, `<=`, `>`, `>=`. Only numbers, strings and bools are ordered. */
-  def compare(a: Value, b: Value): Int = a match
+  def compare(a: Value, b: Value): Int = compare(a, b, 0)
+
+  private def compare(a: Value, b: Value, depth: Int): Int = a match
     case VInt(x) =>
       b match
         case VInt(y)   => java.lang.Long.compare(x, y)
@@ -335,15 +357,33 @@ object Values:
         case y: VTuple =>
           // Lexicographic, length last — so ("b", 1) sorts after ("a", 9), which is
           // what sorting an array of pairs needs.
+          checkNesting(depth)
           val n = math.min(x.items.length, y.items.length)
           var i = 0
           while i < n do
-            val c = compare(x.items(i), y.items(i))
+            val c = compare(x.items(i), y.items(i), depth + 1)
             if c != 0 then return c
             i += 1
           Integer.compare(x.items.length, y.items.length)
         case _ => incomparable(a, b)
     case _        => incomparable(a, b)
+
+  /**
+   * How many containers a walk over a value may enter. A structure that contains
+   * itself has no bottom, and every recursive walk here — rendering, equality,
+   * ordering, JSON, deep copying — would otherwise run off the stack and take the
+   * whole process with it. The limit sits far above any structure real data has and
+   * far below what the stack can hold, so the only thing it ever catches is a cycle.
+   */
+  final val NestLimit = 10000
+
+  def checkNesting(depth: Int): Unit =
+    if depth >= NestLimit then
+      Err.evalHint(
+        "structure is nested too deeply",
+        s"a value may not nest more than $NestLimit deep",
+        "a container that contains itself, directly or through another, has no end"
+      )
 
   private def incomparable(a: Value, b: Value): Nothing =
     Err.eval(s"cannot compare ${a.typeName} with ${b.typeName}")
@@ -360,6 +400,7 @@ object Values:
     def pad(n: Int): Unit = { var i = 0; while i < n * indent do { sb.append(' '); i += 1 } }
     v match
       case a: VArr if a.items.nonEmpty =>
+        checkNesting(depth)
         sb.append("[\n")
         var i = 0
         while i < a.items.length do
@@ -371,6 +412,7 @@ object Values:
         pad(depth)
         sb.append(']')
       case o: VObj if o.fields.nonEmpty =>
+        checkNesting(depth)
         sb.append("{\n")
         var i = 0
         val n = o.fields.size
@@ -384,4 +426,4 @@ object Values:
           i += 1
         pad(depth)
         sb.append('}')
-      case other => other.write(sb, quoted = true)
+      case other => other.write(sb, quoted = true, depth)

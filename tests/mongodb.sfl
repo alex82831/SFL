@@ -1,0 +1,245 @@
+// The mongodb package held against a fake server: the byte and BSON layers are
+// pure and test on their own, and the wire layer, SCRAM handshake and client API
+// run against an in-process server that speaks just enough of OP_MSG over a real
+// socket — so the driver's framing, authentication and conversions are checked
+// without a mongod anywhere near.
+import "lib/assert"
+import "../packages/mongodb/bytes" open
+import "../packages/mongodb/bson" open
+import "../packages/mongodb/wire" open
+import "../packages/mongodb/scram" open
+import "../packages/mongodb/main"
+
+// ------------------------------------------------------- little-endian bytes
+
+check("bytesAppend appends in place", { val d = [1]; bytesAppend(d, [2, 3]); d }, [1, 2, 3])
+check("bytesAppend of nothing", { val d = [1]; bytesAppend(d, []); d }, [1])
+check("bytesAppend returns the destination", bytesAppend([1], [2]), [1, 2])
+check("bytesSlice", bytesSlice([1, 2, 3, 4], 1, 3), [2, 3])
+check("bytesSlice of nothing", bytesSlice([1, 2], 1, 1), [])
+check("bytesSlice copies", { val b = [1, 2]; val s = bytesSlice(b, 0, 2); push(s, 3); b }, [1, 2])
+
+check("pushI32le", { val o = []; pushI32le(o, 1); o }, [1, 0, 0, 0])
+check("pushI32le of a big value", { val o = []; pushI32le(o, 0x01020304); o },
+      [4, 3, 2, 1])
+check("pushI32le of a negative", { val o = []; pushI32le(o, -1); o }, [255, 255, 255, 255])
+check("pushI64le", { val o = []; pushI64le(o, 1); o }, [1, 0, 0, 0, 0, 0, 0, 0])
+check("pushI64le of a negative", { val o = []; pushI64le(o, -1); o }, newArray(8, 255))
+check("pushF64le round trips", { val o = []; pushF64le(o, 2.5); readF64le(o, 0) }, 2.5)
+check("readI32le", readI32le([1, 0, 0, 0], 0), 1)
+check("readI32le at an offset", readI32le([9, 1, 0, 0, 0], 1), 1)
+check("readI32le of a negative", readI32le([255, 255, 255, 255], 0), -1)
+check("readI64le", readI64le([1, 0, 0, 0, 0, 0, 0, 0], 0), 1)
+check("readI64le of a negative", readI64le(newArray(8, 255), 0), -1)
+check("readI64le keeps a wide value", { val o = []; pushI64le(o, 9007199254740993); readI64le(o, 0) },
+      9007199254740993)
+check("readF64le of zero", { val o = []; pushF64le(o, 0.0); readF64le(o, 0) }, 0.0)
+check("patchI32le overwrites in place",
+      { val o = [0, 0, 0, 0, 9]; patchI32le(o, 0, 258); o }, [2, 1, 0, 0, 9])
+check("i32 round trips through the maximum",
+      { val o = []; pushI32le(o, 2147483647); readI32le(o, 0) }, 2147483647)
+
+// ---------------------------------------------------------------------- BSON
+
+check("BSON round trips a string", bsonDecode(bsonEncode({"s": "text"})), {"s": "text"})
+check("BSON round trips an int", bsonDecode(bsonEncode({"i": 42})), {"i": 42})
+check("BSON round trips a wide int", bsonDecode(bsonEncode({"i": 9007199254740993})),
+      {"i": 9007199254740993})
+check("BSON round trips a float", bsonDecode(bsonEncode({"f": 2.5})), {"f": 2.5})
+check("BSON round trips the bools", bsonDecode(bsonEncode({"y": true, "n": false})),
+      {"y": true, "n": false})
+check("BSON round trips null", bsonDecode(bsonEncode({"z": null})), {"z": null})
+check("BSON round trips an array", bsonDecode(bsonEncode({"a": [1, "two", [3]]})),
+      {"a": [1, "two", [3]]})
+check("BSON round trips a nested document", bsonDecode(bsonEncode({"n": {"a": {"b": 1}}})),
+      {"n": {"a": {"b": 1}}})
+check("BSON round trips an empty document", bsonDecode(bsonEncode({})), {})
+check("BSON round trips an empty array", bsonDecode(bsonEncode({"a": []})), {"a": []})
+check("BSON round trips non-ASCII text", bsonDecode(bsonEncode({"s": "中文 — ok"})),
+      {"s": "中文 — ok"})
+check("BSON keeps key order", keys(bsonDecode(bsonEncode({"b": 1, "a": 2}))), ["b", "a"])
+check("a document starts with its own length",
+      readI32le(bsonEncode({}), 0), length(bsonEncode({})))
+check("an empty document is five bytes", bsonEncode({}), [5, 0, 0, 0, 0])
+
+check("objectId wrapper round trips",
+      bsonDecode(bsonEncode({"id": {"$oid": "662f0a1b2c3d4e5f60718293"}})),
+      {"id": {"$oid": "662f0a1b2c3d4e5f60718293"}})
+check("date wrapper round trips", bsonDecode(bsonEncode({"w": {"$date": 1723972000000}})),
+      {"w": {"$date": 1723972000000}})
+check("binary wrapper round trips",
+      bsonDecode(bsonEncode({"b": {"$binary": [0, 128, 255], "$subtype": 0}})),
+      {"b": {"$binary": [0, 128, 255], "$subtype": 0}})
+check("regex wrapper round trips",
+      bsonDecode(bsonEncode({"p": {"$regex": "^a.*z$", "$options": "i"}})),
+      {"p": {"$regex": "^a.*z$", "$options": "i"}})
+
+check("binary builds the wrapper", mongodb.binary([1, 2]), {"$binary": [1, 2], "$subtype": 0})
+check("binary takes a subtype", mongodb.binary([1], 4), {"$binary": [1], "$subtype": 4})
+check("date builds the wrapper", mongodb.date(0), {"$date": 0})
+check("regex builds the wrapper", mongodb.regex("^a$", "i"),
+      {"$regex": "^a$", "$options": "i"})
+check("regex defaults to no options", mongodb.regex("^a$"), {"$regex": "^a$", "$options": ""})
+
+val oid = mongodb.objectId()
+check("objectId is twenty-four hex characters", length(oid["$oid"]), 24)
+checkTrue("objectId is hex", matches(oid["$oid"], "^[0-9a-f]{24}$"))
+checkTrue("objectId carries its creation time", mongodb.objectIdTime(oid) > 1600000000000)
+checkTrue("two objectIds differ", mongodb.objectId()["$oid"] != oid["$oid"])
+check("objectIdTime reads the seconds back",
+      mongodb.objectIdTime({"$oid": "00000001" + "0000000000000000"}), 1000)
+
+// -------------------------------------------------------- a fake mongod
+
+// One connection, one thread: read an OP_MSG, hand the command to a responder,
+// write the reply back in the same framing.
+def _readN(sock, n) {
+  val out = []
+  while (length(out) < n) {
+    val chunk = socketReadBytes(sock, n - length(out), 4000)
+    if (isNull(chunk) || length(chunk) == 0) then return null
+    bytesAppend(out, chunk)
+  }
+  out
+}
+
+def _readCommand(sock) {
+  val head = _readN(sock, 16)
+  if (isNull(head)) then return null
+  val total = readI32le(head, 0)
+  val requestId = readI32le(head, 4)
+  val rest = _readN(sock, total - 16)
+  if (isNull(rest)) then return null
+  // flags (4) then a kind-0 section marker, then the document.
+  {requestId: requestId, doc: bsonDecode(bytesSlice(rest, 5, length(rest)))}
+}
+
+def _reply(sock, responseTo, doc) {
+  val body = bsonEncode(doc)
+  val msg = []
+  pushI32le(msg, 0)              // placeholder length
+  pushI32le(msg, 1)              // response id
+  pushI32le(msg, responseTo)
+  pushI32le(msg, 2013)           // OP_MSG
+  pushI32le(msg, 0)              // flag bits
+  push(msg, 0)                   // section kind 0
+  bytesAppend(msg, body)
+  patchI32le(msg, 0, length(msg))
+  socketWriteBytes(sock, msg)
+}
+
+// Starts a server that answers each command from `answers`, keyed by the first
+// key of the command document, and returns its port.
+def _fakeMongo(answers, seen) {
+  val srv = serverSocket(0)
+  spawn(() -> {
+    val sock = accept(srv, 4000)
+    var go = true
+    while (go) {
+      val got = attempt(() -> _readCommand(sock))
+      if (!got.ok || isNull(got.value)) {
+        go = false
+      } else {
+        val cmd = got.value.doc
+        push(seen, cmd)
+        val name = keys(cmd)[0]
+        val answer = get(answers, name, {"ok": 1})
+        _reply(sock, got.value.requestId, answer)
+      }
+    }
+    closeSocket(sock)
+    closeServer(srv)
+  })
+  serverPort(srv)
+}
+
+// wireCommand and wireRun, against that server.
+val seen = []
+val port = _fakeMongo({
+  "hello": {"ok": 1, "maxWireVersion": 17, "saslSupportedMechs": ["SCRAM-SHA-256"]},
+  "ping": {"ok": 1, "pong": true},
+  "boom": {"ok": 0, "errmsg": "no such command", "code": 59}
+}, seen)
+val state = {sock: std.connect("127.0.0.1", port, 4000), timeoutMs: 4000, lock: mutex()}
+
+check("wireCommand sends and reads a reply", wireCommand(state, {"ping": 1}).pong, true)
+check("wireRun adds the database", { wireRun(state, "admin", {"ping": 1}); last(seen)["$db"] },
+      "admin")
+check("wireRun returns the document", wireRun(state, "admin", {"ping": 1}).ok, 1)
+checkFails("wireRun raises on a failed command",
+           () -> wireRun(state, "admin", {"boom": 1}), "no such command")
+check("the command document reached the server", seen[0].ping, 1)
+closeSocket(state.sock)
+
+// ------------------------------------------------------------------ SCRAM
+
+// The handshake is checked end to end against a server that runs the same
+// algorithm from the other side, so a change on either side is caught.
+def _scramServer(user, password) {
+  val srv = serverSocket(0)
+  spawn(() -> {
+    val sock = accept(srv, 4000)
+    val salt = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    val iterations = 4096
+    var clientFirstBare = ""
+    var serverFirst = ""
+    var go = true
+    while (go) {
+      val got = attempt(() -> _readCommand(sock))
+      if (!got.ok || isNull(got.value)) {
+        go = false
+      } else {
+        val cmd = got.value.doc
+        if (has(cmd, "saslStart")) {
+          val text = utf8Decode(cmd.payload["$binary"])
+          clientFirstBare = subString(text, 3, length(text))
+          val nonce = "0123456789abcdef"
+          val cnonce = _fieldOf(clientFirstBare, "r")
+          serverFirst = "r=" + cnonce + nonce + ",s=" + base64EncodeBytes(salt) +
+            ",i=" + toString(iterations)
+          _reply(sock, got.value.requestId, {
+            "ok": 1, "conversationId": 1, "done": false,
+            "payload": {"$binary": utf8Encode(serverFirst), "$subtype": 0}
+          })
+        } elsif (has(cmd, "saslContinue")) {
+          val text = utf8Decode(cmd.payload["$binary"])
+          val saltedPassword = pbkdf2("sha256", utf8Encode(password), salt, iterations, 32)
+          val serverKey = hmacBytes("sha256", saltedPassword, utf8Encode("Server Key"))
+          val withoutProof = subString(text, 0, strFind(text, ",p="))
+          val authMessage = clientFirstBare + "," + serverFirst + "," + withoutProof
+          val sig = hmacBytes("sha256", serverKey, utf8Encode(authMessage))
+          _reply(sock, got.value.requestId, {
+            "ok": 1, "conversationId": 1, "done": true,
+            "payload": {"$binary": utf8Encode("v=" + base64EncodeBytes(sig)), "$subtype": 0}
+          })
+        } else {
+          _reply(sock, got.value.requestId, {"ok": 1})
+        }
+      }
+    }
+    closeSocket(sock)
+    closeServer(srv)
+  })
+  serverPort(srv)
+}
+
+def _fieldOf(text, name) {
+  for (part in split(text, ",")) {
+    if (startsWith(part, name + "=")) then return subString(part, length(name) + 1, length(part))
+  }
+  null
+}
+
+val authPort = _scramServer("bob", "s3cret")
+val authState = {sock: std.connect("127.0.0.1", authPort, 4000), timeoutMs: 4000, lock: mutex()}
+check("SCRAM-SHA-256 completes",
+      attempt(() -> scramAuth(authState, "bob", "s3cret", "admin", "SCRAM-SHA-256")).ok, true)
+closeSocket(authState.sock)
+
+val badPort = _scramServer("bob", "s3cret")
+val badState = {sock: std.connect("127.0.0.1", badPort, 4000), timeoutMs: 4000, lock: mutex()}
+checkFails("SCRAM rejects the wrong password",
+           () -> scramAuth(badState, "bob", "wrong", "admin", "SCRAM-SHA-256"), "mongodb")
+closeSocket(badState.sock)
+
+report("mongodb")

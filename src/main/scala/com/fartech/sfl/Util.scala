@@ -42,7 +42,7 @@ object FileUtil:
 object Json:
 
   def stringify(v: Value, pretty: Boolean): String =
-    reject(v, new StringBuilder)
+    reject(v, new StringBuilder, 0)
     if pretty then Values.pretty(v) else v.repr
 
   /**
@@ -52,21 +52,29 @@ object Json:
    * module's own parser rejects — so the output looked like a result and was not one.
    * The path is reported because the offending value is usually nested.
    */
-  private def reject(v: Value, path: StringBuilder): Unit = v match
+  private def reject(v: Value, path: StringBuilder, depth: Int): Unit = v match
     case a: VArr =>
+      Values.checkNesting(depth)
       var i = 0
       while i < a.items.length do
         val mark = path.length
         path.append('[').append(i).append(']')
-        reject(a.items(i), path)
+        reject(a.items(i), path, depth + 1)
         path.setLength(mark)
         i += 1
     case o: VObj =>
+      Values.checkNesting(depth)
       for (k, field) <- o.fields do
         val mark = path.length
         path.append('.').append(k)
-        reject(field, path)
+        reject(field, path, depth + 1)
         path.setLength(mark)
+    case VFloat(d) if java.lang.Double.isNaN(d) || java.lang.Double.isInfinite(d) =>
+      Err.evalHint(
+        s"jsonStringify: cannot convert ${Values.formatDouble(d)} to JSON",
+        if path.isEmpty then "JSON has no spelling for NaN or infinity"
+        else s"the number at $path is ${Values.formatDouble(d)}, which JSON cannot spell"
+      )
     case _: VFun | _: VNative | _: VIter | _: VHandle | _: VTuple =>
       Err.evalHint(
         s"jsonStringify: cannot convert ${v.typeName} to JSON",

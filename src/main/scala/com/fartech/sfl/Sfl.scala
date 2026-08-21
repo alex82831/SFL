@@ -163,11 +163,19 @@ object Sfl:
     catch case e: EvalError => throw rt.decorate(e)
     finally rt.signal = Sig.None
 
-  def runFile(path: String): Value =
+  def runFile(path: String): Value = runFileInto(path, null)
+
+  /**
+   * Runs a file's source, optionally in a namespace of the caller's choosing.
+   * A script gets its own — that is what makes a file's top-level names its own —
+   * but the REPL's `:load` passes the session's, because a file loaded into a
+   * session is meant to define things the session can then call.
+   */
+  def runFileInto(path: String, ns: String): Value =
     val f = new File(path)
     if !f.isFile then Err.eval(s"cannot run '$path': no such file")
     importer = new Importer(if f.getParentFile != null then f.getParentFile else new File("."))
-    run(FileUtil.read(f), f.getPath)
+    run(FileUtil.read(f), f.getPath, ns)
 
   /**
    * Clears every user definition while keeping the builtins. The Globals object itself

@@ -6,6 +6,24 @@
 import "lib/assert"
 import "lib/wsc"
 import "gui" open
+// `demo()` is `demoApp()` plus `run()`: it serves until the last window has gone,
+// then stops by itself and hands the app back. Driven on a thread, with this
+// suite playing the window that arrives and then leaves. A port is chosen up
+// front because run() does not return one until it is over.
+val probe = serverSocket(0)
+val demoPort = serverPort(probe)
+closeServer(probe)
+val demoThread = spawn(() -> gui.demo({quiet: true, show: false, keepAlive: false,
+                                       graceMs: 100, port: demoPort}))
+sleep(500)
+val demoConn = guiDial(demoPort, guiToken(demoPort))
+check("demo serves the same app demoApp builds", demoConn.init.title, "SFL GUI Demo")
+closeSocket(demoConn.conn)
+val ended = withTimeout(demoThread, 10000)
+check("demo returns once the last window has gone", ended[0], true)
+checkTrue("and hands back the app it ran", isFunction(ended[1].url))
+checkTrue("which is no longer running", !ended[1].running())
+
 val app = gui.demoApp({quiet: true, graceMs: 100})
 app.start()
 val port = app.port()

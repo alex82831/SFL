@@ -27,6 +27,11 @@ SKIP=(
   "mysql:drives an in-process fake server on spawned threads; compiled coverage is tests/compile/accept/db_clients_compile.sfl"
   "postgres:drives an in-process fake server on spawned threads; compiled coverage is tests/compile/accept/db_clients_compile.sfl"
   "smtp:drives an in-process fake server on spawned threads plus an optional openssl certificate, so output is not byte-reproducible"
+  "mongodb:drives an in-process fake server on spawned threads; compiled coverage is tests/compile/accept/db_clients_compile.sfl"
+  "redis:drives an in-process fake server on spawned threads; compiled coverage is tests/compile/accept/db_clients_compile.sfl"
+  "coverage:reads the interpreter's own --ast output to decide what the suites reach, so compiling it would check nothing"
+  "pkgcoverage:reads the suites' text to decide what they call, so compiling it would check nothing"
+  "syntax:reads the suites' text to decide what syntax they use, so compiling it would check nothing"
 )
 
 work=$(mktemp -d)

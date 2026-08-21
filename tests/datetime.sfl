@@ -1,0 +1,149 @@
+// The datetime package: civil-calendar maths, fixed offsets and ISO 8601.
+//
+// Every instant here is written out in full, so the suite says the same thing on
+// any machine and in any zone — the package never reads the local clock.
+import "lib/assert"
+import "../packages/datetime/main"
+
+// ------------------------------------------------------------- civil maths
+
+check("the epoch is day zero", datetime.daysFromCivil(1970, 1, 1), 0)
+check("the day before the epoch", datetime.daysFromCivil(1969, 12, 31), -1)
+check("a day this century", datetime.daysFromCivil(2026, 8, 19), 20684)
+check("the first day of 2000", datetime.daysFromCivil(2000, 1, 1), 10957)
+check("a day before 1600", datetime.daysFromCivil(1599, 12, 31), -135141)
+check("civilFromDays inverts it", datetime.civilFromDays(0), {"year": 1970, "month": 1, "day": 1})
+check("civilFromDays before the epoch",
+      datetime.civilFromDays(-1), {"year": 1969, "month": 12, "day": 31})
+check("civilFromDays round trips",
+      datetime.civilFromDays(datetime.daysFromCivil(2026, 8, 19)),
+      {"year": 2026, "month": 8, "day": 19})
+check("civilFromDays round trips over a leap day",
+      datetime.civilFromDays(datetime.daysFromCivil(2028, 2, 29)),
+      {"year": 2028, "month": 2, "day": 29})
+
+checkTrue("a year divisible by four is a leap year", datetime.isLeapYear(2028))
+checkTrue("a year divisible by a hundred is not", !datetime.isLeapYear(2100))
+checkTrue("a year divisible by four hundred is", datetime.isLeapYear(2000))
+checkTrue("an ordinary year is not", !datetime.isLeapYear(2026))
+check("January has 31 days", datetime.daysInMonth(2026, 1), 31)
+check("February usually has 28", datetime.daysInMonth(2026, 2), 28)
+check("February in a leap year has 29", datetime.daysInMonth(2028, 2), 29)
+check("April has 30", datetime.daysInMonth(2026, 4), 30)
+check("December has 31", datetime.daysInMonth(2026, 12), 31)
+
+// -------------------------------------------------------------- make/parts
+
+check("make at the epoch", datetime.make(1970, 1, 1), 0)
+check("make counts milliseconds", datetime.make(1970, 1, 1, 0, 0, 1, 250), 1250)
+check("make reads a fixed offset", datetime.make(2026, 8, 19, 15, 30, 0, 0, 480),
+      datetime.make(2026, 8, 19, 7, 30))
+check("make before the epoch", datetime.make(1969, 12, 31, 23, 59, 59), -1000)
+
+val t = datetime.make(2026, 8, 19, 7, 30, 15, 250)
+val p = datetime.parts(t)
+check("parts year", p.year, 2026)
+check("parts month", p.month, 8)
+check("parts day", p.day, 19)
+check("parts hour", p.hour, 7)
+check("parts minute", p.minute, 30)
+check("parts second", p.second, 15)
+check("parts milliseconds", p.ms, 250)
+check("parts weekday, Monday is one", p.weekday, 3)
+check("parts yearday", p.yearday, 231)
+check("parts offset", p.offsetMinutes, 0)
+check("parts shifts with the offset", datetime.parts(t, 480).hour, 15)
+check("parts reports the offset it was given", datetime.parts(t, 480).offsetMinutes, 480)
+check("parts of a Sunday", datetime.parts(datetime.make(2026, 8, 23)).weekday, 7)
+check("parts of a Monday", datetime.parts(datetime.make(2026, 8, 24)).weekday, 1)
+check("parts before the epoch", datetime.parts(-1).year, 1969)
+check("parts before the epoch keeps the milliseconds", datetime.parts(-1).ms, 999)
+
+// -------------------------------------------------------------- arithmetic
+
+check("addDays", datetime.isoDate(datetime.addDays(datetime.make(2026, 8, 19), 13)), "2026-09-01")
+check("addDays backwards", datetime.isoDate(datetime.addDays(datetime.make(2026, 1, 1), -1)),
+      "2025-12-31")
+check("addHours", datetime.iso(datetime.addHours(datetime.make(2026, 8, 19, 23), 2)),
+      "2026-08-20T01:00:00Z")
+check("addMinutes", datetime.iso(datetime.addMinutes(datetime.make(2026, 8, 19), 90)),
+      "2026-08-19T01:30:00Z")
+check("addSeconds", datetime.iso(datetime.addSeconds(datetime.make(2026, 8, 19), 61)),
+      "2026-08-19T00:01:01Z")
+check("addMonths", datetime.isoDate(datetime.addMonths(datetime.make(2026, 8, 19), 6)),
+      "2027-02-19")
+check("addMonths clamps a long month into a short one",
+      datetime.isoDate(datetime.addMonths(datetime.make(2026, 1, 31), 1)), "2026-02-28")
+check("addMonths clamps into a leap February",
+      datetime.isoDate(datetime.addMonths(datetime.make(2028, 1, 31), 1)), "2028-02-29")
+check("addMonths backwards", datetime.isoDate(datetime.addMonths(datetime.make(2026, 3, 31), -1)),
+      "2026-02-28")
+check("addMonths keeps the time of day",
+      datetime.iso(datetime.addMonths(datetime.make(2026, 1, 15, 12, 34, 56), 1)),
+      "2026-02-15T12:34:56Z")
+check("addYears", datetime.isoDate(datetime.addYears(datetime.make(2026, 8, 19), 2)), "2028-08-19")
+check("addYears off a leap day",
+      datetime.isoDate(datetime.addYears(datetime.make(2028, 2, 29), 1)), "2029-02-28")
+
+check("diffDays", datetime.diffDays(datetime.make(2027, 1, 1), datetime.make(2026, 12, 25)), 7)
+check("diffDays truncates toward zero",
+      datetime.diffDays(datetime.make(2026, 1, 2, 11), datetime.make(2026, 1, 1)), 1)
+check("diffDays is negative the other way round",
+      datetime.diffDays(datetime.make(2026, 12, 25), datetime.make(2027, 1, 1)), -7)
+check("diffHours", datetime.diffHours(datetime.make(2026, 1, 2), datetime.make(2026, 1, 1)), 24)
+check("diffMinutes", datetime.diffMinutes(datetime.make(2026, 1, 1, 1), datetime.make(2026, 1, 1)), 60)
+check("diffSeconds", datetime.diffSeconds(datetime.make(2026, 1, 1, 0, 1), datetime.make(2026, 1, 1)), 60)
+
+check("startOfDay", datetime.iso(datetime.startOfDay(t)), "2026-08-19T00:00:00Z")
+check("startOfDay in an offset", datetime.iso(datetime.startOfDay(t, 480), 480),
+      "2026-08-19T00:00:00+08:00")
+check("startOfMonth", datetime.iso(datetime.startOfMonth(t)), "2026-08-01T00:00:00Z")
+check("startOfYear", datetime.iso(datetime.startOfYear(t)), "2026-01-01T00:00:00Z")
+check("startOfDay is idempotent", datetime.startOfDay(datetime.startOfDay(t)),
+      datetime.startOfDay(t))
+
+// ------------------------------------------------------------------- ISO
+
+check("iso", datetime.iso(datetime.make(2026, 8, 19, 7, 30)), "2026-08-19T07:30:00Z")
+check("iso shows milliseconds only when there are any",
+      datetime.iso(datetime.make(2026, 8, 19, 7, 30, 0, 250)), "2026-08-19T07:30:00.250Z")
+check("iso pads the milliseconds", datetime.iso(datetime.make(2026, 8, 19, 0, 0, 0, 5)),
+      "2026-08-19T00:00:00.005Z")
+check("iso spells a positive offset", datetime.iso(datetime.make(2026, 8, 19, 7, 30), 480),
+      "2026-08-19T15:30:00+08:00")
+check("iso spells a negative offset", datetime.iso(datetime.make(2026, 8, 19, 7, 30), -330),
+      "2026-08-19T02:00:00-05:30")
+check("iso before the epoch", datetime.iso(-1), "1969-12-31T23:59:59.999Z")
+check("isoDate", datetime.isoDate(t), "2026-08-19")
+check("isoDate in an offset", datetime.isoDate(datetime.make(2026, 8, 19, 20), 480), "2026-08-20")
+
+check("parse a bare date", datetime.iso(datetime.parse("2026-08-19")), "2026-08-19T00:00:00Z")
+check("parse a date and time", datetime.iso(datetime.parse("2026-08-19T15:30")),
+      "2026-08-19T15:30:00Z")
+check("parse with seconds", datetime.iso(datetime.parse("2026-08-19T15:30:45")),
+      "2026-08-19T15:30:45Z")
+check("parse with milliseconds", datetime.iso(datetime.parse("2026-08-19T15:30:45.250")),
+      "2026-08-19T15:30:45.250Z")
+check("parse with a Z", datetime.iso(datetime.parse("2026-08-19T15:30:00Z")),
+      "2026-08-19T15:30:00Z")
+check("parse with a colon offset", datetime.iso(datetime.parse("2026-08-19T15:30:00+08:00")),
+      "2026-08-19T07:30:00Z")
+check("parse with a compact offset", datetime.iso(datetime.parse("2026-08-19T15:30:00+0800")),
+      "2026-08-19T07:30:00Z")
+check("parse with a negative offset", datetime.iso(datetime.parse("2026-08-19T02:00:00-05:30")),
+      "2026-08-19T07:30:00Z")
+check("parse and iso round trip", datetime.iso(datetime.parse("2026-08-19T07:30:00Z")),
+      "2026-08-19T07:30:00Z")
+check("parse before the epoch", datetime.isoDate(datetime.parse("1969-07-20")), "1969-07-20")
+
+checkFails("parse rejects an empty string", () -> datetime.parse(""), "datetime")
+checkFails("parse rejects prose", () -> datetime.parse("yesterday"), "datetime")
+checkFails("parse rejects a bad month", () -> datetime.parse("2026-13-01"), "datetime")
+checkFails("parse rejects a bad day", () -> datetime.parse("2026-02-30"), "datetime")
+checkFails("parse rejects a bad hour", () -> datetime.parse("2026-08-19T25:00:00"), "datetime")
+checkFails("parse rejects trailing text", () -> datetime.parse("2026-08-19T15:30:00Zx"), "datetime")
+checkFails("parse rejects a space where the T goes",
+           () -> datetime.parse("2026-08-19 15:30:00"), "datetime")
+checkFails("parse rejects a number", () -> datetime.parse(20260819), "datetime")
+
+report("datetime")
