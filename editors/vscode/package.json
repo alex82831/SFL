@@ -1,8 +1,8 @@
 {
   "name": "sfl-lang",
   "displayName": "SFL",
-  "description": "SFL language support: syntax highlighting, diagnostics, completion, hover and signature help via the sfl language server.",
-  "version": "0.2.0",
+  "description": "SFL language support: highlighting, diagnostics, completion, navigation, debugging, and an SFL Projects view that builds and runs every build.sfl in the workspace.",
+  "version": "0.3.0",
   "publisher": "fartech",
   "license": "MIT",
   "engines": {
@@ -61,6 +61,31 @@
       {
         "command": "sfl.restartServer",
         "title": "SFL: Restart Language Server"
+      },
+      {
+        "command": "sfl.projects.refresh",
+        "title": "SFL: Reload Projects",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "sfl.projects.runTask",
+        "title": "SFL: Run Task",
+        "icon": "$(play)"
+      },
+      {
+        "command": "sfl.projects.buildAll",
+        "title": "SFL: Build All Projects",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "sfl.projects.openBuildFile",
+        "title": "SFL: Open build.sfl",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "sfl.projects.settings",
+        "title": "SFL: Open Settings",
+        "icon": "$(gear)"
       }
     ],
     "menus": {
@@ -94,6 +119,48 @@
         {
           "command": "sfl.compileFile",
           "when": "resourceLangId == sfl"
+        },
+        {
+          "command": "sfl.projects.runTask",
+          "when": "false"
+        },
+        {
+          "command": "sfl.projects.openBuildFile",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "sfl.projects.refresh",
+          "when": "view == sflProjects",
+          "group": "navigation@1"
+        },
+        {
+          "command": "sfl.projects.buildAll",
+          "when": "view == sflProjects",
+          "group": "navigation@2"
+        },
+        {
+          "command": "sfl.projects.settings",
+          "when": "view == sflProjects",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "sfl.projects.runTask",
+          "when": "view == sflProjects && viewItem == sflTask",
+          "group": "inline"
+        },
+        {
+          "command": "sfl.projects.runTask",
+          "when": "view == sflProjects && viewItem == sflProject",
+          "group": "inline"
+        },
+        {
+          "command": "sfl.projects.openBuildFile",
+          "when": "view == sflProjects && viewItem == sflProject",
+          "group": "navigation"
         }
       ]
     },
@@ -129,6 +196,10 @@
           "task": {
             "type": "string",
             "description": "The sfl build task to run (build, test, clean, or one defined in build.sfl)."
+          },
+          "project": {
+            "type": "string",
+            "description": "Project root to run in (defaults to the workspace folder)."
           }
         },
         "required": [
@@ -189,6 +260,31 @@
             }
           }
         ]
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sfl",
+          "title": "SFL",
+          "icon": "media/sfl-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "sfl": [
+        {
+          "id": "sflProjects",
+          "name": "Projects",
+          "icon": "media/sfl-activity.svg",
+          "contextualTitle": "SFL Projects"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "sflProjects",
+        "contents": "No build.sfl found in this workspace.\n[Create a Project](command:sfl.newProject)\n\nA project is a directory with a build.sfl; `sfl build init` scaffolds one."
       }
     ]
   },

@@ -37,6 +37,7 @@ SFL 语言支持：语法高亮、诊断、补全、悬停文档、签名提示�
 | **源码级调试**（F5，零配置） | `sfl dap`：断点、单步、调用栈、变量、悬停求值；无 launch.json 时直接调试当前文件 |
 | SFL: Debug File（标题栏 🐞） | 一键调试当前文件 |
 | 构建任务（⇧⌘B） | 工作区有 build.sfl 时提供 `sfl: build` 与 `sfl: test` 任务 |
+| **SFL Projects 视图**（活动栏 SFL 图标） | 工作区里每个 `build.sfl` 一个项目节点：任务、源文件、依赖（来自 `sfl build describe`）；点任务即运行（Terminal 面板）、点源文件即打开；标题栏：重载、Build All、设置；`build.sfl` 变化自动刷新 |
 
 ## 构建插件
 

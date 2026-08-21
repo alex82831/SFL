@@ -366,6 +366,7 @@ sfl build pkg                                                   # 库项目：�
 | 能力 | VSCode（`editors/vscode/*.vsix`） | IntelliJ（`editors/intellij/*.zip`，Community 可用） |
 | --- | --- | --- |
 | 新建项目 | 命令面板 SFL: New Project… | New Project → SFL |
+| 多项目总览（任务/源文件/依赖） | 活动栏 **SFL Projects** 视图 | 右侧 **SFL** 工具窗口（自动发现 + 手动链接，Build Tools → SFL 配置页） |
 | 构建 | ⇧⌘B（`sfl: build` 任务） | Build → Build Project（输出进 Build 工具窗） |
 | 运行当前文件 | 标题栏 ▶ / SFL: Run File | 行首 ▶ / 右键 / Current File ▶ |
 | **调试当前文件** | F5（零配置） | Current File 🐞 / 行首 ▶ 菜单 |

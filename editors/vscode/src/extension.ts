@@ -25,6 +25,7 @@ import {
 } from 'vscode';
 
 const execFileP = promisify(execFile);
+import { registerProjectsView } from './projects';
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -247,6 +248,9 @@ function provideSflTasks(): Task[] {
 export async function activate(context: ExtensionContext): Promise<void> {
   await startClient(context);
 
+  // The SFL Projects view: every build.sfl, its tasks, sources and deps.
+  context.subscriptions.push(...registerProjectsView(sflBinary, sflEnv).disposables);
+
   context.subscriptions.push(
     tasks.registerTaskProvider('sfl', {
       provideTasks: () => provideSflTasks(),
@@ -257,8 +261,11 @@ export async function activate(context: ExtensionContext): Promise<void> {
         }
         const bin = quoted(sflBinary());
         const args = def.task === 'build' ? 'build' : `build ${def.task}`;
+        const root = (def as { project?: string }).project;
         const task = new Task(def, t.scope ?? TaskScope.Workspace, def.task, 'sfl',
-          new ShellExecution(`${bin} ${args}`));
+          new ShellExecution(`${bin} ${args}`, {
+            cwd: root, env: sflEnv() as Record<string, string>,
+          }));
         task.group = def.task === 'test' ? TaskGroup.Test : TaskGroup.Build;
         return task;
       },

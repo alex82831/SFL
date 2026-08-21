@@ -11,6 +11,12 @@
         and signature help.
         </p>
         <p>
+        An <b>SFL tool window</b> lists every linked project — tasks, sources,
+        dependencies — like the Gradle and sbt windows do: double-click a task to run
+        it, Build All to build them all, and link as many projects as you like.
+        build.sfl files under the project are detected automatically.
+        </p>
+        <p>
         Needs the <code>sfl</code> binary: either on PATH, or pointed at by the
         <code>SFL_PATH</code> environment variable. Runs on IntelliJ IDEA
         <b>Community</b> and Ultimate alike (the LSP client is LSP4IJ).
@@ -47,6 +53,22 @@
         <runLineMarkerContributor language="SFL"
                                   implementationClass="com.fartech.sfl.ide.SflRunLineMarkerContributor"/>
         <projectTaskRunner implementation="com.fartech.sfl.ide.build.SflProjectTaskRunner"/>
+        <!-- Native Go To: the platform's own Implementation(s) / Type Declaration
+             actions and shortcuts, answered by the language server. -->
+        <targetElementEvaluator language="SFL"
+                                implementationClass="com.fartech.sfl.ide.navigation.SflTargetElementEvaluator"/>
+        <typeDeclarationProvider implementation="com.fartech.sfl.ide.navigation.SflTypeDeclarationProvider"/>
+        <definitionsScopedSearch implementation="com.fartech.sfl.ide.navigation.SflImplementationSearcher"/>
+        <toolWindow id="SFL"
+                    anchor="right"
+                    secondary="true"
+                    icon="/icons/sflToolWindow.svg"
+                    factoryClass="com.fartech.sfl.ide.buildtool.SflToolWindowFactory"/>
+        <projectConfigurable parentId="build.tools"
+                             id="com.fartech.sfl.buildtool"
+                             displayName="SFL"
+                             instance="com.fartech.sfl.ide.buildtool.SflBuildToolConfigurable"/>
+        <postStartupActivity implementation="com.fartech.sfl.ide.buildtool.SflProjectsStartup"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.redhat.devtools.lsp4ij">

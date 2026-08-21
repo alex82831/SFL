@@ -1,27 +1,12 @@
 package com.fartech.sfl.ide.build;
 
 import com.fartech.sfl.ide.project.SflModuleType;
-import com.fartech.sfl.ide.settings.SflBinaryLocator;
-import com.intellij.build.BuildViewManager;
-import com.intellij.build.DefaultBuildDescriptor;
-import com.intellij.build.events.impl.FailureResultImpl;
-import com.intellij.build.events.impl.FinishBuildEventImpl;
-import com.intellij.build.events.impl.OutputBuildEventImpl;
-import com.intellij.build.events.impl.StartBuildEventImpl;
-import com.intellij.build.events.impl.SuccessResultImpl;
-import com.intellij.execution.ExecutionException;
-import com.intellij.execution.configurations.GeneralCommandLine;
-import com.intellij.execution.process.OSProcessHandler;
-import com.intellij.execution.process.ProcessEvent;
-import com.intellij.execution.process.ProcessListener;
-import com.intellij.execution.process.ProcessOutputTypes;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.module.Module;
 import com.intellij.openapi.module.ModuleType;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.roots.ModuleRootManager;
-import com.intellij.openapi.util.Key;
-import com.intellij.openapi.vfs.VfsUtil;
+import com.intellij.openapi.vfs.VfsUtilCore;
 import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.task.ModuleBuildTask;
 import com.intellij.task.ProjectTask;
@@ -32,7 +17,6 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.concurrency.AsyncPromise;
 import org.jetbrains.concurrency.Promise;
 
-import java.io.File;
 import java.util.LinkedHashSet;
 import java.util.Set;
 
@@ -76,51 +60,9 @@ public final class SflProjectTaskRunner extends ProjectTaskRunner {
         return promise;
     }
 
-    /** Runs `sfl build` in `root`, reporting into the Build view; true on failure. */
+    /** Build view output is shared with the tool window's Build All. */
     private static boolean buildOne(Project project, VirtualFile root) {
-        BuildViewManager buildView = project.getService(BuildViewManager.class);
-        Object buildId = new Object();
-        DefaultBuildDescriptor descriptor = new DefaultBuildDescriptor(
-                buildId, "sfl build " + root.getName(), root.getPath(), System.currentTimeMillis());
-        buildView.onEvent(buildId, new StartBuildEventImpl(descriptor, "running sfl build…"));
-
-        File binary = SflBinaryLocator.resolve();
-        if (binary == null) {
-            buildView.onEvent(buildId, new FinishBuildEventImpl(
-                    buildId, null, System.currentTimeMillis(), "sfl not found",
-                    new FailureResultImpl("The sfl binary was not found. "
-                            + "Set its path in Settings | Tools | SFL.")));
-            return true;
-        }
-        try {
-            GeneralCommandLine command = new GeneralCommandLine(binary.getAbsolutePath(), "build")
-                    .withWorkDirectory(root.getPath())
-                    .withEnvironment(
-                            com.fartech.sfl.ide.settings.SflEnvironment.forChildProcesses());
-            OSProcessHandler handler = new OSProcessHandler(command);
-            handler.addProcessListener(new ProcessListener() {
-                @Override
-                public void onTextAvailable(@NotNull ProcessEvent event, @NotNull Key outputType) {
-                    buildView.onEvent(buildId, new OutputBuildEventImpl(
-                            buildId, event.getText(), !ProcessOutputTypes.STDERR.equals(outputType)));
-                }
-            });
-            handler.startNotify();
-            handler.waitFor();
-            Integer code = handler.getExitCode();
-            boolean ok = code != null && code == 0;
-            buildView.onEvent(buildId, new FinishBuildEventImpl(
-                    buildId, null, System.currentTimeMillis(),
-                    ok ? "finished" : "failed",
-                    ok ? new SuccessResultImpl() : new FailureResultImpl()));
-            // The compiled binary lands under build/; let the tree see it.
-            VfsUtil.markDirtyAndRefresh(true, true, true, root);
-            return !ok;
-        } catch (ExecutionException e) {
-            buildView.onEvent(buildId, new FinishBuildEventImpl(
-                    buildId, null, System.currentTimeMillis(), "failed",
-                    new FailureResultImpl(e.getMessage())));
-            return true;
-        }
+        return com.fartech.sfl.ide.buildtool.SflBuildOutput.buildInBuildView(
+                project, VfsUtilCore.virtualToIoFile(root));
     }
 }
