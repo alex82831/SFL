@@ -28,7 +28,7 @@ Designed and implemented by Alex Xin. Released under the
 
 - **[使用手册](docs/SFL-使用手册.md)** — the full user manual: syntax, semantics,
   functional programming, concurrency and IPC, ahead-of-time compilation, and every one
-  of the 363 builtins.
+  of the 367 builtins.
 - **[软件包参考](docs/SFL-软件包参考.md)** — the standard package suite: a
   cross-platform GUI framework, an HTTP server framework, MySQL, PostgreSQL,
   MongoDB and Redis drivers, datetime, csv, toml, markdown, mustache templates,

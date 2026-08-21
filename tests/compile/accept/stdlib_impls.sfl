@@ -1,0 +1,116 @@
+// The SFL-written half of the builtin library, compiled — and held against the
+// natives in the same program.
+//
+// Opening the stdlib modules puts their definitions in this file's namespace, so
+// a bare `capitalize` is the SFL implementation while `std.capitalize` is the
+// interpreter's own primitive. Comparing the two here is what the old suite did
+// by shadowing the whole global table; asking both by name is exact, works under
+// either engine, and is the compiled counterpart of tests/stdlib.sfl.
+
+import "../../../stdlib/coll"
+import "../../../stdlib/obj"
+import "../../../stdlib/text"
+import "../../../stdlib/fn"
+import "../../../stdlib/codec"
+import "../../../stdlib/regex"
+import "../../../stdlib/lazy"
+
+var checked = 0
+var differ = []
+
+// Reports one implementation against its native twin. Both sides are computed by
+// the caller, so this stays a plain value comparison the compiler can see through.
+def same(what, mine, native) {
+  checked += 1
+  if (mine != native) {
+    push(differ, what + ": SFL " + toString(mine) + " vs native " + toString(native))
+  }
+  null
+}
+
+val xs = [1, 2, 3, 4, 5]
+val pairs = [[1, 2], [3], [], [4, 5]]
+val obj = {a: 1, b: {c: 2, d: [3, 4]}}
+
+// coll
+same("map", map(xs, (x) -> x * 2), std.map(xs, (x) -> x * 2))
+same("filter", filter(xs, (x) -> x % 2 == 1), std.filter(xs, (x) -> x % 2 == 1))
+same("reduce", reduce(xs, (a, b) -> a + b, 0), std.reduce(xs, (a, b) -> a + b, 0))
+same("foldRight", foldRight(xs, (a, b) -> a - b, 0), std.foldRight(xs, (a, b) -> a - b, 0))
+same("scan", scan(xs, (a, b) -> a + b, 0), std.scan(xs, (a, b) -> a + b, 0))
+same("find", find(xs, (x) -> x > 3), std.find(xs, (x) -> x > 3))
+same("findIndex", findIndex(xs, (x) -> x > 3), std.findIndex(xs, (x) -> x > 3))
+same("any", any(xs, (x) -> x > 4), std.any(xs, (x) -> x > 4))
+same("every", every(xs, (x) -> x > 0), std.every(xs, (x) -> x > 0))
+same("count", count(xs, (x) -> x % 2 == 0), std.count(xs, (x) -> x % 2 == 0))
+same("flatMap", flatMap(pairs, (p) -> p), std.flatMap(pairs, (p) -> p))
+same("flatten", flatten(pairs), std.flatten(pairs))
+same("concat", concat([1], [2, 3]), std.concat([1], [2, 3]))
+same("conj", conj([1], 2), std.conj([1], 2))
+same("groupBy", groupBy(xs, (x) -> toString(x % 2)), std.groupBy(xs, (x) -> toString(x % 2)))
+same("partition", partition(xs, (x) -> x > 2), std.partition(xs, (x) -> x > 2))
+same("frequencies", frequencies(["a", "b", "a"]), std.frequencies(["a", "b", "a"]))
+same("unique", unique([1, 1, 2, 3, 3]), std.unique([1, 1, 2, 3, 3]))
+
+// obj
+same("copy", copy(obj), std.copy(obj))
+same("deepCopy", deepCopy(obj), std.deepCopy(obj))
+same("fromEntries", fromEntries([["a", 1]]), std.fromEntries([["a", 1]]))
+same("merge", merge({a: 1}, {b: 2}), std.merge({a: 1}, {b: 2}))
+same("assoc", assoc(obj, "e", 5), std.assoc(obj, "e", 5))
+same("dissoc", dissoc(obj, "a"), std.dissoc(obj, "a"))
+same("getIn", getIn(obj, ["b", "c"]), std.getIn(obj, ["b", "c"]))
+same("assocIn", assocIn(obj, ["b", "c"], 9), std.assocIn(obj, ["b", "c"], 9))
+same("updateIn", updateIn(obj, ["b", "c"], (v) -> v + 1), std.updateIn(obj, ["b", "c"], (v) -> v + 1))
+
+// text
+same("capitalize", capitalize("hello world"), std.capitalize("hello world"))
+same("join", join(["a", "b"], "-"), std.join(["a", "b"], "-"))
+same("lines", lines("a\nb\n"), std.lines("a\nb\n"))
+same("padStart", padStart("7", 3, "0"), std.padStart("7", 3, "0"))
+same("padEnd", padEnd("7", 3, "0"), std.padEnd("7", 3, "0"))
+same("repeat", repeat("ab", 3), std.repeat("ab", 3))
+
+// fn
+same("apply", apply((a, b) -> a + b, [1, 2]), std.apply((a, b) -> a + b, [1, 2]))
+same("identity", identity(7), std.identity(7))
+same("constantly", constantly(3)(), std.constantly(3)())
+same("compose", compose((x) -> x + 1, (x) -> x * 2)(5), std.compose((x) -> x + 1, (x) -> x * 2)(5))
+same("pipe", pipe((x) -> x + 1, (x) -> x * 2)(5), std.pipe((x) -> x + 1, (x) -> x * 2)(5))
+same("partial", partial((a, b) -> a - b, 10)(3), std.partial((a, b) -> a - b, 10)(3))
+same("partialRight", partialRight((a, b) -> a - b, 3)(10), std.partialRight((a, b) -> a - b, 3)(10))
+same("flip", flip((a, b) -> a - b)(3, 10), std.flip((a, b) -> a - b)(3, 10))
+same("curry", curry((a, b) -> a + b)(1)(2), std.curry((a, b) -> a + b)(1)(2))
+same("negate", negate((x) -> x > 2)(1), std.negate((x) -> x > 2)(1))
+same("memoize", memoize((x) -> x * 2)(21), std.memoize((x) -> x * 2)(21))
+
+// codec
+same("base64Encode", base64Encode("hello"), std.base64Encode("hello"))
+same("base64Decode", base64Decode(base64Encode("hello")), std.base64Decode(std.base64Encode("hello")))
+same("hexEncode", hexEncode("hi"), std.hexEncode("hi"))
+same("hexDecode", hexDecode(hexEncode("hi")), std.hexDecode(std.hexEncode("hi")))
+same("urlEncode", urlEncode("a b&c"), std.urlEncode("a b&c"))
+same("urlDecode", urlDecode(urlEncode("a b&c")), std.urlDecode(std.urlEncode("a b&c")))
+
+// regex
+same("matches", matches("abc123", r"[a-z]+\d+"), std.matches("abc123", r"[a-z]+\d+"))
+same("regexFind", regexFind("abc123", r"\d+"), std.regexFind("abc123", r"\d+"))
+same("regexFindAll", regexFindAll("a1b2", r"\d"), std.regexFindAll("a1b2", r"\d"))
+same("regexSplit", regexSplit("a1b2c", r"\d"), std.regexSplit("a1b2c", r"\d"))
+same("regexReplace", regexReplace("a1b2", r"\d", "#"), std.regexReplace("a1b2", r"\d", "#"))
+
+// lazy
+same("toArray", toArray(take(naturals(), 4)), std.toArray(take(std.naturals(), 4)))
+same("cycle", toArray(take(cycle([1, 2]), 5)), std.toArray(take(std.cycle([1, 2]), 5)))
+same("iterate", toArray(take(iterate((x) -> x * 2, 1), 4)),
+     std.toArray(take(std.iterate((x) -> x * 2, 1), 4)))
+same("repeatedly", toArray(take(repeatedly(7), 3)),
+     std.toArray(take(std.repeatedly(7), 3)))
+
+println("stdlib implementations checked: " + toString(checked))
+if (length(differ) == 0) {
+  println("every SFL implementation agrees with its native twin")
+} else {
+  for (d in differ) { println("  DIFFERS  " + d) }
+  exit(1)
+}

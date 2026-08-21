@@ -1,12 +1,20 @@
 // The part of the builtin library written in SFL, checked against the natives.
 //
-// Importing these modules defines functions that shadow the builtins of the same
-// names, so the assertions below run against the SFL implementations rather than the
-// interpreter's own. Then the whole builtin suite runs unchanged: if the two ever
-// disagree about a result or an error message, this is where it shows up.
+// The seven modules below define functions named after builtins. Opening them
+// here puts those definitions in *this file's* namespace, so every unqualified
+// call in the assertion text runs the SFL implementation rather than the
+// interpreter's own — and the whole builtin suite then runs unchanged: if the two
+// ever disagree about a result or an error message, this is where it shows up.
 //
-// It is also the suite that keeps the compiler honest, because these are exactly the
-// definitions a compiled program links from libsflstd.a.
+// The assertions come in through `eval` rather than `import` on purpose. A name
+// resolves in the namespace of the file that *wrote* it, so importing
+// builtins.sfl would resolve its calls in its own namespace, where these
+// definitions are not — and the suite would quietly test the natives twice.
+// `eval` compiles the text in the caller's namespace, which is exactly this one.
+//
+// It is also the suite that keeps the compiler honest, because these are exactly
+// the definitions a compiled program links from libsflstd.a; the compiled side of
+// that is tests/compile/accept/stdlib_impls.sfl, which eval cannot reach.
 
 import "../stdlib/coll"
 import "../stdlib/obj"
@@ -18,4 +26,4 @@ import "../stdlib/lazy"
 
 // The suite it runs reports under its own name, so say whose implementations these are.
 println("stdlib: the builtin suite, run against the SFL implementations")
-import "builtins"
+eval(readFile(joinPath(dirName(absPath(scriptPath())), "builtins.sfl")))

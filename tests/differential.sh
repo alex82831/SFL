@@ -21,6 +21,7 @@ SKIP=(
   "language:uses eval(), which needs the interpreter"
   "regression:uses eval(), which needs the interpreter"
   "diagnostics:uses eval(), which needs the interpreter"
+  "stdlib:runs the builtin suite through eval() so its calls resolve in this file's namespace, against the SFL implementations; the compiled side is tests/compile/accept/stdlib_impls.sfl"
   "concurrency:asserts that eval() works on a spawned thread; compiled concurrency is covered by tests/async.sfl and tests/compile/accept/threads.sfl"
   "httpd:drives real servers with random WebSocket/HTTP2 masking and an optional openssl, so output is not byte-reproducible; compiled coverage is tests/compile/accept/httpd_compiles.sfl"
   "mysql:drives an in-process fake server on spawned threads; compiled coverage is tests/compile/accept/db_clients_compile.sfl"

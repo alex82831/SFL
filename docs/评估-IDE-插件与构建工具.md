@@ -108,6 +108,11 @@ importer.begin(path) match
     new Parser(SourceRef(path, text), globals, importer, alias.isDefined).parseProgram()
 ```
 
+> **后续（0.8.0）**：这段代码变了——第四个参数现在是命名空间标签而不是
+> `alias.isDefined`，被导入的模块解析进**它自己的**命名空间。本节的结论没变：
+> `import` 仍在解析期读磁盘、绑定包版本、写进共享的 `Globals`，"分析一个文件"
+> 仍等于"构建一个完整程序"。
+
 `import` 在**解析期**就做完了这些事：读磁盘、在两个包根里搜索、选定包版本并全局绑定
 （`Parser.scala:1735` `pkgBindings`）、把被导入模块的源码解析并**内联**进同一棵树、写进共享的 `Globals`。
 
