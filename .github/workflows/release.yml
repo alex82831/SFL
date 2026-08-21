@@ -69,10 +69,55 @@ jobs:
           path: ${{ matrix.asset }}
           if-no-files-found: error
 
+  plugins:
+    continue-on-error: true
+    # The editor plugins ship with the release: the IntelliJ zip and the VSCode
+    # vsix, built from this same tag so their language features always match the
+    # binary beside them. Neither needs the sfl binary to build.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build the IntelliJ plugin
+        working-directory: editors/intellij
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon buildPlugin
+
+      - name: Build the VSCode extension
+        working-directory: editors/vscode
+        run: |
+          npm install
+          npm run compile
+          npx --yes @vscode/vsce package --allow-missing-repository
+
+      - name: Stage the plugins
+        run: |
+          mkdir -p plugins
+          cp editors/intellij/build/distributions/*.zip plugins/
+          cp editors/vscode/*.vsix plugins/
+          ls -l plugins
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sfl-editor-plugins
+          path: plugins/*
+          if-no-files-found: error
+
   release:
     # always(): publish whatever platforms built, rather than blocking the whole
     # release when one of them fails to compile.
-    needs: build
+    needs: [build, plugins]
     if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     permissions:
@@ -94,6 +139,15 @@ jobs:
           pattern: sfl-*
           merge-multiple: true
 
+      # The plugins are optional: a release still goes out if their job failed.
+      - name: Sort the plugins out of the binaries
+        run: |
+          mkdir -p plugins
+          for f in dist/*.zip dist/*.vsix; do
+            [ -e "$f" ] && mv "$f" plugins/ || true
+          done
+          ls -l plugins || true
+
       - name: Checksums
         run: |
           cd dist
@@ -107,9 +161,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          notes=$(printf 'Install or update (macOS / Linux):\n\n    curl -fsSL https://raw.githubusercontent.com/alex82831/SFL/main/install.sh | sh\n\nOr download the binary for your platform below, chmod +x, and put it on your PATH. Verify with SHA256SUMS.\n')
+          notes=$(printf 'Install or update (macOS / Linux):\n\n    curl -fsSL https://raw.githubusercontent.com/alex82831/SFL/main/install.sh | sh\n\nOr download the binary for your platform below, chmod +x, and put it on your PATH. Verify with SHA256SUMS.\n\n**Editor plugins** (built from this tag):\n\n- IntelliJ IDEA (Community or Ultimate): `sfl-intellij-*.zip` — Settings | Plugins | gear | Install Plugin from Disk\n- VS Code: `sfl-lang-*.vsix` — Extensions | ... | Install from VSIX\n\nBoth need the sfl binary above on PATH.\n')
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --title "SFL $GITHUB_REF_NAME" \
             --notes "$notes" \
-            dist/sfl-* dist/SHA256SUMS install.sh
+            dist/sfl-* dist/SHA256SUMS install.sh $(ls plugins/* 2>/dev/null)

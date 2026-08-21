@@ -1,6 +1,6 @@
 # SFL 使用手册
 
-**SFL — Scripting for Fun**，版本 0.8.0
+**SFL — Scripting for Fun**，版本 0.8.1
 
 SFL 是一门小巧的动态脚本语言，用 Scala 3 实现，通过 Scala Native 编译成独立的原生可执行文件。
 它没有虚拟机、没有启动预热，二进制启动到执行完毕通常只要几毫秒，适合写命令行小工具、

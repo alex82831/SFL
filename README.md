@@ -237,6 +237,19 @@ a compiled binary quotes and underlines the failing line exactly as the interpre
 
 ## Version history
 
+**0.8.1** — Editor release. The IntelliJ plugin grows an SFL tool window in the
+shape of the Gradle and sbt ones: every linked project with its tasks, sources
+and dependencies, read from `sfl build describe` rather than from build.sfl, so
+the tree shows what the build tool will really do. Double-click a task to run it,
+Build All to build every project, and link as many projects as the checkout
+holds — the ones under the content roots are found when the project opens. The
+platform's own Go to Implementation and Go to Type Declaration now answer from
+the language server, so the native actions and their shortcuts work instead of
+only LSP4IJ's parallel menu entries. VS Code gets the same project view in its
+activity bar. The language server stops calling a file's `_`-private names
+undefined — privacy is a property of the file, and the diagnostic was reading
+namespaces only. Both plugins are now published with the release.
+
 **0.8.0** — The namespace release: a top-level name belongs to the namespace of
 the file that declares it, so `def map` is *your* `map` and the builtin one keeps
 working everywhere else, including inside the library you just called. An
