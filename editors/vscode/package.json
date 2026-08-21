@@ -2,7 +2,7 @@
   "name": "sfl-lang",
   "displayName": "SFL",
   "description": "SFL language support: syntax highlighting, diagnostics, completion, hover and signature help via the sfl language server.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "fartech",
   "license": "MIT",
   "engines": {

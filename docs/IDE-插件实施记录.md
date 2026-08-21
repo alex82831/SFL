@@ -23,8 +23,8 @@
 | `fileMtime` `exePath` `passthrough` 内置 | `BuiltinsSys.scala` | 构建工具全流程即验证 |
 | 语法资产生成器 | `tools/gen-editor-syntax.sfl`（SFL 写） | 生成物三处同源 |
 | TextMate 语法 + 语言配置 | `editors/vscode/`（生成物） | `editors/vscode/test/grammar.js` 28 项断言 |
-| VSCode 插件 | `editors/vscode/`，产出 `sfl-lang-0.1.0.vsix` | tsc 零警告 + vsce 打包 |
-| IntelliJ 插件 | `editors/intellij/`，产出 `sfl-intellij-0.1.0.zip` | gradle buildPlugin 成功（IC 2024.2.4） |
+| VSCode 插件 | `editors/vscode/`，产出 `sfl-lang-0.2.0.vsix` | tsc 零警告 + vsce 打包 |
+| IntelliJ 插件 | `editors/intellij/`，产出 `sfl-intellij-0.2.0.zip` | gradle buildPlugin 成功（IC 2024.2.4） |
 | `sfl build` 构建工具 | `buildtool/main.sfl`（SFL 写，嵌入二进制） | tests/run.sh：init/编译/增量/run/test/describe |
 | `sfl dap` 调试适配器 | `Dap.scala` + `Debug.hook` 钩子 | `tests/dap.js` 25 项端到端断言 |
 | 二进制探测与设置页（IJ） | `settings/`：Settings→Tools→SFL、四级探测（设置→SFL_PATH→PATH 手查→常见目录）、找不到时通知而非崩栈 | gradle 构建 |
