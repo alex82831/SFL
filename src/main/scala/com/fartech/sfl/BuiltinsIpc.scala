@@ -1552,6 +1552,13 @@ object BuiltinsIpc:
         "protocols, the negotiated one readable with tlsProto.") { a =>
       val c = connOf(a, 0, "tlsWrap")
       if c.tls != null then Err.eval("tlsWrap: the connection is already TLS")
+      // A line that ended at '\r' still owes the reader its '\n'. That LF is
+      // the tail of the prelude already read — a proxy's CONNECT reply, a
+      // STARTTLS exchange — not input the handshake must see, so it is
+      // swallowed here exactly as the byte reads swallow it.
+      if c.in.skipLf && c.in.pos < c.in.len then
+        if c.in.buf(c.in.pos) == '\n'.toByte then c.in.pos += 1
+        c.in.skipLf = false
       if c.in.pos < c.in.len || c.in.held != null then
         Err.eval("tlsWrap: the connection has buffered input")
       val host = argStr(a, 1, "tlsWrap")
@@ -1601,6 +1608,11 @@ object BuiltinsIpc:
         "preferred first, the negotiated one readable with tlsProto.") { a =>
       val c = connOf(a, 0, "tlsAccept")
       if c.tls != null then Err.eval("tlsAccept: the connection is already TLS")
+      // The deferred '\n' of a '\r'-ended line belongs to the plaintext
+      // prelude, not to the handshake; see tlsWrap.
+      if c.in.skipLf && c.in.pos < c.in.len then
+        if c.in.buf(c.in.pos) == '\n'.toByte then c.in.pos += 1
+        c.in.skipLf = false
       if c.in.pos < c.in.len || c.in.held != null then
         Err.eval("tlsAccept: the connection has buffered input")
       val cert = argStr(a, 1, "tlsAccept")

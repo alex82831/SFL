@@ -2279,10 +2279,10 @@ println(twice(1.5))    // 一份 float -> float 的特化
 
 | 函数 | 说明 |
 | --- | --- |
-| `httpGet(url, headers?)` | 发起 HTTP GET，返回响应体字符串；可传入请求头对象。 |
-| `httpGetProxy(url, proxy)` | 经由形如 '127.0.0.1:8080' 的代理发起 HTTP GET。 |
-| `httpPost(url, body, contentType?, headers?)` | 发起 HTTP POST，返回响应体字符串。 |
-| `httpRequest(method, url, body?, contentType?, headers?)` | 发起任意方法的 HTTP 请求，返回 {status, body}。 |
+| `httpGet(url, headers?, proxy?)` | 发起 HTTP GET，返回响应体字符串；可传入请求头对象与代理（http/https/socks5(h)/socks4(a)，支持用户名密码）。 |
+| `httpGetProxy(url, proxy)` | 经由代理发起 HTTP GET，如 'http://user:pass@127.0.0.1:8080' 或 'socks5://127.0.0.1:1080'；也接受 {protocol, host, port, username, password} 对象。 |
+| `httpPost(url, body, contentType?, headers?, proxy?)` | 发起 HTTP POST，返回响应体字符串；可传入内容类型、请求头与代理。 |
+| `httpRequest(method, url, body?, contentType?, headers?, proxy?)` | 发起任意方法的 HTTP 请求，返回 {status, body}；可传入请求体、内容类型、请求头与代理。 |
 
 #### 线程 (thread)
 
@@ -2499,6 +2499,23 @@ val m = regexFind(html, "<title>(.*?)</title>")
 println(if (isNull(m)) then "没有标题" else m[1])
 ```
 
+### 经代理发请求
+
+```sfl
+// 每个请求函数的最后一个参数都是代理：http/https/socks5(h)/socks4(a)，
+// 用户名密码写在 URL 里（特殊字符需百分号编码）。
+val page = httpGet("https://example.com", null, "socks5://user:pass@127.0.0.1:1080")
+
+// 也可以写成对象，密码里的特殊字符就不用编码了。
+val r = httpRequest("GET", "http://example.com/api", null, null, null,
+                    {"protocol": "http", "host": "127.0.0.1", "port": 8080,
+                     "username": "u", "password": "p@ss:word"})
+println(r.status)
+
+// 不给代理参数时沿用 curl 的环境变量（http_proxy、https_proxy、all_proxy、
+// no_proxy）；传 "" 强制直连。httpGetProxy(url, proxy) 仍是 GET 的简写。
+```
+
 ### 简易计时
 
 ```sfl
@@ -2549,9 +2566,17 @@ timeIt("求和", () -> sum(range(1000000)))
 - **正则**：由 Scala Native 的 `java.util.regex` 实现（基于 RE2），不支持反向引用和
   环视断言。
 - **网络**：HTTP 客户端就是标准库源码（stdlib/http.sfl）。它沿用 curl 时代的行为契约：
-  单次调用 60 秒总预算、最多跟随 32 次重定向、每个请求 `Connection: close`；代理来自
-  `httpGetProxy` 的参数或 curl 家的环境变量（`all_proxy`/`ALL_PROXY`、`https_proxy`、
-  仅小写的 `http_proxy`，`no_proxy` 豁免）。不再声明 `Accept-Encoding`，因此合规服务器
+  单次调用 60 秒总预算、最多跟随 32 次重定向、每个请求 `Connection: close`。代理既可以
+  作为每个请求函数末尾的参数显式给出——`'host:port'` 或 URL（scheme 决定协议：`http`
+  默认、`https` 对代理本身走 TLS、`socks5`/`socks5h`/`socks4`/`socks4a`），或
+  `{protocol, host, port, username, password}` 对象，URL 里的 `user:pass@` 先做百分号
+  解码，传 `""` 则强制直连——也可以来自 curl 家的环境变量（`all_proxy`/`ALL_PROXY`、
+  `https_proxy`/`HTTPS_PROXY`、仅小写的 `http_proxy`，`no_proxy` 豁免，同样接受 SOCKS
+  URL）。http(s) 代理以绝对 URI 转发 http 目标、以 CONNECT 隧道承载 https 目标，凭据放进
+  `Proxy-Authorization: Basic`；SOCKS5 按 RFC 1929 做用户名/密码子协商。主机名不在本地
+  解析而是交给代理，因此 `socks5` 等同 `socks5h`、`socks4` 等同 `socks4a`；唯一不支持的
+  组合是 https 目标经 `https://` 代理（那需要 TLS 里再套一层 TLS）。不再声明
+  `Accept-Encoding`，因此合规服务器
   会返回未压缩的响应体；HTTPS 校验证书链与主机名，信任库来自系统（亦尊重
   `SSL_CERT_FILE`/`SSL_CERT_DIR` 环境变量）。套接字支持 TCP（`tlsWrap` 可原地升级 TLS）
   与 UDP（`udpSocket` 一族），没有 Unix 域套接字。

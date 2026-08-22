@@ -37,6 +37,15 @@ println("POST /echo -> " + jsonStringify(reply.youSent) + " via ${reply.method}"
 val full = httpRequest("GET", base + "/headers", null, null, {"User-Agent": "sfl-example/1.0"})
 println("GET /headers -> status ${full.status}, agent seen: " + jsonParse(full.body).agent)
 
+// Proxies: every call above takes one more trailing argument — an http, https
+// or SOCKS proxy, credentials and all — and with no argument the curl
+// environment variables (http_proxy, https_proxy, all_proxy, no_proxy) apply.
+// There is no proxy in this offline demo, so only the shapes are shown:
+//   httpGet("https://example.com", null, "socks5://user:pass@127.0.0.1:1080")
+//   httpRequest("GET", url, null, null, null,
+//               {"protocol": "http", "host": "proxy.local", "port": 8080,
+//                "username": "u", "password": "p"})
+
 // Non-2xx: httpRequest reports instead of raising.
 val teapot = httpRequest("GET", base + "/teapot")
 println("GET /teapot -> ${teapot.status} " + teapot.body)

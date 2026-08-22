@@ -266,10 +266,16 @@ object BuiltinsSys:
             Err.eval(s"internal error: stdlib module '${f.module}' did not define '$name'")
       }
 
-    sflFn("httpGet", "Performs an HTTP GET and returns the response body as a string.")
-    sflFn("httpPost", "Performs an HTTP POST and returns the response body as a string.")
-    sflFn("httpRequest", "Performs any HTTP request and returns {status, body}.")
-    sflFn("httpGetProxy", "HTTP GET through a proxy such as '127.0.0.1:8080'.")
+    sflFn("httpGet", "Performs an HTTP GET and returns the response body as a string; " +
+      "takes optional headers and a proxy (http, https, socks5(h) or socks4(a), " +
+      "with username/password).")
+    sflFn("httpPost", "Performs an HTTP POST and returns the response body as a string; " +
+      "takes an optional content type, headers and a proxy.")
+    sflFn("httpRequest", "Performs any HTTP request and returns {status, body}; takes an " +
+      "optional body, content type, headers and a proxy.")
+    sflFn("httpGetProxy", "HTTP GET through a proxy such as " +
+      "'http://user:pass@127.0.0.1:8080', 'socks5://127.0.0.1:1080' or an object " +
+      "{protocol, host, port, username, password}.")
 
   /**
    * The running binary's path: the loader's answer on macOS, /proc on Linux, and

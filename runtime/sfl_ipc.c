@@ -1403,6 +1403,14 @@ SflVal sfl_p_closeServer(int64_t argc, SflVal *argv) {
 SflVal sfl_p_tlsWrap(int64_t argc, SflVal *argv) {
   Conn *c = conn_of(argv, 0, "tlsWrap");
   if (c->tls != NULL) sfl_raise_sig("tlsWrap", "the connection is already TLS");
+  /* A line that ended at '\r' still owes the reader its '\n'. That LF is the
+     tail of the prelude already read — a proxy's CONNECT reply, a STARTTLS
+     exchange — not input the handshake must see, so it is swallowed here
+     exactly as the byte reads swallow it. */
+  if (c->in.skip_lf && c->in.pos < c->in.len) {
+    if (c->in.buf[c->in.pos] == '\n') c->in.pos++;
+    c->in.skip_lf = 0;
+  }
   if (c->in.pos < c->in.len || c->in.held != NULL)
     sfl_raise_sig("tlsWrap", "the connection has buffered input");
   char *host = sfl_str_dup_utf8_java(sfl_arg_str(argv, 1, "tlsWrap"));
@@ -1638,6 +1646,12 @@ static void *tls_ctx_server_locked(const char *fn, const char *cert, const char 
 SflVal sfl_p_tlsAccept(int64_t argc, SflVal *argv) {
   Conn *c = conn_of(argv, 0, "tlsAccept");
   if (c->tls != NULL) sfl_raise_sig("tlsAccept", "the connection is already TLS");
+  /* The deferred '\n' of a '\r'-ended line belongs to the plaintext prelude,
+     not to the handshake; see tlsWrap. */
+  if (c->in.skip_lf && c->in.pos < c->in.len) {
+    if (c->in.buf[c->in.pos] == '\n') c->in.pos++;
+    c->in.skip_lf = 0;
+  }
   if (c->in.pos < c->in.len || c->in.held != NULL)
     sfl_raise_sig("tlsAccept", "the connection has buffered input");
   char *cert = sfl_str_dup_utf8_java(sfl_arg_str(argv, 1, "tlsAccept"));

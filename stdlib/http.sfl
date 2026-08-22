@@ -14,11 +14,23 @@
 //     keep method and body;
 //   - every request says `Connection: close`; there is no connection reuse,
 //     exactly as one curl_easy handle per call had none;
-//   - proxies come from an explicit argument (httpGetProxy) or from curl's
-//     environment variables: all_proxy/ALL_PROXY, https_proxy/HTTPS_PROXY, the
-//     lowercase-only http_proxy, filtered by no_proxy/NO_PROXY. An http target
-//     goes through a proxy as an absolute-URI request; an https target opens a
-//     CONNECT tunnel and runs TLS through it;
+//   - proxies come from an explicit argument (every request function takes one;
+//     httpGetProxy stays as the GET shorthand) or from curl's environment
+//     variables: all_proxy/ALL_PROXY, https_proxy/HTTPS_PROXY, the
+//     lowercase-only http_proxy, filtered by no_proxy/NO_PROXY. A proxy is
+//     named by 'host:port', by a URL whose scheme picks the protocol — http
+//     (the default), https (TLS to the proxy itself), socks5, socks5h, socks4
+//     or socks4a — or by an object {protocol, host, port, username, password}.
+//     user:pass@ credentials are percent-decoded; they become
+//     Proxy-Authorization: Basic on an http(s) proxy, the RFC 1929
+//     sub-negotiation on socks5, and the identd user field on socks4. An http
+//     target goes through an http(s) proxy as an absolute-URI request; an
+//     https target opens a CONNECT tunnel and runs TLS through it (not through
+//     an https proxy, where that TLS would have to nest inside the proxy's
+//     own). SOCKS hands the proxy the host name unresolved — the runtime has
+//     no resolver of its own — so socks5 behaves as socks5h and socks4 as
+//     socks4a; IP literals travel as themselves. An empty-string proxy forces
+//     a direct connection past the environment;
 //   - no Accept-Encoding is advertised, so a conforming server sends the body
 //     identity-encoded (libcurl asked for gzip and inflated it in private);
 //   - TLS verifies the certificate chain and the host name, no opt-out. The
@@ -53,6 +65,42 @@ def _left(deadline) {
   val left = deadline - timeMillis()
   if (left <= 0) { error("HTTP request failed: timed out") }
   left
+}
+
+def _hexVal(b) {
+  if (b >= 48 && b <= 57) { return b - 48 }
+  if (b >= 65 && b <= 70) { return b - 55 }
+  if (b >= 97 && b <= 102) { return b - 87 }
+  -1
+}
+
+// %XX escapes decoded over the string's UTF-8 bytes, so a multi-byte character
+// arrives whole; malformed escapes stay as written, as curl leaves them.
+def _pctDecode(s) {
+  if (indexOf(s, "%") < 0) { return s }
+  val src = utf8Encode(s)
+  val out = []
+  var i = 0
+  while (i < length(src)) {
+    val b = src[i]
+    if (b == 37 && i + 2 < length(src)
+        && _hexVal(src[i + 1]) >= 0 && _hexVal(src[i + 2]) >= 0) {
+      push(out, _hexVal(src[i + 1]) * 16 + _hexVal(src[i + 2]))
+      i = i + 3
+    } else {
+      push(out, b)
+      i = i + 1
+    }
+  }
+  utf8Decode(out)
+}
+
+// user[:password] from a URL authority as RFC 7617's user-pass string:
+// percent-decoded, and always carrying the colon, as curl sends it.
+def _userinfo(cred) {
+  val ci = indexOf(cred, ":")
+  if (ci < 0) { return "${_pctDecode(cred)}:" }
+  "${_pctDecode(substring(cred, 0, ci))}:${_pctDecode(substring(cred, ci + 1))}"
 }
 
 // ---------------------------------------------------------------------------- URLs
@@ -167,21 +215,37 @@ def _envProxy(scheme, host) {
   if (p == null || p == "") then null else p
 }
 
-// {host, port, auth} from "host:port", "http://host:port" or with user:pass@;
-// auth is the ready-made Basic credential or null. curl's default port is 1080.
+def _checkProto(s) {
+  if (s != "http" && s != "https" && s != "socks5" && s != "socks5h"
+      && s != "socks4" && s != "socks4a") {
+    _fail("unsupported proxy protocol '${s}'")
+  }
+  null
+}
+
+// {protocol, host, port, user, pass} from 'host:port' or a proxy URL — the
+// scheme picks the protocol: http (the default), https (TLS to the proxy),
+// socks5, socks5h, socks4 or socks4a. user:pass@ credentials are
+// percent-decoded; user null means none were given, and pass is then unread.
+// curl's default port is 1080, whatever the protocol.
 def _parseProxy(p) {
   var rest = trim(p)
+  var proto = "http"
   val si = indexOf(rest, "://")
   if (si >= 0) {
-    val scheme = toLower(substring(rest, 0, si))
-    if (scheme != "http") { _fail("unsupported proxy protocol '${scheme}'") }
+    proto = toLower(substring(rest, 0, si))
+    _checkProto(proto)
     rest = substring(rest, si + 3)
   }
   if (endsWith(rest, "/")) { rest = substring(rest, 0, length(rest) - 1) }
-  var auth = null
+  var user = null
+  var pass = ""
   val at = lastIndexOf(rest, "@")
   if (at >= 0) {
-    auth = base64Encode(substring(rest, 0, at))
+    val cred = substring(rest, 0, at)
+    val ci = indexOf(cred, ":")
+    user = _pctDecode(if (ci < 0) then cred else substring(cred, 0, ci))
+    if (ci >= 0) { pass = _pctDecode(substring(cred, ci + 1)) }
     rest = substring(rest, at + 1)
   }
   var host = rest
@@ -200,8 +264,44 @@ def _parseProxy(p) {
     }
   }
   if (host == "") { _fail("unsupported proxy '${p}'") }
-  {"host": host, "port": port, "auth": auth}
+  {"protocol": proto, "host": host, "port": port, "user": user, "pass": pass}
 }
+
+// The object spelling of a proxy, for credentials no URL should have to carry:
+// {protocol?, host, port?, username?, password?}, nothing percent-encoded.
+def _proxyObj(o) {
+  val protoRaw = get(o, "protocol", "http")
+  if (!isString(protoRaw)) { _fail("the proxy object's 'protocol' must be a string") }
+  val proto = toLower(protoRaw)
+  _checkProto(proto)
+  val host = get(o, "host", null)
+  if (!isString(host) || host == "") { _fail("a proxy object needs a non-empty string 'host'") }
+  val port = get(o, "port", 1080)
+  if (!isInt(port) || port < 0 || port > 65535) {
+    _fail("the proxy object's 'port' must be an integer from 0 to 65535")
+  }
+  val user = get(o, "username", null)
+  if (user != null && !isString(user)) { _fail("the proxy object's 'username' must be a string") }
+  var pass = get(o, "password", "")
+  if (pass == null) { pass = "" }
+  if (!isString(pass)) { _fail("the proxy object's 'password' must be a string") }
+  if (user == null && pass != "") { _fail("a proxy 'password' needs a 'username' beside it") }
+  {"protocol": proto, "host": host, "port": port, "user": user, "pass": pass}
+}
+
+// A request function's proxy argument, normalised: null means the environment
+// decides, false means always direct (the empty string, curl's -x ''), and an
+// object is the parsed proxy every hop will use.
+def _proxyOf(fn, pos, v) {
+  if (v == null) { return null }
+  if (isString(v)) { return if (trim(v) == "") then false else _parseProxy(v) }
+  if (isObject(v)) { return _proxyObj(v) }
+  _bad(fn, pos, "a string or an object", v)
+}
+
+// The ready-made Basic credential for an http(s) proxy, or null without one.
+def _basicAuth(pp) =
+  if (pp.user == null) then null else base64Encode("${pp.user}:${pp.pass}")
 
 // ------------------------------------------------------------------ wire reading
 
@@ -301,6 +401,204 @@ def _readBody(c, method, status, hdrs, deadline) {
   text
 }
 
+// ------------------------------------------------------------------ SOCKS tunnels
+
+// Exactly n handshake bytes, or the reasons there cannot be.
+def _readN(c, n, deadline) {
+  val out = []
+  while (length(out) < n) {
+    val got = socketReadBytes(c, n - length(out), _left(deadline))
+    if (got == null) { error("HTTP request failed: timed out") }
+    if (length(got) == 0) { _fail("the connection was closed during the SOCKS handshake") }
+    for (b in got) { push(out, b) }
+  }
+  out
+}
+
+def _sendBytes(c, bytes) = try(() -> socketWriteBytes(c, bytes), e -> _fail(e))
+
+def _pushAll(arr, more) {
+  for (b in more) { push(arr, b) }
+  null
+}
+
+// The four bytes of a dotted-quad IPv4 literal, or null when host is not one.
+def _ipv4Bytes(host) {
+  val parts = split(host, ".")
+  if (length(parts) != 4) { return null }
+  val out = []
+  for (p in parts) {
+    if (p == "" || length(p) > 3) { return null }
+    for (b in utf8Encode(p)) {
+      if (b < 48 || b > 57) { return null }
+    }
+    val n = parseInt(p)
+    if (n > 255) { return null }
+    push(out, n)
+  }
+  out
+}
+
+// One hextet as an integer, or -1.
+def _hex16(g) {
+  if (g == "" || length(g) > 4) { return -1 }
+  var v = 0
+  for (b in utf8Encode(g)) {
+    val d = _hexVal(b)
+    if (d < 0) { return -1 }
+    v = v * 16 + d
+  }
+  v
+}
+
+// Bytes of one colon-separated run of hextets; a dotted quad may close the run
+// where v4ok says the address ends there. null when anything fails to parse.
+def _ipv6Side(parts, v4ok) {
+  val out = []
+  for (i in range(length(parts))) {
+    val g = parts[i]
+    if (contains(g, ".")) {
+      if (!v4ok || i != length(parts) - 1) { return null }
+      val v4 = _ipv4Bytes(g)
+      if (v4 == null) { return null }
+      _pushAll(out, v4)
+    } else {
+      val v = _hex16(g)
+      if (v < 0) { return null }
+      push(out, shiftRightU(v, 8))
+      push(out, bitAnd(v, 255))
+    }
+  }
+  out
+}
+
+// The sixteen bytes of an IPv6 literal, or null when host is not one. '::'
+// compression and a trailing embedded IPv4 are understood; a zone id is not an
+// address the proxy could use, so it fails the parse.
+def _ipv6Bytes(host) {
+  if (indexOf(host, ":") < 0 || contains(host, "%")) { return null }
+  val di = indexOf(host, "::")
+  if (di >= 0 && indexOf(host, "::", di + 1) >= 0) { return null }
+  val head = if (di >= 0) then substring(host, 0, di) else host
+  val tail = if (di >= 0) then substring(host, di + 2) else ""
+  val left = _ipv6Side(if (head == "") then [] else split(head, ":"), di < 0)
+  if (left == null) { return null }
+  val right = _ipv6Side(if (tail == "") then [] else split(tail, ":"), true)
+  if (right == null) { return null }
+  if (di < 0) { return if (length(left) == 16) then left else null }
+  val have = length(left) + length(right)
+  if (have >= 16) { return null } // '::' stands for at least one zero group
+  val out = []
+  _pushAll(out, left)
+  for (i in range(16 - have)) { push(out, 0) }
+  _pushAll(out, right)
+  out
+}
+
+// RFC 1928's reply codes, in its own words.
+def _socks5Reason(code) {
+  val reasons = ["general SOCKS server failure", "connection not allowed by ruleset",
+                 "network unreachable", "host unreachable", "connection refused",
+                 "TTL expired", "command not supported", "address type not supported"]
+  if (code >= 1 && code <= 8) then reasons[code - 1] else "reply code ${code}"
+}
+
+// The SOCKS5 handshake (RFC 1928), with username/password authentication
+// (RFC 1929) when credentials were given and the proxy asks for them. The host
+// name goes to the proxy unresolved, so socks5 and socks5h behave the same; an
+// IP literal travels in its native address type.
+def _socks5(c, pp, u, deadline) {
+  val greeting = [5, 1, 0]
+  if (pp.user != null) {
+    greeting[1] = 2
+    push(greeting, 2)
+  }
+  _sendBytes(c, greeting)
+  val hello = _readN(c, 2, deadline)
+  if (hello[0] != 5) { _fail("the SOCKS5 proxy answered with version ${hello[0]}") }
+  if (hello[1] == 255) {
+    _fail("the SOCKS5 proxy accepts none of the offered authentication methods")
+  }
+  if (hello[1] == 2) {
+    // pp.user is never null here: method 2 is only offered beside credentials.
+    val ub = utf8Encode(pp.user)
+    val pb = utf8Encode(pp.pass)
+    if (length(ub) > 255 || length(pb) > 255) {
+      _fail("a SOCKS5 username or password is limited to 255 bytes")
+    }
+    val auth = [1, length(ub)]
+    _pushAll(auth, ub)
+    push(auth, length(pb))
+    _pushAll(auth, pb)
+    _sendBytes(c, auth)
+    val verdict = _readN(c, 2, deadline)
+    if (verdict[1] != 0) { _fail("the SOCKS5 proxy rejected the username or password") }
+  } else if (hello[1] != 0) {
+    _fail("the SOCKS5 proxy chose an unsupported authentication method (${hello[1]})")
+  }
+  val req = [5, 1, 0]
+  val v4 = _ipv4Bytes(u.host)
+  val v6 = if (v4 == null) then _ipv6Bytes(u.host) else null
+  if (v4 != null) {
+    push(req, 1)
+    _pushAll(req, v4)
+  } else if (v6 != null) {
+    push(req, 4)
+    _pushAll(req, v6)
+  } else {
+    val hb = utf8Encode(u.host)
+    if (length(hb) > 255) { _fail("the host name is longer than SOCKS5 can carry") }
+    push(req, 3)
+    push(req, length(hb))
+    _pushAll(req, hb)
+  }
+  push(req, bitAnd(shiftRightU(u.port, 8), 255))
+  push(req, bitAnd(u.port, 255))
+  _sendBytes(c, req)
+  val reply = _readN(c, 4, deadline)
+  if (reply[0] != 5) { _fail("the SOCKS5 proxy answered with version ${reply[0]}") }
+  if (reply[1] != 0) {
+    _fail("the SOCKS5 proxy refused the connection: ${_socks5Reason(reply[1])}")
+  }
+  // The bound address closes the reply; its only worth here is its length.
+  if (reply[3] == 1) { _readN(c, 6, deadline) }
+  else if (reply[3] == 4) { _readN(c, 18, deadline) }
+  else if (reply[3] == 3) { _readN(c, _readN(c, 1, deadline)[0] + 2, deadline) }
+  else { _fail("the SOCKS5 proxy answered with an unknown address type (${reply[3]})") }
+  null
+}
+
+def _socks4Reason(code) {
+  if (code == 91) { return "request rejected or failed" }
+  if (code == 92) { return "the proxy could not reach the client's identd" }
+  if (code == 93) { return "the identd user id did not match" }
+  "reply code ${code}"
+}
+
+// The SOCKS4 handshake. With no resolver of its own a host name travels in the
+// SOCKS4a extension under both socks4 and socks4a; the username, when given,
+// rides the identd field — SOCKS4 has no password to check.
+def _socks4(c, pp, u, deadline) {
+  val v4 = _ipv4Bytes(u.host)
+  if (v4 == null && _ipv6Bytes(u.host) != null) {
+    _fail("a SOCKS4 proxy cannot reach an IPv6 address; use socks5")
+  }
+  val req = [4, 1, bitAnd(shiftRightU(u.port, 8), 255), bitAnd(u.port, 255)]
+  _pushAll(req, if (v4 != null) then v4 else [0, 0, 0, 1])
+  if (pp.user != null) { _pushAll(req, utf8Encode(pp.user)) }
+  push(req, 0)
+  if (v4 == null) {
+    _pushAll(req, utf8Encode(u.host))
+    push(req, 0)
+  }
+  _sendBytes(c, req)
+  val reply = _readN(c, 8, deadline)
+  if (reply[1] != 90) {
+    _fail("the SOCKS4 proxy refused the connection: ${_socks4Reason(reply[1])}")
+  }
+  null
+}
+
 // ---------------------------------------------------------------- request sending
 
 // Replace-or-append with case-insensitive names, the way one curl_slist ended up
@@ -326,7 +624,7 @@ def _send(c, u, m, body, ctype, userHdr, absolute, proxyAuth, dropAuth) {
   if (ctype != null) { _setHeader(hdrs, "Content-Type", ctype) }
   if (body != null) { _setHeader(hdrs, "Content-Length", "${utf8Length(body)}") }
   if (u.user != null && !dropAuth) {
-    _setHeader(hdrs, "Authorization", "Basic ${base64Encode(u.user)}")
+    _setHeader(hdrs, "Authorization", "Basic ${base64Encode(_userinfo(u.user))}")
   }
   if (proxyAuth != null) { _setHeader(hdrs, "Proxy-Authorization", "Basic ${proxyAuth}") }
   if (userHdr != null) {
@@ -354,25 +652,43 @@ def _tls(c, host, deadline) {
 }
 
 // Opens the transport to the target, directly or through the proxy, and reports
-// how the request line must be spelled: {conn, absolute, proxyAuth}.
-def _open(u, proxy, deadline) {
-  if (proxy == null) {
+// how the request line must be spelled: {conn, absolute, proxyAuth}. pp is a
+// parsed proxy — {protocol, host, port, user, pass} — or null for a direct
+// connection; a SOCKS or CONNECT tunnel comes back ready for the request proper.
+def _open(u, pp, deadline) {
+  if (pp == null) {
     val c = _connectTo(u.host, u.port, deadline)
     if (u.scheme == "https") {
       try(() -> _tls(c, u.host, deadline), e -> { closeSocket(c); error(e) })
     }
     return {"conn": c, "absolute": false, "proxyAuth": null}
   }
-  val pp = _parseProxy(proxy)
+  if (pp.protocol == "https" && u.scheme == "https") {
+    // The tunnel's TLS would have to run inside the TLS to the proxy, and
+    // tlsWrap cannot wrap a connection that is already TLS.
+    _fail("an https URL cannot go through an https proxy: TLS inside TLS is not supported")
+  }
   val c = _connectTo(pp.host, pp.port, deadline)
+  if (startsWith(pp.protocol, "socks")) {
+    try(() -> {
+      if (pp.protocol == "socks4" || pp.protocol == "socks4a") { _socks4(c, pp, u, deadline) }
+      else { _socks5(c, pp, u, deadline) }
+      if (u.scheme == "https") { _tls(c, u.host, deadline) }
+    }, e -> { closeSocket(c); error(e) })
+    return {"conn": c, "absolute": false, "proxyAuth": null}
+  }
+  if (pp.protocol == "https") {
+    try(() -> _tls(c, pp.host, deadline), e -> { closeSocket(c); error(e) })
+  }
   if (u.scheme != "https") {
-    return {"conn": c, "absolute": true, "proxyAuth": pp.auth}
+    return {"conn": c, "absolute": true, "proxyAuth": _basicAuth(pp)}
   }
   // An https target through a proxy: a CONNECT tunnel, then TLS inside it.
   try(() -> {
     val hp = _hostPort(u, true)
     var req = "CONNECT ${hp} HTTP/1.1\r\nHost: ${hp}\r\n"
-    if (pp.auth != null) { req = req + "Proxy-Authorization: Basic ${pp.auth}\r\n" }
+    val auth = _basicAuth(pp)
+    if (auth != null) { req = req + "Proxy-Authorization: Basic ${auth}\r\n" }
     socketWrite(c, "${req}\r\n")
     val status = _status(_line(c, deadline))
     _headers(c, deadline)
@@ -385,6 +701,8 @@ def _open(u, proxy, deadline) {
 // -------------------------------------------------------------------- the request
 
 // One whole call: open, send, read, follow redirects, within one 60 s budget.
+// proxyArg is what _proxyOf handed back: null lets the environment steer each
+// hop, false keeps every hop direct, and a parsed proxy rides the whole chain.
 def _request(method, url, body, ctype, userHdr, proxyArg) {
   val deadline = timeMillis() + 60000
   var m = method
@@ -395,8 +713,14 @@ def _request(method, url, body, ctype, userHdr, proxyArg) {
   var hops = 0
   while (true) {
     val u = _parseUrl(cur)
-    var proxy = proxyArg
-    if (proxy == null) { proxy = _envProxy(u.scheme, u.host) }
+    var proxy = null
+    if (!isBool(proxyArg)) {
+      proxy = proxyArg
+      if (proxy == null) {
+        val fromEnv = _envProxy(u.scheme, u.host)
+        if (fromEnv != null) { proxy = _parseProxy(fromEnv) }
+      }
+    }
     val opened = _open(u, proxy, deadline)
     val c = opened.conn
     val answer = try(() -> {
@@ -438,32 +762,48 @@ def _request(method, url, body, ctype, userHdr, proxyArg) {
 
 // ------------------------------------------------------------------------ builtins
 
-def httpGet(url, headers = _absent) {
+// Every request function takes a trailing proxy: a URL like
+// 'socks5://user:pass@127.0.0.1:1080', a bare 'host:port', an object
+// {protocol, host, port, username, password}, '' to force a direct connection,
+// or null (and absence) to let the environment variables decide. A null
+// contentType or headers reads as "not given", so a caller reaching the proxy
+// argument positionally does not have to invent values for the ones between.
+
+def httpGet(url, headers = _absent, proxy = _absent) {
   _str("httpGet", 1, url)
-  val hdr = if (headers == _absent) then null else _obj("httpGet", 2, headers)
-  _request("GET", url, null, null, hdr, null).body
+  val hdr = if (headers == _absent || headers == null) then null
+            else _obj("httpGet", 2, headers)
+  val pxy = _proxyOf("httpGet", 3, if (proxy == _absent) then null else proxy)
+  _request("GET", url, null, null, hdr, pxy).body
 }
 
-def httpPost(url, body, contentType = _absent, headers = _absent) {
+def httpPost(url, body, contentType = _absent, headers = _absent, proxy = _absent) {
   _str("httpPost", 1, url)
-  val ct = if (contentType == _absent) then "text/plain; charset=utf-8"
+  val ct = if (contentType == _absent || contentType == null) then "text/plain; charset=utf-8"
            else _str("httpPost", 3, contentType)
-  val hdr = if (headers == _absent) then null else _obj("httpPost", 4, headers)
-  _request("POST", url, "${body}", ct, hdr, null).body
+  val hdr = if (headers == _absent || headers == null) then null
+            else _obj("httpPost", 4, headers)
+  val pxy = _proxyOf("httpPost", 5, if (proxy == _absent) then null else proxy)
+  _request("POST", url, "${body}", ct, hdr, pxy).body
 }
 
-def httpRequest(method, url, body = _absent, contentType = _absent, headers = _absent) {
+def httpRequest(method, url, body = _absent, contentType = _absent, headers = _absent,
+                proxy = _absent) {
   val m = toUpper(_str("httpRequest", 1, method))
   _str("httpRequest", 2, url)
   val b = if (body == _absent || body == null) then null else "${body}"
   val ct = if (contentType == _absent || contentType == null) then null
            else _str("httpRequest", 4, contentType)
-  val hdr = if (headers == _absent) then null else _obj("httpRequest", 5, headers)
-  _request(m, url, b, ct, hdr, null)
+  val hdr = if (headers == _absent || headers == null) then null
+            else _obj("httpRequest", 5, headers)
+  val pxy = _proxyOf("httpRequest", 6, if (proxy == _absent) then null else proxy)
+  _request(m, url, b, ct, hdr, pxy)
 }
 
 def httpGetProxy(url, proxy) {
   _str("httpGetProxy", 1, url)
-  _str("httpGetProxy", 2, proxy)
-  _request("GET", url, null, null, null, proxy).body
+  if (!isString(proxy) && !isObject(proxy)) {
+    _bad("httpGetProxy", 2, "a string or an object", proxy)
+  }
+  _request("GET", url, null, null, null, _proxyOf("httpGetProxy", 2, proxy)).body
 }

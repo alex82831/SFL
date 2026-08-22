@@ -300,6 +300,258 @@ await(originT)
 setEnv("http_proxy", "")
 setEnv("no_proxy", "")
 
+// ------------------------------------------------- the proxy argument everywhere
+
+// Every request function takes a trailing proxy; a bare host:port is an http
+// proxy, so the request arrives in absolute form.
+val [pa, ta] = serve1(req -> ["200 OK", ["Content-Length: 3"], "get"])
+check("httpGet takes a proxy argument",
+      httpGet("http://origin.invalid/a", null, "127.0.0.1:${pa}"), "get")
+check("in absolute form", await(ta)[0], "GET http://origin.invalid:80/a HTTP/1.1")
+
+// Proxy URL credentials are percent-decoded before they become Basic; a null
+// contentType keeps the default, so the proxy argument is reachable positionally.
+val [pb, tb] = serve1(req -> ["200 OK", ["Content-Length: 4"], "post"])
+check("httpPost takes a proxy argument, past a null content type",
+      httpPost("http://origin.invalid/b", "x", null, null,
+               "http://u%40x:p%3Aw@127.0.0.1:${pb}"), "post")
+val pbSeen = await(tb)
+check("proxy URL credentials are percent-decoded",
+      get(pbSeen[1], "proxy-authorization", null), "Basic ${base64Encode("u@x:p:w")}")
+check("and the default content type still rode along",
+      get(pbSeen[1], "content-type", null), "text/plain; charset=utf-8")
+
+// The object spelling carries credentials with no percent-encoding to get right.
+val [pc, tc] = serve1(req -> ["200 OK", ["Content-Length: 3"], "obj"])
+check("a proxy can be an object",
+      httpRequest("GET", "http://origin.invalid/c", null, null, null,
+                  {"host": "127.0.0.1", "port": pc, "username": "po", "password": "p@w"}),
+      {"status": 200, "body": "obj"})
+check("whose credentials become Proxy-Authorization as written",
+      get(await(tc)[1], "proxy-authorization", null), "Basic ${base64Encode("po:p@w")}")
+
+val [pd, td] = serve1(req -> ["200 OK", ["Content-Length: 3"], "gpo"])
+check("httpGetProxy accepts the object spelling too",
+      httpGetProxy("http://origin.invalid/d", {"host": "127.0.0.1", "port": pd}), "gpo")
+await(td)
+
+// The empty string is curl's -x '': a direct connection past the environment.
+val [pe, te] = serve1(req -> ["200 OK", ["Content-Length: 6"], "direct"])
+setEnv("http_proxy", "127.0.0.1:1")
+check("an empty proxy forces a direct connection",
+      httpGet("http://127.0.0.1:${pe}/", null, ""), "direct")
+setEnv("http_proxy", "")
+await(te)
+
+// URL credentials on the target decode the same way.
+val [pf, tf] = serve1(req -> ["200 OK", ["Content-Length: 2"], "cr"])
+httpGet("http://we%40b:s%3Acret@127.0.0.1:${pf}/")
+check("target URL credentials are percent-decoded for Basic auth",
+      get(await(tf)[1], "authorization", null), "Basic ${base64Encode("we@b:s:cret")}")
+
+// ------------------------------------------------------------------------- SOCKS
+
+// Exactly n bytes off a test connection, or a test failure.
+def readB(c, n) {
+  val out = []
+  while (length(out) < n) {
+    val got = socketReadBytes(c, n - length(out), 10000)
+    if (got == null || length(got) == 0) { error("test server: short SOCKS read") }
+    for (b in got) { push(out, b) }
+  }
+  out
+}
+
+// A one-connection SOCKS5 server. auth is [user, pass] to demand RFC 1929
+// authentication or null for none; the handshake it saw comes back through the
+// thread, and a granted tunnel serves one HTTP exchange via respond.
+def socks5Server(auth, respond) {
+  val srv = serverSocket(0)
+  val port = serverPort(srv)
+  val t = spawn(() -> {
+    val c = accept1(srv)
+    val seen = {}
+    val hello = readB(c, 2)
+    seen["methods"] = readB(c, hello[1])
+    var granted = true
+    if (auth != null) {
+      socketWriteBytes(c, [5, 2])
+      readB(c, 1) // the sub-negotiation version
+      seen["user"] = utf8Decode(readB(c, readB(c, 1)[0]))
+      seen["pass"] = utf8Decode(readB(c, readB(c, 1)[0]))
+      if (seen.user == auth[0] && seen.pass == auth[1]) {
+        socketWriteBytes(c, [1, 0])
+      } else {
+        socketWriteBytes(c, [1, 1])
+        granted = false
+      }
+    } else {
+      socketWriteBytes(c, [5, 0])
+    }
+    if (granted) {
+      val req = readB(c, 4)
+      seen["atyp"] = req[3]
+      if (req[3] == 1) {
+        val ip = readB(c, 4)
+        seen["addr"] = "${ip[0]}.${ip[1]}.${ip[2]}.${ip[3]}"
+      } else if (req[3] == 3) {
+        seen["addr"] = utf8Decode(readB(c, readB(c, 1)[0]))
+      } else {
+        seen["addr"] = readB(c, 16)
+      }
+      val pb = readB(c, 2)
+      seen["port"] = pb[0] * 256 + pb[1]
+      socketWriteBytes(c, [5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+      val httpReq = readRequest(c)
+      seen["req"] = httpReq
+      val r = respond(httpReq)
+      sendResponse(c, r[0], r[1], r[2])
+    }
+    closeSocket(c)
+    closeServer(srv)
+    seen
+  })
+  [port, t]
+}
+
+// A one-connection SOCKS4/4a server, same shape.
+def socks4Server(respond) {
+  val srv = serverSocket(0)
+  val port = serverPort(srv)
+  val t = spawn(() -> {
+    val c = accept1(srv)
+    val seen = {}
+    val head = readB(c, 8)
+    seen["command"] = head[1]
+    seen["port"] = head[2] * 256 + head[3]
+    seen["ip"] = [head[4], head[5], head[6], head[7]]
+    var user = []
+    while (true) {
+      val b = readB(c, 1)[0]
+      if (b == 0) { break }
+      push(user, b)
+    }
+    seen["user"] = utf8Decode(user)
+    seen["domain"] = null
+    if (head[4] == 0 && head[5] == 0 && head[6] == 0 && head[7] != 0) {
+      var db = []
+      while (true) {
+        val b = readB(c, 1)[0]
+        if (b == 0) { break }
+        push(db, b)
+      }
+      seen["domain"] = utf8Decode(db)
+    }
+    socketWriteBytes(c, [0, 90, 0, 0, 0, 0, 0, 0])
+    val httpReq = readRequest(c)
+    seen["req"] = httpReq
+    val r = respond(httpReq)
+    sendResponse(c, r[0], r[1], r[2])
+    closeSocket(c)
+    closeServer(srv)
+    seen
+  })
+  [port, t]
+}
+
+// SOCKS5 without authentication: the host name goes through unresolved.
+val [sp1, st1] = socks5Server(null, req -> ["200 OK", ["Content-Length: 9"], "via-socks"])
+check("httpGet tunnels through SOCKS5",
+      httpGet("http://origin.invalid:8081/s", null, "socks5://127.0.0.1:${sp1}"), "via-socks")
+val s1 = await(st1)
+check("without credentials only no-auth is offered", s1.methods, [0])
+check("the host name reaches the proxy unresolved", s1.addr, "origin.invalid")
+check("with the target port", s1.port, 8081)
+check("the tunneled request is origin-form", s1.req[0], "GET /s HTTP/1.1")
+check("and Host names the origin", get(s1.req[1], "host", null), "origin.invalid:8081")
+
+// SOCKS5 with RFC 1929 username/password, spelled as a proxy object.
+val [sp2, st2] = socks5Server(["alice", "s3cr3t"],
+                              req -> ["200 OK", ["Content-Length: 2"], "ok"])
+check("httpRequest tunnels through SOCKS5 with credentials",
+      httpRequest("GET", "http://origin.invalid/o", null, null, null,
+                  {"protocol": "socks5", "host": "127.0.0.1", "port": sp2,
+                   "username": "alice", "password": "s3cr3t"}),
+      {"status": 200, "body": "ok"})
+val s2 = await(st2)
+check("credentials offer no-auth and username/password", s2.methods, [0, 2])
+check("the username arrived", s2.user, "alice")
+check("the password arrived", s2.pass, "s3cr3t")
+
+// A wrong password is refused by the sub-negotiation, and says so.
+val [sp3, st3] = socks5Server(["alice", "right"],
+                              req -> ["200 OK", ["Content-Length: 1"], "x"])
+checkFails("a rejected SOCKS5 password surfaces",
+  () -> httpGet("http://origin.invalid/x", null, "socks5://alice:wrong@127.0.0.1:${sp3}"),
+  "the SOCKS5 proxy rejected the username or password")
+await(st3)
+
+// An IPv4 literal travels in its native address type, and socks5h works alike.
+val [sp4, st4] = socks5Server(null, req -> ["200 OK", ["Content-Length: 2"], "ip"])
+check("an IPv4 literal target",
+      httpGet("http://127.0.0.9:9/ip", null, "socks5h://127.0.0.1:${sp4}"), "ip")
+val s4 = await(st4)
+check("travels as ATYP 1", s4.atyp, 1)
+check("with its four bytes", s4.addr, "127.0.0.9")
+
+// An IPv6 literal travels as ATYP 4 — sixteen bytes, '::' compression and an
+// embedded dotted quad included.
+val [sp6, st6] = socks5Server(null, req -> ["200 OK", ["Content-Length: 2"], "v6"])
+check("an IPv6 literal target",
+      httpGet("http://[2001:db8::ff:1.2.3.4]:8085/v6", null, "socks5://127.0.0.1:${sp6}"), "v6")
+val s6 = await(st6)
+check("travels as ATYP 4", s6.atyp, 4)
+check("as its sixteen bytes", s6.addr,
+      [32, 1, 13, 184, 0, 0, 0, 0, 0, 0, 0, 255, 1, 2, 3, 4])
+check("with the target port", s6.port, 8085)
+
+// The environment can name a SOCKS proxy, as it can for curl.
+val [sp5, st5] = socks5Server(["eve", "pw"], req -> ["200 OK", ["Content-Length: 3"], "env"])
+setEnv("all_proxy", "socks5://eve:pw@127.0.0.1:${sp5}")
+check("all_proxy may be a SOCKS URL", httpGet("http://origin.invalid/e"), "env")
+setEnv("all_proxy", "")
+check("whose credentials went through", await(st5).user, "eve")
+
+// SOCKS4a: the domain rides behind the 0.0.0.x marker, the username in the
+// identd field; a socks4 IPv4 literal goes in the classic form.
+val [fp1, ft1] = socks4Server(req -> ["200 OK", ["Content-Length: 3"], "s4a"])
+check("httpGet tunnels through SOCKS4a",
+      httpGet("http://origin.invalid:8082/f", null, "socks4a://u4@127.0.0.1:${fp1}"), "s4a")
+val f1 = await(ft1)
+check("the marker address signals a domain", f1.ip, [0, 0, 0, 1])
+check("the domain follows the user field", f1.domain, "origin.invalid")
+check("the identd field carries the username", f1.user, "u4")
+check("the port is the target's", f1.port, 8082)
+
+val [fp2, ft2] = socks4Server(req -> ["200 OK", ["Content-Length: 2"], "s4"])
+check("socks4 sends an IPv4 literal directly",
+      httpGet("http://127.0.0.9:8083/g", null, "socks4://127.0.0.1:${fp2}"), "s4")
+val f2 = await(ft2)
+check("as the four address bytes", f2.ip, [127, 0, 0, 9])
+check("with no trailing domain", f2.domain, null)
+
+// ------------------------------------------------------------------ proxy errors
+
+checkFails("an unknown proxy protocol is refused",
+  () -> httpGet("http://x/", null, "ftp://127.0.0.1:1"), "unsupported proxy protocol 'ftp'")
+checkFails("the proxy argument type is checked",
+  () -> httpGet("http://x/", null, 5), "httpGet: argument 3 must be a string or an object")
+checkFails("a proxy object needs a host",
+  () -> httpGet("http://x/", null, {"port": 1080}), "a proxy object needs a non-empty string 'host'")
+checkFails("a proxy password without a username is caught",
+  () -> httpGet("http://x/", null, {"host": "h", "password": "p"}),
+  "a proxy 'password' needs a 'username' beside it")
+checkFails("an https URL cannot ride an https proxy",
+  () -> httpGet("https://x/", null, "https://127.0.0.1:1"),
+  "TLS inside TLS is not supported")
+// The IPv6-versus-SOCKS4 clash is caught client-side, after the dial: the
+// server socket here only ever completes the TCP handshake.
+val s4bad = serverSocket(0)
+checkFails("SOCKS4 cannot reach an IPv6 literal",
+  () -> httpGet("http://[::1]:9/", null, "socks4://127.0.0.1:${serverPort(s4bad)}"),
+  "a SOCKS4 proxy cannot reach an IPv6 address")
+closeServer(s4bad)
+
 // ------------------------------------------------------------------------ errors
 
 checkFails("a URL needs a scheme", () -> httpGet("nope"), "unsupported URL")
@@ -379,6 +631,84 @@ if (!hasOpenssl) {
       processKill(server, true)
       processWait(server)
     }
+
+    // ------------------------------------------------- proxies meeting TLS
+
+    // An https target through an http proxy: the CONNECT tunnel carries the
+    // proxy credentials, and the request proper runs over TLS inside it. The
+    // proxy here grants the tunnel and then is the TLS server itself, so the
+    // named target never needs to exist.
+    val cpSrv = serverSocket(0)
+    val cpPort = serverPort(cpSrv)
+    val cpT = spawn(() -> {
+      val c = accept1(cpSrv)
+      val connectReq = readRequest(c)
+      socketWrite(c, "HTTP/1.1 200 Connection established\r\n\r\n")
+      tlsAccept(c, cert, key, null, 10000)
+      val req = readRequest(c)
+      sendResponse(c, "200 OK", ["Content-Length: 8"], "tunneled")
+      closeSocket(c)
+      closeServer(cpSrv)
+      [connectReq, req]
+    })
+    check("an https URL rides CONNECT through an http proxy",
+          httpGet("https://localhost:4443/secret", null, "http://cu:cp@127.0.0.1:${cpPort}"),
+          "tunneled")
+    val cpSeen = await(cpT)
+    check("the CONNECT names host:port", cpSeen[0][0], "CONNECT localhost:4443 HTTP/1.1")
+    check("and carries the proxy credentials",
+          get(cpSeen[0][1], "proxy-authorization", null), "Basic ${base64Encode("cu:cp")}")
+    check("the tunneled request is origin-form", cpSeen[1][0], "GET /secret HTTP/1.1")
+
+    // An https target through SOCKS5: TLS starts inside the granted tunnel.
+    val stSrv = serverSocket(0)
+    val stPort = serverPort(stSrv)
+    val stT = spawn(() -> {
+      val c = accept1(stSrv)
+      val hello = readB(c, 2)
+      readB(c, hello[1])
+      socketWriteBytes(c, [5, 0])
+      val req = readB(c, 4)
+      var dlen = 0
+      if (req[3] == 3) { dlen = readB(c, 1)[0] }
+      val dom = utf8Decode(readB(c, dlen))
+      readB(c, 2)
+      socketWriteBytes(c, [5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+      tlsAccept(c, cert, key, null, 10000)
+      val httpReq = readRequest(c)
+      sendResponse(c, "200 OK", ["Content-Length: 9"], "socks-tls")
+      closeSocket(c)
+      closeServer(stSrv)
+      [dom, httpReq]
+    })
+    check("an https URL tunnels through SOCKS5",
+          httpGet("https://localhost:4444/s", null, "socks5://127.0.0.1:${stPort}"),
+          "socks-tls")
+    val stSeen = await(stT)
+    check("the tunnel was asked for the TLS host", stSeen[0], "localhost")
+
+    // An https proxy: TLS to the proxy itself, then the absolute-form request
+    // for an http target inside that one TLS layer.
+    val hpSrv = serverSocket(0)
+    val hpPort = serverPort(hpSrv)
+    val hpT = spawn(() -> {
+      val c = accept1(hpSrv)
+      tlsAccept(c, cert, key, null, 10000)
+      val req = readRequest(c)
+      sendResponse(c, "200 OK", ["Content-Length: 9"], "via-https")
+      closeSocket(c)
+      closeServer(hpSrv)
+      req
+    })
+    check("an http URL goes through an https proxy",
+          httpGet("http://origin.invalid/h", null, "https://ju:jp@localhost:${hpPort}"),
+          "via-https")
+    val hpSeen = await(hpT)
+    check("as an absolute-form request over the proxy's TLS",
+          hpSeen[0], "GET http://origin.invalid:80/h HTTP/1.1")
+    check("with the proxy credentials",
+          get(hpSeen[1], "proxy-authorization", null), "Basic ${base64Encode("ju:jp")}")
+
     removeFile(key)
     removeFile(cert)
   }
