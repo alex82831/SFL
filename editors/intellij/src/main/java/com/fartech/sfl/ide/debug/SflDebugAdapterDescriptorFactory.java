@@ -73,12 +73,26 @@ public final class SflDebugAdapterDescriptorFactory extends DebugAdapterDescript
             // LaunchUtils reads the launch JSON from the run configuration, and
             // the producer flow fills file/serverId but never this content.
             dap.setLaunchConfiguration(LAUNCH_JSON);
-            // And the Mappings tab: config-level file matching reads these.
-            dap.setServerMappings(java.util.List.of(
-                    com.redhat.devtools.lsp4ij.templates.ServerMappingSettings
-                            .createFileTypeMappingSettings("SFL", "sfl")));
-            String base = project.getBasePath();
+            // Deliberately no server mappings. LSP4IJ's own producer decides that
+            // an existing configuration belongs to the current file by asking the
+            // configuration whether the file is debuggable — which its mappings
+            // answer for every .sfl file alike, so one configuration was reused
+            // for all of them and Run ran the wrong script. With no mappings that
+            // producer never claims a stale configuration, and
+            // SflRunConfigurationProducer does the matching properly, by file.
+            // Breakpoints are unaffected: they ask the factory, not the mappings.
+
+            // Two scripts are very often both called main.sfl, so the name says
+            // which project this one is, the way a multi-module build would.
             VirtualFile parent = file.getParent();
+            String owner = parent == null ? null : parent.getName();
+            if ("src".equals(owner) && parent.getParent() != null) {
+                owner = parent.getParent().getName();
+            }
+            dap.setName(owner == null || owner.isBlank()
+                    ? file.getName()
+                    : file.getName() + " (" + owner + ")");
+            String base = project.getBasePath();
             dap.setWorkingDirectory(base != null ? base : parent != null ? parent.getPath() : "");
         }
         return ok;

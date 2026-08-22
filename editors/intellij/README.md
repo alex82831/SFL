@@ -11,7 +11,8 @@ SFL 语言支持，**Community 与 Ultimate 都能用**（LSP 客户端走 Red H
 | Go to Definition / Implementation / Type Declaration / Find Usages | **平台原生动作与快捷键**（⌘B / ⌥⌘B / ⇧⌘B / ⌥F7）直接可用——插件实现了 `targetElementEvaluator`、`definitionsScopedSearch`、`typeDeclarationProvider`，内部走与 LSP4IJ 相同的请求通道；Go To 菜单里 LSP4IJ 自带的 "LSP Implementation(s)" 等条目是它对所有 LSP 语言的通用项，结果一致，用哪个都行（SFL 无类型层级，实现/类型声明同落定义处） |
 | 未定义变量标红 | 语义级诊断，含拼写建议，且认命名空间（`import "csv"` 之后的裸 `parse(...)` 会标红）；import 失败逐个报告且不遮蔽全文件 |
 | **新建项目向导**（New Project → SFL） | 生成与 `sfl build init` 相同的布局：build.sfl、src/、可选 tests/；可设版本号；src 与 tests 标为源码根 |
-| **运行/调试当前文件** | 行首 ▶、右键、以及工具栏 Current File 的 Run/Debug；SFL 脚本即程序，无需 main。断点、单步、变量走 `sfl dap`（LSP4IJ 的 DAP 客户端） |
+| **运行/调试当前文件**（配置按文件区分） | 行首 ▶、右键、以及工具栏 Current File 的 Run/Debug；SFL 脚本即程序，无需 main。断点、单步、变量走 `sfl dap`（LSP4IJ 的 DAP 客户端） |
+| **多个同名脚本** | 运行配置以「文件路径」判定归属并按 `main.sfl (项目名)` 命名——不会再出现打开另一个 main.sfl、Run 却跑了上一个的情况 |
 | **Build Project** | SFL 模块由插件接管（不进 JPS，不需要 JDK）：在模块根跑 `sfl build`，输出进 Build 工具窗 |
 | **SFL 工具窗口**（右侧边栏 SFL 图标） | 像 sbt/gradle 窗口：列出每个已链接项目的任务、源文件、依赖（全部来自 `sfl build describe`）；双击任务在 Run 控制台运行、双击源文件打开；工具栏：重载、链接/取消链接项目、运行任务、Build All（输出进 Build 窗）、展开/折叠、设置 |
 | **多项目** | 打开项目时自动发现内容根下（3 层内）的全部 `build.sfl` 并链接；也可手动链接任意目录；取消链接的目录不会被再次自动加入 |

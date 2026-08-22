@@ -53,6 +53,7 @@
         <runLineMarkerContributor language="SFL"
                                   implementationClass="com.fartech.sfl.ide.SflRunLineMarkerContributor"/>
         <projectTaskRunner implementation="com.fartech.sfl.ide.build.SflProjectTaskRunner"/>
+        <runConfigurationProducer implementation="com.fartech.sfl.ide.debug.SflRunConfigurationProducer"/>
         <!-- Native Go To: the platform's own Implementation(s) / Type Declaration
              actions and shortcuts, answered by the language server. -->
         <targetElementEvaluator language="SFL"
