@@ -8,7 +8,7 @@ import java.io.File
  * and the REPL, so definitions made in one place are visible in the others.
  */
 object Sfl:
-  val version: String = "0.8.2"
+  val version: String = "0.8.3"
 
   val globals: Globals = new Globals
 

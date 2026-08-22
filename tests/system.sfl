@@ -182,18 +182,20 @@ checkFails("execute rejects an array", () -> execute(["/bin/echo"]), "must be a 
 
 // passthrough runs a program on this process's own streams and answers with its
 // exit code. Nothing is captured, so only programs that print nothing belong here.
-check("passthrough returns a success code", passthrough("/bin/true"), 0)
-check("passthrough returns a failure code", passthrough("/bin/false"), 1)
+// /usr/bin rather than /bin for true and false: macOS ships neither in /bin,
+// and Linux reaches the same files through its merged /bin.
+check("passthrough returns a success code", passthrough("/usr/bin/true"), 0)
+check("passthrough returns a failure code", passthrough("/usr/bin/false"), 1)
 check("passthrough passes its arguments on", passthrough("/bin/sh", ["-c", "exit 7"]), 7)
 check("passthrough reports a signalled child as 128 plus the signal",
       passthrough("/bin/sh", ["-c", "kill -TERM $$"]), 143)
-check("passthrough with no arguments", passthrough("/bin/true", []), 0)
+check("passthrough with no arguments", passthrough("/usr/bin/true", []), 0)
 checkFails("passthrough names a program it cannot run",
            () -> passthrough("/no/such/program"), "cannot run")
 checkFails("passthrough wants strings in the args array",
-           () -> passthrough("/bin/true", [1]), "must be a string")
+           () -> passthrough("/usr/bin/true", [1]), "must be a string")
 checkFails("passthrough wants an array of arguments",
-           () -> passthrough("/bin/true", "x"), "must be an array")
+           () -> passthrough("/usr/bin/true", "x"), "must be an array")
 
 // print and printf write where they are told; the differential run compares the
 // bytes, so these have to be the same every time.

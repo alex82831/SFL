@@ -247,6 +247,26 @@ a compiled binary quotes and underlines the failing line exactly as the interpre
 
 ## Version history
 
+**0.8.3** — The unboxing release: the compiled *dynamic* side gets the treatment
+the statically-typed side already had. The intrinsic table grows from 16 to 47,
+so sqrt, the trig and hyperbolic family, the bit operations, clamp, lcm, the
+parsers and the bit-level float conversions all become instructions rather than
+calls; about eighty primitives are now known to return one machine type, so
+inference stays typed straight through them and `while (i < length(arr))` keeps
+its counter in a register. The six hottest of them grew unboxed twins that
+allocate nothing at all, ten type predicates open-code to a tag load, and a
+generic entry — which is every stdlib function — now keeps machine-typed locals
+in registers instead of a boxed slot array. The runtime and the interpreter
+intern every single-character string, so per-character loops stop allocating,
+and a `select` over four or more literals dispatches through a hash map.
+Measured on one machine: a float loop over sqrt 375 → 23 ms, the pure-SFL
+indexOf 173 → 40 ms, the stdlib's own sum 180 → 95 ms, base64Encode 310 → 162 ms.
+Twenty-two differential suites stay byte-identical throughout, which is the
+whole point. On the editor side, IntelliJ's Run now runs the file you are
+looking at: LSP4IJ recognised an existing run configuration by asking only
+whether the file was debuggable at all, so one configuration was reused for
+every script and Run kept running whichever file you opened first.
+
 **0.8.2** — The coverage release. Three gates now decide what is untested, and
 they decide it from the parsed program rather than from prose: every one of the
 367 builtins has to be called by a suite (read out of `sfl --ast`, so a name in a
