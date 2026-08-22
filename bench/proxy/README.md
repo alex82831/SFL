@@ -11,12 +11,18 @@
 | `hello.sfl` | 最小 httpd 服务器，用作无转发的基线 |
 | `nginx-backend.conf` | 上游后端：nginx 单 worker，端口 9001/9002 |
 | `nginx-proxy.conf` | 对照组：nginx 反向代理（上游 keepalive 池），端口 8002 |
-| `bench.sh` | 主压测矩阵：direct / sfl / ngx × 载荷 × 并发，CSV 输出 |
-| `analyze.py` | 汇总 `results/results.csv`，输出对比表与比值 |
+| `bench.sh` | 主压测矩阵：direct / sfl / sflfix / ngx × 载荷 × 并发，CSV 输出；被测代理每用例重启并记录挂死 |
+| `run-all.sh` | 整条流水线：矩阵 + GC 阈值扫描 + syscall 画像 + 长跑 |
+| `analyze.py` | 汇总 `results/results.csv`，输出对比表、挂死统计与比值 |
+| `soak.sh` | 持续负载存活测试（复现死锁 / 验证修复） |
+| `gc-sweep.sh` | GC 阈值扫描（需要插桩运行时） |
 | `gclog-trial.sh` | 单点试跑并汇总 GC 停顿日志（需要插桩运行时） |
 | `diag.sh` | 慢请求相位追踪 + 全进程停顿看门狗 |
 | `syscalls.sh` | strace 每请求系统调用画像（sfl vs nginx） |
 | `gc-instrument.patch` | 运行时 GC 观测插桩（env 门控，默认行为与原版一致） |
+| `runtime-fix.patch` | GC 停世界 vs malloc 死锁的修复原型（见评估报告第二节） |
+| `results-2026-08-22.csv` / `-summary.txt` | 本次评估的完整结果快照 |
+| `deadlock-backtrace.txt` | 死锁现场的 gdb 全线程栈（证据） |
 
 ## 运行
 

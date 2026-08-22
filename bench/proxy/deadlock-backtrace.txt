@@ -1,0 +1,201 @@
+[New LWP 27260]
+[New LWP 27259]
+[New LWP 27258]
+[New LWP 27257]
+[New LWP 27256]
+[New LWP 27255]
+[New LWP 27254]
+[New LWP 27253]
+[New LWP 27252]
+[New LWP 27251]
+[New LWP 27250]
+[New LWP 27249]
+[New LWP 27248]
+[New LWP 27247]
+[New LWP 27246]
+[New LWP 27245]
+[New LWP 27208]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+
+Thread 18 (Thread 0x7fcc2c9ff6c0 (LWP 27208) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc2c9fc4f0, nfds=1, timeout=129) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc3696 in sfl_p_accept ()
+#5  0x00005600d5fae42c in sfl_g_acceptLoop_160 ()
+#6  0x00005600d5fbf0f5 in sfl_call ()
+#7  0x00005600d5fce89b in task_run ()
+
+Thread 17 (Thread 0x7fcc291f86c0 (LWP 27245) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc291f4a48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 16 (Thread 0x7fcc2b1fc6c0 (LWP 27246) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb25c4b in __GI_mprotect () at ../sysdeps/unix/syscall-template.S:117
+#4  0x00007fcc2caac796 in grow_heap (diff=<optimized out>, h=0x7fcc1c000000) at ./malloc/arena.c:490
+#5  sysmalloc (av=0x7fcc1c000030, nb=4112) at ./malloc/malloc.c:2617
+#6  _int_malloc (av=av@entry=0x7fcc1c000030, bytes=bytes@entry=4096) at ./malloc/malloc.c:4481
+#7  0x00007fcc2caad714 in __GI___libc_malloc (bytes=4096) at ./malloc/malloc.c:3336
+
+Thread 15 (Thread 0x7fcbe3fff6c0 (LWP 27247) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcbe3ffba48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 14 (Thread 0x7fcc057fa6c0 (LWP 27248) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc057f6a48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 13 (Thread 0x7fcc2c1fe6c0 (LWP 27249) "rproxy"):
+#0  futex_wait (private=0, expected=2, futex_word=0x7fcc1c000030) at ../sysdeps/nptl/futex-internal.h:146
+#1  __GI___lll_lock_wait_private (futex=futex@entry=0x7fcc1c000030) at ./nptl/lowlevellock.c:34
+#2  0x00007fcc2caab519 in _int_free (av=0x7fcc1c000030, p=0x7fcc1c0039f0, have_lock=<optimized out>) at ./malloc/malloc.c:4644
+#3  0x00007fcc2caaddce in __GI___libc_free (mem=0x7fcc1c003a00) at ./malloc/malloc.c:3398
+#4  0x00005600d5fc1a5c in sfl_gc_collect ()
+#5  0x00005600d5fc1ffc in sfl_alloc ()
+#6  0x00005600d5fcf541 in sfl_str_utf8 ()
+#7  0x00005600d5fa53bf in sfl_g_exchange_89 ()
+
+Thread 12 (Thread 0x7fcc2b9fd6c0 (LWP 27250) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc2b9f8b38, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5fa4724 in sfl_g_exchange_89 ()
+#7  0x00005600d5fbf3ee in sfl_call0 ()
+
+Thread 11 (Thread 0x7fcc2a9fb6c0 (LWP 27251) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc2a9f6b38, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5fa4724 in sfl_g_exchange_89 ()
+#7  0x00005600d5fbf3ee in sfl_call0 ()
+
+Thread 10 (Thread 0x7fcc2a1fa6c0 (LWP 27252) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc2a1f5b38, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5fa4724 in sfl_g_exchange_89 ()
+#7  0x00005600d5fbf3ee in sfl_call0 ()
+
+Thread 9 (Thread 0x7fcc299f96c0 (LWP 27253) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc299f4b38, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5fa4724 in sfl_g_exchange_89 ()
+#7  0x00005600d5fbf3ee in sfl_call0 ()
+
+Thread 8 (Thread 0x7fcc289f76c0 (LWP 27254) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc289f3a48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 7 (Thread 0x7fcc07fff6c0 (LWP 27255) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc07ffba48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 6 (Thread 0x7fcc077fe6c0 (LWP 27256) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc077faa48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 5 (Thread 0x7fcc06ffd6c0 (LWP 27257) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc06ff8b38, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5fa4724 in sfl_g_exchange_89 ()
+#7  0x00005600d5fbf3ee in sfl_call0 ()
+
+Thread 4 (Thread 0x7fcc067fc6c0 (LWP 27258) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc067f7b38, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5fa4724 in sfl_g_exchange_89 ()
+#7  0x00005600d5fbf3ee in sfl_call0 ()
+
+Thread 3 (Thread 0x7fcc05ffb6c0 (LWP 27259) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc05ff7a48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 2 (Thread 0x7fcc04ff96c0 (LWP 27260) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2cb1b4fd in __GI___poll (fds=0x7fcc04ff5a48, nfds=1, timeout=30000) at ../sysdeps/unix/sysv/linux/poll.c:29
+#4  0x00005600d5fc5ea6 in line_fill ()
+#5  0x00005600d5fc309d in read_one_line ()
+#6  0x00005600d5f96b07 in sfl_g_h1Serve_59 ()
+#7  0x00005600d5fbf31e in sfl_call_code ()
+
+Thread 1 (Thread 0x7fcc2ccc1780 (LWP 27205) "rproxy"):
+#0  0x00007fcc2cb0e80b in __GI_sched_yield () at ../sysdeps/unix/syscall-template.S:120
+#1  0x00005600d5fc103f in stop_handler ()
+#2  <signal handler called>
+#3  0x00007fcc2ca98d6f in __futex_abstimed_wait_common64 (private=0, cancel=true, abstime=0x0, op=393, expected=0, futex_word=0x5600dee9e7ec) at ./nptl/futex-internal.c:57
+#4  __futex_abstimed_wait_common (cancel=true, private=0, abstime=0x0, clockid=0, expected=0, futex_word=0x5600dee9e7ec) at ./nptl/futex-internal.c:87
+#5  __GI___futex_abstimed_wait_cancelable64 (futex_word=futex_word@entry=0x5600dee9e7ec, expected=expected@entry=0, clockid=clockid@entry=0, abstime=abstime@entry=0x0, private=private@entry=0) at ./nptl/futex-internal.c:139
+#6  0x00007fcc2ca9b7ed in __pthread_cond_wait_common (abstime=0x0, clockid=0, mutex=0x5600dee9e798, cond=0x5600dee9e7c0) at ./nptl/pthread_cond_wait.c:503
+#7  ___pthread_cond_wait (cond=0x5600dee9e7c0, mutex=0x5600dee9e798) at ./nptl/pthread_cond_wait.c:627
+[Inferior 1 (process 27205) detached]
