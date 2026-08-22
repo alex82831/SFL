@@ -19,8 +19,8 @@
 | `gclog-trial.sh` | 单点试跑并汇总 GC 停顿日志（需要插桩运行时） |
 | `diag.sh` | 慢请求相位追踪 + 全进程停顿看门狗 |
 | `syscalls.sh` | strace 每请求系统调用画像（sfl vs nginx） |
-| `gc-instrument.patch` | 运行时 GC 观测插桩（env 门控，默认行为与原版一致） |
-| `runtime-fix.patch` | GC 停世界 vs malloc 死锁的修复原型（见评估报告第二节） |
+| `gc-instrument.patch` | 运行时 GC 观测插桩（env 门控，默认行为不变；基于已含死锁修复的 `runtime/sfl_gc.c`） |
+| `runtime-fix.patch` | 死锁修复的原始实验补丁（历史记录——修复已直接合入 `runtime/sfl_gc.c`，见评估报告第二节） |
 | `results-2026-08-22.csv` / `-summary.txt` | 本次评估的完整结果快照 |
 | `deadlock-backtrace.txt` | 死锁现场的 gdb 全线程栈（证据） |
 
@@ -40,14 +40,19 @@ CPU 绑定约定：后端 CPU0，被测代理 CPU1（或 1,2），wrk CPU3（dir
 
 ## GC 观测插桩
 
-`gc-instrument.patch` 给运行时 `sfl_gc.c` 增加两个环境变量（都不设置时行为与
-原版完全一致）：
+`gc-instrument.patch` 给 `runtime/sfl_gc.c`（已含死锁修复）增加两个环境
+变量（都不设置时行为不变）：
 
 - `SFL_GC_LOG=1` — 每次收集打一行 `GCLOG pause_us=… stop_us=… threads=…
   live_kb=… heap_kb=…` 到 stderr；
 - `SFL_GC_MIN_THRESHOLD=<bytes>` — 抬高触发收集的分配阈值下限（默认 2MB）。
 
-打法：对 `~/.cache/sfl/<ver>/src/sfl_gc.c` 应用补丁，
-`clang -std=gnu11 -O2 -c sfl_gc.c -o sfl_gc.o && ar r ../libsflrt.a sfl_gc.o`，
-再重新 `sfl -c` 编译被测程序。`rproxy` 另有 `RPROXY_TRACE=1` 打开慢请求
-相位日志与停顿看门狗。
+打法：对 `runtime/sfl_gc.c` 应用补丁后同步到编译器缓存
+`~/.cache/sfl/<ver>/src/sfl_gc.c`，
+`clang -std=gnu11 -D_GNU_SOURCE -O2 -c sfl_gc.c -o sfl_gc.o &&
+ar r ../libsflrt.a sfl_gc.o`，再重新 `sfl -c` 编译被测程序。`rproxy` 另有
+`RPROXY_TRACE=1` 打开慢请求相位日志与停顿看门狗。
+
+评估期间的死锁复现（`soak.sh rproxy 30 64` 几秒内挂死）针对的是修复前的
+运行时；在含修复的源码上需要先 checkout 修复提交之前的 `runtime/sfl_gc.c`
+才能复现。
