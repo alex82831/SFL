@@ -26,7 +26,7 @@ def fmt_us(v):
     return f"{v/1000:.1f}ms" if v >= 1000 else f"{v:.0f}us"
 
 print(f"{'case':<28}{'target':<10}{'rps':>10}{'p50':>9}{'p99':>9}{'p99.9':>9}{'cpu%':>6}{'rss':>8}  spread")
-order = ["direct", "sfl", "ngx"]
+order = ["direct", "sfl", "sflfix", "ngx"]
 cases = sorted({(k[2], int(k[3])) for k in best}, key=lambda c: (c[0], c[1]))
 for payload, conns in cases:
     for tgt in order:
@@ -43,13 +43,28 @@ for payload, conns in cases:
                   f"{r['proxy_cpu_pct']:>6}{r['proxy_rss_mb']:>7}M  {spr}")
     print()
 
+# Deadlock tally: how many measured cases left each proxy wedged.
+wedge = collections.Counter()
+total = collections.Counter()
+for r in rows:
+    if r["target"] in ("sfl", "sflfix"):
+        total[(r["target"], r["cpus"])] += 1
+        if r.get("wedged") == "1":
+            wedge[(r["target"], r["cpus"])] += 1
+print("== wedged (proxy dead after case) ==")
+for k in sorted(total):
+    print(f"  {k[0]}-{k[1]}cpu: {wedge[k]}/{total[k]} cases")
+print()
+
 # Ratios: sfl vs ngx at matching cpu counts.
-print("== SFL rproxy as a fraction of nginx (same CPUs, best-of-repeats) ==")
-for payload, conns in cases:
-    for cpus in ["1", "2"]:
-        s = best.get(("sfl", cpus, payload, str(conns)))
-        n = best.get(("ngx", cpus, payload, str(conns)))
-        if not s or not n: continue
-        sr, nr = num(s["rps"]) or 0, num(n["rps"]) or 1
-        print(f"  {payload} c={conns} {cpus}cpu: sfl {sr:>8.0f} / ngx {nr:>8.0f} = {sr/nr*100:5.1f}%"
-              f"   p99 {fmt_us(s['p99_us'])} vs {fmt_us(n['p99_us'])}")
+for who in ["sfl", "sflfix"]:
+    print(f"== {who} as a fraction of nginx (same CPUs, best-of-repeats) ==")
+    for payload, conns in cases:
+        for cpus in ["1", "2"]:
+            s = best.get((who, cpus, payload, str(conns)))
+            n = best.get(("ngx", cpus, payload, str(conns)))
+            if not s or not n: continue
+            sr, nr = num(s["rps"]) or 0, num(n["rps"]) or 1
+            print(f"  {payload} c={conns} {cpus}cpu: {who} {sr:>8.0f} / ngx {nr:>8.0f} = {sr/nr*100:5.1f}%"
+                  f"   p99 {fmt_us(s['p99_us'])} vs {fmt_us(n['p99_us'])}")
+    print()
