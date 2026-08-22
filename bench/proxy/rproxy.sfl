@@ -1,0 +1,268 @@
+// rproxy — an HTTP/1.1 reverse proxy with round-robin load balancing, built on
+// the httpd package. This is the benchmark subject: how fast can an SFL proxy
+// go when written the way the language wants?
+//
+//   ./rproxy <listenPort> <host:port> [host:port ...]
+//
+// What it does per request: pick a backend round-robin, take a pooled upstream
+// connection (or dial one), forward the request with hop-by-hop headers
+// stripped and x-forwarded-for appended, read the response (content-length,
+// chunked, or read-to-close), hand it back to httpd, and pool the connection
+// again when the upstream allows. A pooled connection that dies before its
+// status line is retried once on a fresh one.
+
+import "httpd"
+
+val CONNECT_MS = 3000
+val UPSTREAM_MS = 30000
+val POOL_MAX = 128        // idle connections kept per backend
+
+// ------------------------------------------------------------- configuration
+
+val argv = args()
+if (length(argv) < 2) {
+  eprintln("usage: rproxy <listenPort> <host:port> [host:port ...]")
+  exit(2)
+}
+val listenPort = parseInt(argv[0])
+val backends = []
+for (i in range(1, length(argv))) {
+  val spec = argv[i]
+  val ci = indexOf(spec, ":")
+  if (ci <= 0) {
+    eprintln("rproxy: bad backend '${spec}', want host:port")
+    exit(2)
+  }
+  push(backends, {host: substring(spec, 0, ci), port: parseInt(substring(spec, ci + 1))})
+}
+val nBackends = length(backends)
+
+// ------------------------------------------------------------ upstream pool
+
+val rr = atomic(-1)
+val pools = []
+for (b in backends) { push(pools, {lock: mutex(), conns: []}) }
+
+def poolTake(i) {
+  val p = pools[i]
+  withLock(p.lock, () -> if (length(p.conns) > 0) then pop(p.conns) else null)
+}
+
+def poolGive(i, c) {
+  val p = pools[i]
+  val kept = withLock(p.lock, () -> {
+    if (length(p.conns) < POOL_MAX) {
+      push(p.conns, c)
+      true
+    } else { false }
+  })
+  if (!kept) { try(() -> closeSocket(c), (e) -> null) }
+  null
+}
+
+def dial(i) {
+  val b = backends[i]
+  val c = connect(b.host, b.port, CONNECT_MS)
+  try(() -> socketNoDelay(c), (e) -> null)
+  c
+}
+
+// ------------------------------------------------------- request forwarding
+
+// Hop-by-hop headers never cross a proxy (RFC 9110 §7.6.1).
+def _hopByHop(name) =
+  name == "connection" || name == "keep-alive" || name == "proxy-connection" ||
+  name == "transfer-encoding" || name == "te" || name == "upgrade" ||
+  name == "proxy-authenticate" || name == "proxy-authorization" || name == "trailer"
+
+// The serialized request for one upstream: start line + filtered headers.
+def buildRequest(req, be) {
+  var head = "${req.method} ${req.target} HTTP/1.1\r\nhost: ${be.host}:${be.port}\r\n"
+  val hdrs = req.headers
+  for (k in keys(hdrs)) {
+    if (!_hopByHop(k) && k != "host" && k != "content-length" && k != "expect") {
+      head += "${k}: ${hdrs[k]}\r\n"
+    }
+  }
+  val xff = get(hdrs, "x-forwarded-for", null)
+  val client = req.remote
+  head += "x-forwarded-for: ${if (xff != null) then "${xff}, ${client}" else client}\r\n"
+  if (req.body != "") { head += "content-length: ${utf8Length(req.body)}\r\n" }
+  head + "\r\n" + req.body
+}
+
+// Reads upstream headers into a lowercased object; null on a broken stream.
+def readUpstreamHeaders(c) {
+  val out = {}
+  while (true) {
+    val line = socketReadLine(c, UPSTREAM_MS)
+    if (line == null) { return null }
+    if (line == "") { return out }
+    val ci = indexOf(line, ":")
+    if (ci > 0) {
+      val name = toLower(trim(substring(line, 0, ci)))
+      val value = trim(substring(line, ci + 1))
+      if (contains(out, name)) { out[name] = "${out[name]}, ${value}" }
+      else { out[name] = value }
+    }
+  }
+}
+
+// Reads exactly n bytes into buf; false when the stream dies first.
+def readN(c, buf, n) {
+  var left = n
+  while (left > 0) {
+    val got = socketReadToBuf(c, buf, min(left, 65536), UPSTREAM_MS)
+    if (got == null || got == 0) { return false }
+    left -= got
+  }
+  true
+}
+
+// De-chunks an upstream body into buf; false on any framing problem.
+def readChunked(c, buf) {
+  while (true) {
+    val sizeLine = socketReadLine(c, UPSTREAM_MS)
+    if (sizeLine == null) { return false }
+    val semi = indexOf(sizeLine, ";")
+    val hexs = trim(if (semi >= 0) then substring(sizeLine, 0, semi) else sizeLine)
+    val n = try(() -> parseInt(hexs, 16), (e) -> -1)
+    if (n == null || n < 0) { return false }
+    if (n == 0) { break }
+    if (!readN(c, buf, n)) { return false }
+    if (socketReadLine(c, UPSTREAM_MS) == null) { return false }
+  }
+  while (true) {
+    val t = socketReadLine(c, UPSTREAM_MS)
+    if (t == null) { return false }
+    if (t == "") { return true }
+  }
+}
+
+// One request over one upstream connection. Returns
+// {status, headers, body, reuse} or null when the connection was no good.
+def exchange(c, wire, isHead) {
+  socketWrite(c, wire)
+  val statusLine = socketReadLine(c, UPSTREAM_MS)
+  if (statusLine == null || !startsWith(statusLine, "HTTP/1.")) { return null }
+  val sp1 = indexOf(statusLine, " ")
+  if (sp1 < 0) { return null }
+  val rest = substring(statusLine, sp1 + 1)
+  val sp2 = indexOf(rest, " ")
+  val codeS = if (sp2 < 0) then rest else substring(rest, 0, sp2)
+  val status = try(() -> parseInt(codeS), (e) -> null)
+  if (status == null) { return null }
+  val http11 = startsWith(statusLine, "HTTP/1.1")
+
+  val headers = readUpstreamHeaders(c)
+  if (headers == null) { return null }
+
+  var body = ""
+  var reuse = http11 && !contains(toLower(get(headers, "connection", "")), "close")
+  val noBody = isHead || status == 204 || status == 304 || (status >= 100 && status <= 199)
+  if (!noBody) {
+    val te = toLower(get(headers, "transfer-encoding", ""))
+    val cl = get(headers, "content-length", null)
+    if (contains(te, "chunked")) {
+      val buf = bufNew()
+      if (!readChunked(c, buf)) { bufClear(buf); return null }
+      body = bufString(buf)
+      bufClear(buf)
+    } else if (cl != null) {
+      val n = try(() -> parseInt(trim(split(cl, ",")[0])), (e) -> null)
+      if (n == null || n < 0) { return null }
+      if (n > 0) {
+        val buf = bufNew()
+        if (!readN(c, buf, n)) { bufClear(buf); return null }
+        body = bufString(buf)
+        bufClear(buf)
+      }
+    } else {
+      // No framing: the body runs to connection close.
+      val buf = bufNew()
+      while (true) {
+        val got = socketReadToBuf(c, buf, 65536, UPSTREAM_MS)
+        if (got == null || got == 0) { break }
+      }
+      body = bufString(buf)
+      bufClear(buf)
+      reuse = false
+    }
+  }
+
+  // Response headers the proxy owns are dropped; the rest pass through.
+  val out = {}
+  for (k in keys(headers)) {
+    if (!_hopByHop(k) && k != "content-length") { out[k] = headers[k] }
+  }
+  {status: status, headers: out, body: body, reuse: reuse}
+}
+
+// --------------------------------------------------------------- the handler
+
+// RPROXY_TRACE=1: per-request phase timing for requests slower than 50ms, a
+// dial counter, and a watchdog that reports whole-process stalls.
+val TRACE = getEnv("RPROXY_TRACE") != null
+val dials = atomic(0)
+
+def handle(req) {
+  val t0 = if (TRACE) then timeNanos() else 0
+  val i = atomicAdd(rr, 1) % nBackends
+  val wire = buildRequest(req, backends[i])
+  val isHead = req.method == "HEAD"
+
+  // A pooled connection may have died while idle: one retry on a fresh dial.
+  var attempt = 0
+  var pooled = poolTake(i)
+  while (attempt < 2) {
+    attempt += 1
+    val fresh = pooled == null
+    val t1 = if (TRACE) then timeNanos() else 0
+    val c = if (fresh) then try(() -> dial(i), (e) -> null) else pooled
+    if (TRACE && fresh) { atomicAdd(dials, 1) }
+    pooled = null
+    if (c == null) { return httpd.respond(502, {}, "bad gateway\n") }
+    val t2 = if (TRACE) then timeNanos() else 0
+    val r = try(() -> exchange(c, wire, isHead), (e) -> null)
+    if (r != null) {
+      if (TRACE) {
+        val t3 = timeNanos()
+        if (t3 - t0 > 50000000) {
+          eprintln("SLOW total=${(t3 - t0) / 1000000}ms pre=${(t1 - t0) / 1000000}ms " +
+            "dial=${(t2 - t1) / 1000000}ms exch=${(t3 - t2) / 1000000}ms fresh=${fresh} attempt=${attempt}")
+        }
+      }
+      if (r.reuse) { poolGive(i, c) } else { try(() -> closeSocket(c), (e) -> null) }
+      return httpd.respond(r.status, r.headers, r.body)
+    }
+    try(() -> closeSocket(c), (e) -> null)
+    if (fresh) { return httpd.respond(502, {}, "bad gateway\n") }
+    // else: the pooled connection was stale — loop once more with a fresh dial
+  }
+  httpd.respond(502, {}, "bad gateway\n")
+}
+
+if (TRACE) {
+  spawnDaemon(() -> {
+    var last = timeMillis()
+    while (true) {
+      sleep(100)
+      val now = timeMillis()
+      if (now - last > 400) { eprintln("STALL ${now - last}ms dials=${atomicGet(dials)}") }
+      last = now
+    }
+  })
+}
+
+// ------------------------------------------------------------------- launch
+
+val srv = httpd.server({
+  port: listenPort,
+  backlog: 4096,
+  http2: false,           // the front speaks plain HTTP/1.1, like the nginx baseline
+  maxConnections: 8192,
+  maxRequests: 1000000,
+  handler: handle
+})
+println("rproxy on :${listenPort} -> ${jsonStringify(argv)}")
+srv.listen()

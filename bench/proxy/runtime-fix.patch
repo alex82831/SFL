@@ -1,0 +1,153 @@
+--- sfl_gc.c.instr	2026-08-22 14:26:26.169416423 +0000
++++ sfl_gc.c.fixed	2026-08-22 14:27:38.413557291 +0000
+@@ -208,6 +208,65 @@
+ 
+ SflThread *sfl_thread_self(void) { return self_thread; }
+ 
++/* ---- deadlock fix ---------------------------------------------------------
++ * The stopped world must never touch the C allocator: a thread parked by the
++ * stop signal can be holding a malloc arena lock, and the collector calling
++ * free()/realloc() on that arena then deadlocks the process (seen in the
++ * field: sweep's free() vs a thread parked inside sysmalloc). So while the
++ * world is stopped, side-buffer frees are deferred into an mmap-backed list
++ * drained after restart, and the mark stack grows by mmap, not realloc.
++ * Parked threads also wait on a futex instead of spinning sched_yield, so a
++ * collection no longer burns a core per parked thread.
++ */
++#include <sys/mman.h>
++#include <sys/syscall.h>
++#include <linux/futex.h>
++#include <limits.h>
++#include <unistd.h>
++
++static void futex_wait_on(volatile int *addr, int val) {
++  syscall(SYS_futex, (int *)addr, FUTEX_WAIT_PRIVATE, val, NULL, NULL, 0);
++}
++static void futex_wake_all(volatile int *addr) {
++  syscall(SYS_futex, (int *)addr, FUTEX_WAKE_PRIVATE, INT_MAX, NULL, NULL, 0);
++}
++
++static void *gc_mmap(size_t bytes) {
++  void *p = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++  return p == MAP_FAILED ? NULL : p;
++}
++
++static void **defer_frees;
++static size_t defer_len, defer_cap;
++static int defer_active;
++
++static void gc_defer_free(void *p) {
++  if (p == NULL) return;
++  if (defer_len == defer_cap) {
++    size_t ncap = defer_cap ? defer_cap * 2 : 8192;
++    void **nl = (void **)gc_mmap(ncap * sizeof(void *));
++    if (nl == NULL) { free(p); return; } /* cannot grow: accept the small risk */
++    if (defer_frees != NULL) {
++      memcpy(nl, defer_frees, defer_len * sizeof(void *));
++      munmap(defer_frees, defer_cap * sizeof(void *));
++    }
++    defer_frees = nl;
++    defer_cap = ncap;
++  }
++  defer_frees[defer_len++] = p;
++}
++
++static void gc_side_free(void *p) {
++  if (defer_active) gc_defer_free(p);
++  else free(p);
++}
++
++static void gc_drain_defer(void) {
++  for (size_t i = 0; i < defer_len; i++) free(defer_frees[i]);
++  defer_len = 0;
++}
++/* ------------------------------------------------------------------------- */
++
+ /* Parks this thread until the collector is done with it. */
+ static void stop_handler(int sig) {
+   (void)sig;
+@@ -218,7 +277,8 @@
+   memcpy(t->regs, here, sizeof here);
+   t->stack_top = (void *)&here;
+   __atomic_store_n(&t->parked, 1, __ATOMIC_SEQ_CST);
+-  while (__atomic_load_n(&world_stopped, __ATOMIC_SEQ_CST)) sched_yield();
++  while (__atomic_load_n(&world_stopped, __ATOMIC_SEQ_CST))
++    futex_wait_on(&world_stopped, 1);
+   __atomic_store_n(&t->parked, 0, __ATOMIC_SEQ_CST);
+ }
+ 
+@@ -287,6 +347,7 @@
+ static void start_the_world(void) {
+   if (!multithreaded) return;
+   __atomic_store_n(&world_stopped, 0, __ATOMIC_SEQ_CST);
++  futex_wake_all(&world_stopped);
+   pthread_mutex_unlock(&threads_lock);
+ }
+ 
+@@ -344,8 +405,17 @@
+ 
+ static void mark_push(SflVal v) {
+   if (mark_len == mark_cap) {
+-    mark_cap = mark_cap ? mark_cap * 2 : 1024;
+-    mark_stack = (SflVal *)realloc(mark_stack, (size_t)mark_cap * sizeof(SflVal));
++    /* mmap growth: the mark stack grows while the world is stopped, where the
++       C allocator is off limits (see the deadlock note above). */
++    int64_t ncap = mark_cap ? mark_cap * 2 : 1024;
++    SflVal *ns = (SflVal *)gc_mmap((size_t)ncap * sizeof(SflVal));
++    if (ns == NULL) { fputs("sfl: out of memory\n", stderr); exit(70); }
++    if (mark_stack != NULL) {
++      memcpy(ns, mark_stack, (size_t)mark_len * sizeof(SflVal));
++      munmap(mark_stack, (size_t)mark_cap * sizeof(SflVal));
++    }
++    mark_cap = ncap;
++    mark_stack = ns;
+     if (!mark_stack) { fputs("sfl: out of memory\n", stderr); exit(70); }
+   }
+   mark_stack[mark_len++] = v;
+@@ -434,21 +504,21 @@
+ static void finalize(SflVal v) {
+   switch (v->tag) {
+     case SFL_STR:
+-      sfl_raw_free(v->u.s.chars);
++      gc_side_free(v->u.s.chars);
+       break;
+     case SFL_ARR:
+-      sfl_raw_free(v->u.a.items);
++      gc_side_free(v->u.a.items);
+       break;
+     case SFL_TUPLE:
+-      sfl_raw_free(v->u.t.items);
++      gc_side_free(v->u.t.items);
+       break;
+     case SFL_OBJ:
+-      sfl_raw_free(v->u.o.keys);
+-      sfl_raw_free(v->u.o.vals);
+-      sfl_raw_free(v->u.o.index);
++      gc_side_free(v->u.o.keys);
++      gc_side_free(v->u.o.vals);
++      gc_side_free(v->u.o.index);
+       break;
+     case SFL_FRAME:
+-      sfl_raw_free(v->u.fr.slots);
++      gc_side_free(v->u.fr.slots);
+       break;
+     default:
+       break;
+@@ -521,6 +591,7 @@
+   setjmp(regs);
+ 
+   stop_the_world();
++  defer_active = 1; /* from here to restart, the C allocator is off limits */
+ 
+   int64_t t1 = bench_log ? bench_ns() : 0;
+ 
+@@ -554,7 +625,9 @@
+             (long long)((cells_total - cells_free) * (int64_t)CELL_SIZE / 1024),
+             (long long)(cells_total * (int64_t)CELL_SIZE / 1024));
+   }
++  defer_active = 0;
+   start_the_world();
++  gc_drain_defer(); /* now other threads run again; arena holders can finish */
+   gc_count++;
+ 
+   /* Collect again once the program has allocated about as much as it now holds,

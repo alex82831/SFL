@@ -1,0 +1,68 @@
+--- sfl_gc.c.orig	2026-08-22 14:06:58.318743154 +0000
++++ sfl_gc.c.instr	2026-08-22 14:26:26.169416423 +0000
+@@ -492,16 +492,38 @@
+   else scan_conservative(hi, lo);
+ }
+ 
++/* ---- benchmark instrumentation, env-gated, inert when unset ------------- */
++#include <time.h>
++#include <stdlib.h>
++static int bench_log = -1;          /* SFL_GC_LOG=1 -> one line per collection */
++static int64_t bench_floor = -1;    /* SFL_GC_MIN_THRESHOLD=<bytes> */
++static int64_t bench_ns(void) {
++  struct timespec ts;
++  clock_gettime(CLOCK_MONOTONIC, &ts);
++  return ts.tv_sec * 1000000000LL + ts.tv_nsec;
++}
++/* ------------------------------------------------------------------------- */
++
+ void sfl_gc_collect(void) {
+   if (gc_disabled) return;
+   if (stack_bottom == NULL) return; /* before sfl_init: nothing is reachable yet */
+ 
++  if (bench_log < 0) {
++    const char *e = getenv("SFL_GC_LOG");
++    bench_log = (e && *e && *e != '0') ? 1 : 0;
++    e = getenv("SFL_GC_MIN_THRESHOLD");
++    bench_floor = e ? atoll(e) : 0;
++  }
++  int64_t t0 = bench_log ? bench_ns() : 0;
++
+   /* Force callee-saved registers onto the stack so the scan below sees them. */
+   jmp_buf regs;
+   setjmp(regs);
+ 
+   stop_the_world();
+ 
++  int64_t t1 = bench_log ? bench_ns() : 0;
++
+   void *mine = self_thread ? self_thread->stack_bottom : stack_bottom;
+   scan_stack((void *)&regs, mine);
+   scan_conservative(&regs, (char *)&regs + sizeof(regs));
+@@ -523,13 +545,25 @@
+   drain_marks();
+ 
+   sweep();
++  if (bench_log) {
++    int nthreads = 0;
++    for (SflThread *t = thread_list; t; t = t->next) nthreads++;
++    int64_t t2 = bench_ns();
++    fprintf(stderr, "GCLOG pause_us=%lld stop_us=%lld threads=%d live_kb=%lld heap_kb=%lld\n",
++            (long long)((t2 - t0) / 1000), (long long)((t1 - t0) / 1000), nthreads,
++            (long long)((cells_total - cells_free) * (int64_t)CELL_SIZE / 1024),
++            (long long)(cells_total * (int64_t)CELL_SIZE / 1024));
++  }
+   start_the_world();
+   gc_count++;
+ 
+   /* Collect again once the program has allocated about as much as it now holds,
+      so the cost stays proportional to how much garbage is actually produced. */
+   int64_t live = (cells_total - cells_free) * (int64_t)CELL_SIZE;
+-  gc_threshold = live > 2 * 1024 * 1024 ? live : 2 * 1024 * 1024;
++  {
++    int64_t floor_ = bench_floor > 2 * 1024 * 1024 ? bench_floor : 2 * 1024 * 1024;
++    gc_threshold = live > floor_ ? live : floor_;
++  }
+   bytes_since_gc = 0;
+ }
+ 

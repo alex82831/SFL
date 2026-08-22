@@ -1,0 +1,15 @@
+// Minimal httpd server used for smoke-testing and as the plaintext baseline.
+import "httpd"
+
+val port = if (length(args()) > 0) then parseInt(args()[0]) else 8080
+
+val srv = httpd.server({
+  port: port,
+  http2: false,
+  maxConnections: 4096,
+  handler: httpd.routes([
+    httpd.GET("/", (req) -> httpd.respondText(200, "hello"))
+  ])
+})
+println("hello server on ${port}")
+srv.listen()
